@@ -1,0 +1,21 @@
+[project]
+name = "simutme"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "OnlyBelter",email = "onlybelter@outlook.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas (>=2.3.3,<3.0.0)",
+    "scienceplots (>=2.2.0,<3.0.0)",
+    "scanpy (>=1.11.5,<2.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "simutme", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
