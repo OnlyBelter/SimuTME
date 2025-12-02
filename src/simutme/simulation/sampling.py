@@ -243,3 +243,120 @@ def sparse_random_sampling(n_samples: int,
     index = [f"{sample_prefix}_{i + 1}" for i in range(n_samples)]
     df = pd.DataFrame(all_samples, index=index, columns=cell_types)
     return df.round(4)
+
+
+def generate_cell_fraction(sampling_method: Union[str, List[str]],
+                           n_cell_frac: int,
+                           cell_type2subtype: Dict[str, List[str]],
+                           sample_prefix: str = 'sample',
+                           cell_prop_prior: Optional[Dict] = None) -> pd.DataFrame:
+    """
+    Generate cell proportions for simulated bulk GEPs using various sampling strategies.
+
+    This function supports generating cell fractions using a single method, a specific list of methods,
+    or a 'mixed' mode that utilizes all available strategies. When multiple methods are used,
+    the total number of samples (`n_cell_frac`) is distributed evenly among them.
+
+    :param sampling_method: The strategy to generate cell fractions.
+        - str: One of 'segment', 'seg_random', 'sparse', 'random', 'dirichlet'.
+        - str: 'mixed' to use all available methods.
+        - list: A list of specific methods, e.g., ['segment', 'dirichlet'].
+    :param n_cell_frac: The total number of samples (cell fractions) to generate.
+    :param cell_type2subtype: A dictionary mapping major cell types to their subtypes.
+        Used to flatten the cell type list. e.g., {'T cells': ['CD4', 'CD8'], ...}
+    :param sample_prefix: The prefix for the sample indices in the returned DataFrame.
+    :param cell_prop_prior: (Optional) A dictionary defining prior proportions for specific cell types.
+        Only used by the 'segment' method.
+
+    :return: pd.DataFrame
+        A DataFrame where rows are samples and columns are cell types.
+        Values represent the proportion of each cell type (summing to 1.0 per row).
+    """
+
+    # 1. Flatten cell types (handle subtypes)
+    cell_type_with_subtype = []
+    for k, v in cell_type2subtype.items():
+        if len(v) == 1 and v[0] == k:
+            cell_type_with_subtype.append(k)
+        else:
+            cell_type_with_subtype.extend(v)
+
+    # 2. Determine which methods to use
+    valid_methods = ['segment', 'seg_random', 'sparse', 'random', 'dirichlet']
+    methods_to_use = []
+
+    if isinstance(sampling_method, str):
+        if sampling_method == 'mixed':
+            methods_to_use = valid_methods
+        elif sampling_method in valid_methods:
+            methods_to_use = [sampling_method]
+        else:
+            raise ValueError(f"Invalid sampling_method: '{sampling_method}'. "
+                             f"Supported: {valid_methods} or 'mixed'.")
+    elif isinstance(sampling_method, list):
+        # Validate list inputs
+        for m in sampling_method:
+            if m not in valid_methods:
+                raise ValueError(f"Invalid method in list: '{m}'. Supported: {valid_methods}")
+        methods_to_use = sampling_method
+    else:
+        raise TypeError("sampling_method must be a string or a list of strings.")
+
+    # 3. Distribute n_cell_frac evenly among selected methods
+    n_methods = len(methods_to_use)
+    base_n = n_cell_frac // n_methods
+    remainder = n_cell_frac % n_methods
+
+    # Create a list of sample counts: [base+1, base+1, base, base...] to handle remainder
+    n_samples_per_method = [base_n + 1 if i < remainder else base_n for i in range(n_methods)]
+
+    generated_dfs = []
+
+    # 4. Loop through methods and generate data
+    for method, n_count in zip(methods_to_use, n_samples_per_method):
+        if n_count == 0:
+            continue
+
+        # Update prefix to distinguish samples from different methods (optional but recommended)
+        # e.g., sample_segment_0, sample_dirichlet_10
+        current_prefix = f"{sample_prefix}_{method}"
+
+        df = None
+        if method == 'segment':
+            df = segment_sampling(n_samples=n_count,
+                                  max_value=10000,
+                                  sample_prefix=current_prefix,
+                                  cell_types=cell_type_with_subtype,
+                                  cell_prop_prior=cell_prop_prior)
+
+        elif method == 'seg_random':
+            df = seg_random_sampling(n_samples=n_count,
+                                     sample_prefix=current_prefix,
+                                     cell_types=cell_type_with_subtype)
+
+        elif method == 'sparse':
+            df = sparse_random_sampling(n_samples=n_count,
+                                        cell_types=cell_type_with_subtype,
+                                        sample_prefix=current_prefix)
+
+        elif method == 'random':
+            df = uni_random_sampling(n_samples=n_count,
+                                     cell_types=cell_type_with_subtype,
+                                     sample_prefix=current_prefix)
+
+        elif method == 'dirichlet':
+            df = dirichlet_sampling(n_samples=n_count,
+                                    cell_types=cell_type_with_subtype,
+                                    sample_prefix=current_prefix)
+
+        if df is not None:
+            generated_dfs.append(df)
+
+    # 5. Concatenate results
+    if not generated_dfs:
+        return pd.DataFrame(columns=cell_type_with_subtype)
+
+    final_df = pd.concat(generated_dfs)
+
+    # Ensure the order matches the requested n_cell_frac (though concat usually preserves order)
+    return final_df

@@ -1,8 +1,59 @@
-# SimuTME
+# SimuTME: Bulk RNA-seq Simulator for Tumor Microenvironment
 
 **SimuTME** is a Python package designed to simulate bulk RNA-seq data specifically for the **Tumor Microenvironment (TME)**. It facilitates the benchmarking, validation, and training of cellular deconvolution methods by generating high-quality synthetic datasets with known ground-truth cell proportions.
 
 SimuTME addresses the complexity of TME data—such as high tumor purity, sparse immune cell infiltration, and compositional biases—by providing diverse and mathematically rigorous sampling strategies.
+
+---
+
+## 🚀 Streamlined Simulation Workflow
+
+SimuTME offers a unified, configuration-driven workflow that handles the entire simulation pipeline in three automated steps:
+1.  **Generation:** Synthesizing bulk GEPs from single-cell data using specific sampling strategies.
+2.  **Filtering:** Removing low-quality genes based on correlation with TCGA data and quantile filtering.
+3.  **Validation:** Automatically performing PCA to compare the simulated manifold against real TCGA bulk data.
+
+### 1. Configuration (`config_example.yaml`)
+Manage all paths, biological constants, and dataset parameters in a single YAML file.
+
+```yaml
+# config.yaml
+paths:
+  simu_bulk_dir: "./datasets/simulated_bulk"
+  tcga_merged_tpm_file_path: "./data/tcga_tpm.csv"
+  # ... other paths
+
+parameters:
+  gene_quantile_range: [0.005, 0.5, 0.995]
+  pca_n_components: 0.9
+
+datasets:
+  # Define multiple datasets to generate in one batch
+  Mixed_N10K_segment:
+    n_samples: 8000
+    sampling_method: "segment"  # Uses the 'segment' strategy
+    filtering: true
+```
+
+### 2. Execution
+Run the entire pipeline with a few lines of Python code.
+
+```python
+from simutme import SimuConfig, run_bulk_simulation
+import yaml
+
+# 1. Load Configuration
+config = SimuConfig.from_yaml('config.yaml')
+
+# 2. Load Dataset Definitions
+with open('config.yaml', 'r') as f:
+    datasets_to_run = yaml.safe_load(f).get('datasets', {})
+
+# 3. Run Workflow
+for dataset_name, params in datasets_to_run.items():
+    # Automatically handles Generation -> Filtering -> PCA Plotting
+    run_bulk_simulation(dataset_name, params, config)
+```
 
 ## 🧬 Data Simulation & Sampling Strategies
 
@@ -32,6 +83,8 @@ Tumor biopsies often consist largely of malignant cells with a smaller fraction 
 2.  Distributing the remaining fraction (e.g., 20%) randomly among the background cell types.
 
 ### 4. Segment Sampling (`segment_sampling`)
+**Source:** Adapted from *Xiong et al. (2024)* (DeSide).
+
 Uses an iterative "stick-breaking" approach to generate distributions with high variance. This creates skewed datasets where cell proportions decay rapidly, testing the model's ability to detect cell types across a wide dynamic range.
 
 ### 5. Random (Dense) Sampling (`random_sampling`)

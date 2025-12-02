@@ -1,0 +1,74 @@
+# --- File Paths ---
+paths:
+  simu_bulk_dir: "./datasets/simulated_bulk_cell_dataset"
+  sct_dataset_file_path: "path/to/simu_bulk_exp_SCT_N10K_S1_16sct.h5ad"
+  tcga2cancer_type_file_path: "path/to/tcga_sample_id2cancer_type.csv"
+  tcga_merged_tpm_file_path: "path/to/merged_tpm.csv"
+  high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"
+
+# --- Biological Constants ---
+constants:
+  # List of single-cell RNA-seq datasets
+  sc_dataset_ids:
+    - "hnscc_cillo_01"
+    - "pdac_pengj_02"
+    - "hnscc_puram_03"
+    - "pdac_steele_04"
+    - "luad_kim_05"
+    - "nsclc_guo_06"
+    - "pan_cancer_07"
+    - "prad_cheng_08"
+    - "prad_dong_09"
+    - "hcc_sun_10"
+    - "gbm_neftel_11"
+    - "gbm_abdelfattah_12"
+
+  # Cell types and their corresponding subtypes
+  cell_type2subtypes:
+    B Cells: ["Non-plasma B cells", "Plasma B cells"]
+    CD4 T: ["CD4 T"]
+    CD8 T: ["CD8 T (GZMK high)", "CD8 T effector"]
+    DC: ["DC"]
+    Endothelial Cells: ["Endothelial Cells"]
+    Cancer Cells: ["Cancer Cells"]
+    Fibroblasts: ["CAFs", "Myofibroblasts"]
+    Macrophages: ["Macrophages"]
+    Mast Cells: ["Mast Cells"]
+    NK: ["NK"]
+    Neutrophils: ["Neutrophils"]
+    Double-neg-like T: ["Double-neg-like T"]
+    Monocytes: ["Monocytes"]
+
+  # Coefficient to correct total RNA abundance
+  total_rna_coefficient:
+    B Cells: 1.0
+    CD4 T: 1.0
+    CD8 T: 1.0
+    DC: 1.0
+    Endothelial Cells: 1.0
+    Cancer Cells: 1.0
+    Fibroblasts: 1.0
+    Macrophages: 1.0
+    Mast Cells: 1.0
+    NK: 1.0
+    Neutrophils: 1.0
+    Double-neg-like T: 1.0
+    Monocytes: 1.0
+
+# --- Global Simulation Parameters ---
+parameters:
+  gene_quantile_range: [0.005, 0.5, 0.995]
+  gep_filtering_quantile: [0.0, 0.95]
+  pca_n_components: 0.9
+  gene_list_type: "high_corr_gene_and_quantile_range"
+  n_base: 100
+
+# --- Datasets to Generate ---
+# Define specific parameters for each dataset here
+datasets:
+  Mixed_N10K_segment:
+    n_samples: 8000
+    sampling_method: "segment"
+    filtering: true
+    filtering_ref_types: null
+    cell_prop_prior: null
