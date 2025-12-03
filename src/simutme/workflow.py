@@ -2,6 +2,7 @@ import os
 import yaml
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from joblib import dump, load
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
@@ -11,7 +12,7 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 # Assuming these are existing imports in your project
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
-from .simulation import BulkGEPGenerator
+from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator
 
 
 # --- 1. Configuration Management ---
@@ -19,16 +20,18 @@ from .simulation import BulkGEPGenerator
 class SimuConfig:
     """Stores all simulation-related paths and global parameters."""
     # Path configuration
-    simu_bulk_dir: str
-    sct_dataset_file_path: str
-    tcga2cancer_type_file_path: str
-    tcga_merged_tpm_file_path: str
-    high_corr_gene_file_path: str
+    simu_bulk_dir: str | Path
+    sct_dataset_file_path: str | Path
+    tcga2cancer_type_file_path: str | Path
+    tcga_merged_tpm_file_path: str | Path
+    high_corr_gene_file_path: str | Path
+    merged_sc_dataset_file_path: str | Path
 
     # Core constants
     sc_dataset_ids: List[str]
-    cell_type2subtype: Dict[str, List[str]]
+    cell_type2subtypes: Dict[str, List[str]]
     total_rna_coefficient: Dict[str, float]
+    n_base: int
 
     # Filtering parameters
     gene_quantile_range: List[float]
@@ -89,11 +92,31 @@ def run_bulk_simulation(dataset_name: str,
     print(f"\n=== Starting Simulation for {dataset_name} ===")
 
     # 1. Initialize generator
+    simu_bulk_dir = Path(config.simu_bulk_dir)
+    n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
+    sc_dataset_dir = simu_bulk_dir / f'generated_sc_dataset_{n_sc_datasets}ds_n_base{config.n_base}_all_subtypes'
+    if params.get('dataset_type', 'mixed').lower() == 'sct':  # single-cell-type dataset
+        print(f"   > Using Single-Cell-Type Dataset Generation for {dataset_name}")
+        sct_generator = SingleCellTypeGEPGenerator(
+            simu_bulk_dir=sc_dataset_dir,
+            cell_type2subtype=config.cell_type2subtypes,
+            sc_dataset_ids=config.sc_dataset_ids,
+            bulk_dataset_name=dataset_name,
+            merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
+            zero_ratio_threshold=params.get('zero_ratio_threshold', 0.97),
+            cell_type_col_name=params.get('cell_type_col', 'cell_type'),
+            subtype_col_name=params.get('cell_subtype_col', 'cell_subtype'),
+        )
+        sct_generator.generate_samples(n_sample_each_cell_type=params['n_samples'],
+                                       sample_type='positive',
+                                       sep_by_patient=False,
+                                       n_base_for_positive_samples=config.n_base)
+
     bulk_generator = BulkGEPGenerator(
         simu_bulk_dir=config.simu_bulk_dir,
-        merged_sc_dataset_file_path=None,
-        cell_type2subtype=params.get('cell_type2subtype', config.cell_type2subtype),
-        sc_dataset_ids=params['sc_dataset_ids'],
+        merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
+        cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
+        sc_dataset_ids=config.sc_dataset_ids,
         bulk_dataset_name=dataset_name,
         sct_dataset_file_path=config.sct_dataset_file_path,
         check_basic_info=False,

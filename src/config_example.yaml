@@ -5,6 +5,7 @@ paths:
   tcga2cancer_type_file_path: "path/to/tcga_sample_id2cancer_type.csv"
   tcga_merged_tpm_file_path: "path/to/merged_tpm.csv"
   high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"
+  merged_sc_dataset_file_path: "path/to/merged_sc_dataset.h5ad"
 
 # --- Biological Constants ---
 constants:
@@ -66,9 +67,13 @@ parameters:
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here
 datasets:
-  Mixed_N10K_segment:
-    n_samples: 8000
-    sampling_method: "segment"
-    filtering: true
+  Mixed_N100_segment:  # Dataset name
+    n_samples: 100  # Number of bulk samples to simulate for each cell type
+    sampling_method: "segment"  # Sampling method: "random" or "segment"
+    filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
     filtering_ref_types: null
     cell_prop_prior: null
+    dataset_type: "Mixed"  # Type of dataset: "SCT" or "Mixed"
+    zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
+    cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
+    cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

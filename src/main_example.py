@@ -4,7 +4,7 @@ from simutme import run_bulk_simulation, SimuConfig
 
 if __name__ == '__main__':
     # 1. Load Configuration
-    config_path = 'config.yaml'
+    config_path = 'config_example.yaml'
     config = SimuConfig.from_yaml(config_path)
 
     # 2. Load Dataset Definitions from YAML

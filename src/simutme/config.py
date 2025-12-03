@@ -1,6 +1,6 @@
 # src/simutme/config.py
 
-# The default cell type list
+# The default cell type list in the pooled single-cell RNA-seq dataset, including major cell types and subtypes.
 DEFAULT_CELL_TYPES = [
     'B Cells', 'Plasma B cells', 'Non-plasma B cells', 'CD4 T', 'CD4 T conv', 'CD4 Treg',
     'CD8 T', 'CD8 T effector', 'CD8 T (GZMK high)', 'Double-neg-like T',
@@ -21,6 +21,16 @@ DEFAULT_CORE_MARKER_GENES = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM']
                              'Mast Cells': ['CPA3', 'HPGDS', 'GATA2'],
                              'NK': ['GNLY', 'NKG7', 'KLRD1'],
                              'Neutrophils': ['CSF3R', 'CXCR2', 'FPR1', 'SLC25A37']}
+
+# Cell type to subtypes in the pooled single-cell RNA-seq dataset. And will be used to simulate the single-cell-type GEPs (sctGEPs).
+# If no subtypes, the same cell type name will be used as the subtype name.
+CELL_TYPE2SUBTYPE_SCT = {'B Cells': ['Non-plasma B cells', 'Plasma B cells'],
+                         'CD4 T': ['CD4 T conv', 'CD4 Treg'], 'CD8 T': ['CD8 T (GZMK high)', 'CD8 T effector'],
+                         'DC': ['mDC', 'pDC'], 'Endothelial Cells': ['Endothelial Cells'],
+                         'Cancer Cells': ['Epithelial Cells', 'Glioma Cells'],
+                         'Fibroblasts': ['CAFs', 'Myofibroblasts'], 'Macrophages': ['Macrophages'],
+                         'Mast Cells': ['Mast Cells'], 'NK': ['NK'], 'Neutrophils': ['Neutrophils'],
+                         'Double-neg-like T': ['Double-neg-like T'], 'Monocytes': ['Monocytes']}
 
 DEFAULT_LOG_BASE = 2
 DEFAULT_DPI = 300

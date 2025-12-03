@@ -35,9 +35,9 @@ class BulkGEPGenerator:
     """
 
     def __init__(self,
-                 simu_bulk_dir: str,
-                 merged_sc_dataset_file_path: str,
-                 sct_dataset_file_path: Optional[str],
+                 simu_bulk_dir: str | Path,
+                 merged_sc_dataset_file_path: str | Path,
+                 sct_dataset_file_path: Optional[Union[str, Path]],
                  cell_type2subtype: Dict[str, List[str]],
                  sc_dataset_ids: List[str],
                  bulk_dataset_name: str = "simulated_bulk",
@@ -728,10 +728,10 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     """
 
     def __init__(self,
-                 merged_sc_dataset_file_path: str,
+                 merged_sc_dataset_file_path: str | Path,
                  cell_type2subtype: Dict[str, List[str]],
                  sc_dataset_ids: List[str],
-                 simu_bulk_dir: str,
+                 simu_bulk_dir: str | Path,
                  bulk_dataset_name: str,
                  zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space',
