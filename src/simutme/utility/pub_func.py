@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import time
@@ -346,8 +347,8 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
     return tuple(selected_samples.keys())  # return a tuple of tuples  (('s1', 's2'), ('s3', 's5'))
 
 
-def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path,
-                        dataset_info, result_file_path: str,
+def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: str | Path,
+                        dataset_info, result_file_path: str | Path,
                         filtering: bool = False, merge_t_cell: bool = False, gep_type='bulk'):
     """
     create .h5ad file according to cell fraction and simulated bulk expression profiles

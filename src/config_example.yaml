@@ -12,7 +12,7 @@ constants:
   # List of single-cell RNA-seq datasets
   sc_dataset_ids:
     - "hnscc_cillo_01"
-    - "pdac_pengj_02"
+    - "pdac_peng_02"
     - "hnscc_puram_03"
     - "pdac_steele_04"
     - "luad_kim_05"

@@ -44,7 +44,7 @@ class BulkGEPGenerator:
                  check_basic_info: bool = True,
                  zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space',
-                 tcga2cancer_type_file_path: Optional[str] = None,
+                 tcga2cancer_type_file_path: str | Path = None,
                  total_rna_coefficient: Optional[Dict[str, float]] = None,
                  subtype_col_name: Optional[str] = None,
                  cell_type_col_name: str = 'cell_type'):
@@ -98,14 +98,13 @@ class BulkGEPGenerator:
 
         # Define file paths
         prefix = f'simu_bulk_exp_{self.bulk_dataset_name}'
-        self.generated_cell_fraction_fp = os.path.join(self.simu_bulk_dir,
-                                                       f'generated_frac_{self.bulk_dataset_name}.csv')
-        self.ref_neighbor_counter_fp = os.path.join(self.simu_bulk_dir, f'ref2n_neighbors_{self.bulk_dataset_name}.csv')
-        self.generated_bulk_gep_csv_fp = os.path.join(self.simu_bulk_dir, prefix + f'_log2cpm1p.csv')
-        self.sampled_sc_cell_id_file_path = os.path.join(self.simu_bulk_dir, prefix + '_sampled_sc_cell_id.csv')
-        self.generated_bulk_gep_fp = self.generated_bulk_gep_csv_fp.replace('.csv', '.h5ad')
+        self.generated_cell_fraction_fp = self.simu_bulk_dir / f'generated_frac_{self.bulk_dataset_name}.csv'
+        self.ref_neighbor_counter_fp = self.simu_bulk_dir / f'ref2n_neighbors_{self.bulk_dataset_name}.csv'
+        self.generated_bulk_gep_csv_fp = self.simu_bulk_dir / f'{prefix}_log2cpm1p.csv'
+        self.sampled_sc_cell_id_file_path = self.simu_bulk_dir / f'{prefix}_sampled_sc_cell_id.csv'
+        self.generated_bulk_gep_fp = self.generated_bulk_gep_csv_fp.parent / self.generated_bulk_gep_csv_fp.name.replace('.csv', '.h5ad')
 
-        if check_basic_info and not os.path.exists(self.generated_bulk_gep_fp):
+        if check_basic_info and not self.generated_bulk_gep_fp.exists():
             self._check_basic_info()
 
     def generate_gep(self, n_samples: int,
@@ -113,7 +112,7 @@ class BulkGEPGenerator:
                      total_cell_number: int = 100,
                      n_threads: int = 10,
                      filtering: bool = True,
-                     reference_file: Union[str, pd.DataFrame] = None,
+                     reference_file: str | pd.DataFrame | Path = None,
                      ref_exp_type: str = None,
                      gep_filtering_quantile: tuple = (None, 0.95),
                      log_file_path: str = None,
@@ -204,7 +203,7 @@ class BulkGEPGenerator:
 
                 simulated_gep_bak = simulated_gep.copy()  # Keep TPM version
 
-                # 4. Filtering
+                # 4. Filtering (GEP-level filtering during generation)
                 if filtering:
                     simulated_gep = self._filter_simulated_geps(
                         simulated_gep=simulated_gep,
@@ -262,7 +261,7 @@ class BulkGEPGenerator:
             raise FileNotFoundError('Either "merged_sc_dataset_file_path" or "sct_dataset_file_path" is required.')
 
         if (self.merged_sc_fp is not None) and (self.merged_sc_dataset_df is None):
-            reader = ReadH5AD(self.merged_sc_fp)
+            reader = ReadH5AD(self.merged_sc_fp)  # TODO, improve to read faster??
             self.merged_sc_dataset_df = reader.get_df(
                 convert_to_tpm=True) if self.sc_dataset_gep_type == 'log_space' else reader.get_df()
 
@@ -498,15 +497,41 @@ class BulkGEPGenerator:
         simulated_exp = {}
 
         if gep_type == 'SCT':
-            # Logic for Single Cell Type generation (omitted for brevity, similar to original)
-            pass
+            selected_cell_id = selected_cell_id.loc[selected_cell_id['n_cell'] > 1, :].copy()
+            # n_non_zero = 1000
+            n_genes = sc_ds_df.shape[1]
+            for cell_type, group in selected_cell_id.groupby('cell_type'):
+                for sample_id, row in group.iterrows():
+                    cell_ids = row['selected_cell_id'].split(';')
+                    # simulated_exp[sample_id] = sc_ds_df.loc[cell_ids, :].mean(axis=0)  # average
+                    current_gene_exp = sc_ds_df.loc[cell_ids, :].mean(axis=0)  # average
+                    if simu_method == 'random_replacement':
+                        # long_tail_noise_non_zero = np.random.random(n_non_zero) * 2
+                        # n_zero = np.random.randint(n_non_zero/10, n_non_zero)
+                        # long_tail_noise = np.append(long_tail_noise_non_zero, np.zeros(n_zero))
+                        long_tail_noise = np.random.random(size=n_genes)
+                        # replace the values < 1 with random selected values
+                        mask = (current_gene_exp < 1).values.astype(int)
+                        current_gene_exp = current_gene_exp + long_tail_noise * mask
+                    simulated_exp[sample_id] = pd.Series(current_gene_exp.values, index=current_gene_exp.index)
         else:
             # Logic for Multi Cell Type (Bulk) generation
+            assert simu_method == 'mul', 'Only support matrix multiplication for generating MCT'
+            subtype2cell_type = {i: k for k, v in self.cell_type2subtype.items() for i in v}
             # Optimization: Pre-calculate RNA coefficients if needed
             ct2rna_coefficient = {ct: 1.0 for ct in selected_cell_id['cell_type'].unique()}
             if self.total_rna_coefficient:
-                # ... (Populate ct2rna_coefficient logic from original) ...
-                pass
+                # Consider the total RNA amount of each cell type
+                all_cell_types = selected_cell_id['cell_type'].unique()
+                for cell_type in all_cell_types:
+                    if cell_type in self.total_rna_coefficient:
+                        ct2rna_coefficient[cell_type] = self.total_rna_coefficient[cell_type]
+                    elif (cell_type in subtype2cell_type) and \
+                            (subtype2cell_type[cell_type] in self.total_rna_coefficient):
+                        ct2rna_coefficient[cell_type] = self.total_rna_coefficient[subtype2cell_type[cell_type]]
+                    else:
+                        ct2rna_coefficient[cell_type] = 1.0
+                print('   > The following total RNA coefficient will be used: ', ct2rna_coefficient)
 
             # Group by sample to perform aggregation
             for sample_id, group in selected_cell_id.groupby(level=0):
@@ -772,7 +797,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         :param minimum_n_base: Minimum required cells to form a sample.
         :param ref_gene_list_file_path: Path to a CSV containing the gene list to filter by.
         """
-        if os.path.exists(self.generated_bulk_gep_fp):
+        if self.generated_bulk_gep_fp.exists():
             print(f'   > Previous result exists: {self.generated_bulk_gep_fp}')
             return
 
@@ -795,7 +820,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
         # Check for existing partial results
         existed_ids = pd.Index([])
-        if os.path.exists(self.generated_bulk_gep_csv_fp):
+        if self.generated_bulk_gep_csv_fp.exists():
             existed_ids = pd.read_csv(self.generated_bulk_gep_csv_fp, index_col=0, usecols=[0]).index
 
         print(f"   > Starting generation: {self.n_samples} samples, chunk size {chunk_size}")
@@ -839,7 +864,6 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             # Use ReadExp for safe handling
             sc_df_obj = ReadExp(self.merged_sc_dataset_df, exp_type='TPM')
             sc_df_obj.align_with_gene_list(ref_gene_list)
-
             # Update the main dataframe in memory
             self.merged_sc_dataset_df = sc_df_obj.get_exp()
             print(f'   > Dataset aligned. Genes: {self.merged_sc_dataset_df.shape[1]}')

@@ -1,5 +1,6 @@
 import os
 import yaml
+import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -20,12 +21,12 @@ from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator
 class SimuConfig:
     """Stores all simulation-related paths and global parameters."""
     # Path configuration
-    simu_bulk_dir: str | Path
-    sct_dataset_file_path: str | Path
-    tcga2cancer_type_file_path: str | Path
-    tcga_merged_tpm_file_path: str | Path
-    high_corr_gene_file_path: str | Path
-    merged_sc_dataset_file_path: str | Path
+    simu_bulk_dir: Path
+    sct_dataset_file_path: Path
+    tcga2cancer_type_file_path: Path
+    tcga_merged_tpm_file_path: Path
+    high_corr_gene_file_path: Path
+    merged_sc_dataset_file_path: Path
 
     # Core constants
     sc_dataset_ids: List[str]
@@ -70,7 +71,7 @@ class SimuConfig:
                 df = pd.read_csv(self.high_corr_gene_file_path)
                 self._high_corr_gene_list = df['gene_name'].to_list()
             else:
-                print(f"Warning: High corr gene file not found: {self.high_corr_gene_file_path}")
+                logging.warning(f"Warning: High corr gene file not found: {self.high_corr_gene_file_path}")
                 self._high_corr_gene_list = []
         return self._high_corr_gene_list
 
@@ -89,14 +90,16 @@ def run_bulk_simulation(dataset_name: str,
     :param log_file_path: Path to the log file
     :return: The file path of the final generated .h5ad file
     """
-    print(f"\n=== Starting Simulation for {dataset_name} ===")
+    logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
 
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
-    sc_dataset_dir = simu_bulk_dir / f'generated_sc_dataset_{n_sc_datasets}ds_n_base{config.n_base}_all_subtypes'
+    sampling_method = params['sampling_method']
+    n_base = config.n_base
+    sc_dataset_dir = simu_bulk_dir / f'generated_sc_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
     if params.get('dataset_type', 'mixed').lower() == 'sct':  # single-cell-type dataset
-        print(f"   > Using Single-Cell-Type Dataset Generation for {dataset_name}")
+        logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
         sct_generator = SingleCellTypeGEPGenerator(
             simu_bulk_dir=sc_dataset_dir,
             cell_type2subtype=config.cell_type2subtypes,
@@ -107,55 +110,67 @@ def run_bulk_simulation(dataset_name: str,
             cell_type_col_name=params.get('cell_type_col', 'cell_type'),
             subtype_col_name=params.get('cell_subtype_col', 'cell_subtype'),
         )
-        sct_generator.generate_samples(n_sample_each_cell_type=params['n_samples'],
-                                       sample_type='positive',
-                                       sep_by_patient=False,
-                                       n_base_for_positive_samples=config.n_base)
-
-    bulk_generator = BulkGEPGenerator(
-        simu_bulk_dir=config.simu_bulk_dir,
-        merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
-        cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
-        sc_dataset_ids=config.sc_dataset_ids,
-        bulk_dataset_name=dataset_name,
-        sct_dataset_file_path=config.sct_dataset_file_path,
-        check_basic_info=False,
-        tcga2cancer_type_file_path=config.tcga2cancer_type_file_path,
-        total_rna_coefficient=config.total_rna_coefficient,
-        cell_type_col_name='cell_type',
-        subtype_col_name='cell_type'
-    )
-
-    generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
-
-    # 2. Generate GEP (if it doesn't exist)
-    if not os.path.exists(generated_bulk_gep_fp):
-        bulk_generator.generate_gep(
-            n_samples=params['n_samples'],
-            simu_method='mul',
-            sampling_method=params['sampling_method'],
-            reference_file=config.tcga_merged_tpm_file_path,
-            ref_exp_type='TPM',
-            filtering=params.get('filtering', False),
-            filtering_ref_types=params.get('filtering_ref_types', None),
-            gep_filtering_quantile=config.gep_filtering_quantile,
-            n_threads=5,
-            log_file_path=log_file_path,
-            show_filtering_info=False,
-            filtering_method='median_gep',
-            cell_prop_prior=params.get('cell_prop_prior', None),
-            filtering_in_pca_space=params.get('filtering_in_pca_space', True),
-            norm_ord=1,
-            pca_n_components=config.pca_n_components
-        )
+        generated_sct_fp = sct_generator.generated_bulk_gep_fp
+        if not generated_sct_fp.exists():
+            sct_generator.generate_samples(n_sample_each_cell_type=params['n_samples'],
+                                           sample_type='positive',
+                                           sep_by_patient=False,
+                                           n_base_for_positive_samples=n_base)
+            logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
+        else:
+            logging.info(f"   > Single-Cell-Type GEP file exists: {generated_sct_fp}")
+        return str(generated_sct_fp)
     else:
-        print(f"   > GEP file exists: {generated_bulk_gep_fp}")
+        logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
+        if params['filtering']:
+            filtering_str = f'with_filtering_{config.gep_filtering_quantile[1]}'
+        else:
+            filtering_str = 'no_filtering'
+        simu_bulk_dir = simu_bulk_dir / f'{sampling_method}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
+        bulk_generator = BulkGEPGenerator(
+            simu_bulk_dir=simu_bulk_dir,
+            merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
+            cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
+            sc_dataset_ids=config.sc_dataset_ids,
+            bulk_dataset_name=dataset_name,
+            sct_dataset_file_path=config.sct_dataset_file_path,
+            check_basic_info=False,
+            tcga2cancer_type_file_path=config.tcga2cancer_type_file_path,
+            total_rna_coefficient=config.total_rna_coefficient,
+            cell_type_col_name='cell_type',
+            subtype_col_name='cell_type'
+        )
 
-    # 3. Post-processing: Gene-level filtering and PCA (if needed)
-    if params.get('filtering', False):
-        _run_post_processing(dataset_name, generated_bulk_gep_fp, config)
+        generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
 
-    return generated_bulk_gep_fp
+        # 2. Generate GEP (if it doesn't exist)
+        if not os.path.exists(generated_bulk_gep_fp):
+            bulk_generator.generate_gep(
+                n_samples=params['n_samples'],
+                simu_method='mul',
+                sampling_method=params['sampling_method'],
+                reference_file=config.tcga_merged_tpm_file_path,
+                ref_exp_type='TPM',
+                filtering=params.get('filtering', False),
+                filtering_ref_types=params.get('filtering_ref_types', None),
+                gep_filtering_quantile=config.gep_filtering_quantile,
+                n_threads=5,
+                log_file_path=log_file_path,
+                show_filtering_info=False,
+                filtering_method='median_gep',
+                cell_prop_prior=params.get('cell_prop_prior', None),
+                filtering_in_pca_space=params.get('filtering_in_pca_space', True),
+                norm_ord=1,
+                pca_n_components=config.pca_n_components
+            )
+        else:
+            logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
+
+        # 3. Post-processing: Gene-level filtering and PCA (if needed)
+        if params.get('filtering', False):
+            _run_post_processing(dataset_name, generated_bulk_gep_fp, config)
+
+        return generated_bulk_gep_fp
 
 
 # --- 3. Internal Helper Functions ---
@@ -169,10 +184,10 @@ def _run_post_processing(dataset_name: str,
     filtered_file_path = generated_bulk_gep_fp.replace('.h5ad', replace_by)
 
     if os.path.exists(filtered_file_path):
-        print(f"   > Filtered file exists: {filtered_file_path}")
+        logging.info(f"   > Filtered file exists: {filtered_file_path}")
         return
 
-    print(f"   > Running post-processing (Gene Filtering & PCA) for {dataset_name}...")
+    logging.info(f"   > Running post-processing (Gene Filtering & PCA) for {dataset_name}...")
     current_result_dir = os.path.join(config.simu_bulk_dir, dataset_name)
     check_dir(current_result_dir)
 
@@ -186,7 +201,7 @@ def _run_post_processing(dataset_name: str,
         gene_list_file_path = os.path.join(current_result_dir, csv_name)
 
         if not os.path.exists(gene_list_file_path):
-            print(f'      Generating gene list: {gene_list_file_path}')
+            logging.info(f'      Generating gene list: {gene_list_file_path}')
             quantile_gene_list = get_gene_list_for_filtering(
                 bulk_exp_file=generated_bulk_gep_fp,
                 filtering_type='quantile_range',
@@ -196,7 +211,7 @@ def _run_post_processing(dataset_name: str,
                 q_col_name=q_names
             )
         else:
-            print(f'      Loading existing gene list: {gene_list_file_path}')
+            logging.info(f'      Loading existing gene list: {gene_list_file_path}')
             quantile_gene_list = pd.read_csv(gene_list_file_path)['gene_name'].to_list()
 
         # Take intersection
@@ -232,7 +247,7 @@ def _run_post_processing(dataset_name: str,
     )
 
 
-def get_gene_list_for_filtering(bulk_exp_file: str, tcga_file: str, result_file_path: str, q_col_name: list = None,
+def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path, result_file_path: str | Path, q_col_name: list = None,
                                 filtering_type: str = 'quantile_range',
                                 corr_threshold: float = 0.3, n_gene_max: int = 1000,
                                 corr_result_fp: str = None, quantile_range: list = None) -> list:
@@ -280,27 +295,27 @@ def get_gene_list_for_filtering(bulk_exp_file: str, tcga_file: str, result_file_
                                                        filter_by_num=n_gene_max)
             del gene_exp
             gene_list = corr_df.index.to_list()
-            print(f'{len(gene_list)} genes are selected by high correlation')
+            logging.info(f'{len(gene_list)} genes are selected by high correlation')
         if 'quantile_range' in filtering_type:
             # both bulk_exp and tcga are in log-space
             gene_list_qr = get_gene_list_filtered_by_quantile_range(bulk_exp=bulk_exp, tcga_exp=tcga,
                                                                     quantile_range=quantile_range,
                                                                     q_col_name=q_col_name)
-            print(f'{len(gene_list_qr)} genes are selected by quantile range')
+            logging.info(f'{len(gene_list_qr)} genes are selected by quantile range')
             if len(gene_list) > 0:  # if high-correlation genes exist, then filter by high-correlation genes
                 gene_list = [gene for gene in gene_list if gene in gene_list_qr]
-                print(f'{len(gene_list)} genes are selected by both high correlation and quantile range')
+                logging.info(f'{len(gene_list)} genes are selected by both high correlation and quantile range')
             else:
                 gene_list = gene_list_qr
         if filtering_type == 'all_genes':
             gene_list = bulk_exp.columns.to_list()
-            print(f'All {len(gene_list)} genes will be used')
+            logging.info(f'All {len(gene_list)} genes will be used')
 
         gene_list_df = pd.DataFrame(columns=['gene_name'])
         gene_list_df['gene_name'] = gene_list
         gene_list_df.to_csv(result_file_path, index=False)
     else:
-        print(f'Loading the gene list from file: {result_file_path}')
+        logging.info(f'Loading the gene list from file: {result_file_path}')
         gene_list_df = pd.read_csv(result_file_path)
         gene_list = gene_list_df['gene_name'].to_list()
     return gene_list
@@ -359,7 +374,7 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
                 pca_df = pd.DataFrame(pcs[:, range(2)], index=simu_bulk_with_tcga.index, columns=['PC1', 'PC2'])
             pca_df.to_csv(pca_data_file_path)
         else:
-            print(f'{pca_data_file_path} already exists, skip PCA analysis')
+            logging.info(f'{pca_data_file_path} already exists, skip PCA analysis')
             pca_df = pd.read_csv(pca_data_file_path, index_col=0)
             pca_model = load(pca_model_file_path)
 
@@ -374,9 +389,9 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
 
     if h5ad_file_path is not None:
         assert cell_frac_file is not None, 'cell_frac_file should be provided if h5ad_file_path is not None'
-        print(f'Saving filtered bulk exp to file: {h5ad_file_path}')
+        logging.info(f'Saving filtered bulk exp to file: {h5ad_file_path}')
         if not os.path.exists(h5ad_file_path):
-            print('Saving as .h5ad file...')
+            logging.info('Saving as .h5ad file...')
             dataset_info = f'Some genes were removed from this dataset for increasing the similarity ' \
                            f'between TCGA and simulated bulk cell GEPs. This similarity was evaluated by PCA analysis.'
             create_h5ad_dataset(simulated_bulk_exp_file_path=bulk_exp,

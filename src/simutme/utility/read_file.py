@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Union, Optional, List
 
 import numpy as np
@@ -109,7 +110,7 @@ class ReadExp(object):
         file_type (str): Current data format (TPM, log_space, etc.).
     """
 
-    def __init__(self, exp_file: Union[str, pd.DataFrame], exp_type: str = 'TPM', transpose: bool = False):
+    def __init__(self, exp_file: str | pd.DataFrame | Path, exp_type: str = 'TPM', transpose: bool = False):
         """
         Initialize the ReadExp object.
 
