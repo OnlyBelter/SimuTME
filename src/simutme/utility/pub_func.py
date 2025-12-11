@@ -347,7 +347,7 @@ def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patien
     return tuple(selected_samples.keys())  # return a tuple of tuples  (('s1', 's2'), ('s3', 's5'))
 
 
-def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: str | Path,
+def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: str | Path | pd.DataFrame,
                         dataset_info, result_file_path: str | Path,
                         filtering: bool = False, merge_t_cell: bool = False, gep_type='bulk'):
     """
@@ -355,7 +355,7 @@ def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: s
     https://anndata.readthedocs.io/en/latest/index.html
     :param simulated_bulk_exp_file_path: simulated bulk expression profile, samples by genes
         .csv file or .h5ad file
-    :param cell_fraction_file_path: .csv file, samples by cell types
+    :param cell_fraction_file_path: .csv file or a DataFrame, samples by cell types
     :param dataset_info: str
     :param result_file_path:
     :param filtering: if filtered by marker ratio
@@ -367,12 +367,17 @@ def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: s
         if filtering:
             simulated_bulk_exp_file_path = simulated_bulk_exp_file_path.replace('_log2cpm1p.csv',
                                                                                 '_log2cpm1p_filtered.csv')
-            cell_fraction_file_path = cell_fraction_file_path.replace('.csv', '_filtered.csv')
+            if cell_fraction_file_path is str or isinstance(cell_fraction_file_path, Path):
+                cell_fraction_file_path = str(cell_fraction_file_path).replace('.csv', '_filtered.csv')
         simu_bulk_exp_raw = read_df(simulated_bulk_exp_file_path)
     except UnicodeDecodeError:
         simu_bulk_exp_raw = read_h5ad(simulated_bulk_exp_file_path)
-    # simu_bulk_exp.index = simu_bulk_exp.index.astype(str)
-    cell_frac = read_df(cell_fraction_file_path)
+    if cell_fraction_file_path is str or isinstance(cell_fraction_file_path, Path):
+        cell_frac = read_df(cell_fraction_file_path)
+    elif isinstance(cell_fraction_file_path, pd.DataFrame):
+        cell_frac = cell_fraction_file_path
+    else:
+        raise TypeError(f'Unsupported type for cell_fraction_file_path: {type(cell_fraction_file_path)}')
     if merge_t_cell:
         if 'T Cells' not in cell_frac.columns:
             cell_frac['T Cells'] = cell_frac.loc[:, ['CD4 T', 'CD8 T']].sum(axis=1)
@@ -399,8 +404,6 @@ def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: s
         print(f'   The length of intersections in both cell_frac and simu_bulk_exp: {len(intersection_inx)}')
         cell_frac = cell_frac.loc[intersection_inx, :].copy()
         simu_bulk_exp = simu_bulk_exp.loc[intersection_inx, :].copy()
-    # print(cell_frac.index)
-    # print(simu_bulk_exp.index)
     if np.all(simu_bulk_exp.index == cell_frac.index):
         var = pd.DataFrame(index=simu_bulk_exp.columns, columns=[f'in_{gep_type}'])
         var[f'in_{gep_type}'] = 1

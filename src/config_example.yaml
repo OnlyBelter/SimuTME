@@ -40,6 +40,25 @@ constants:
     Double-neg-like T: ["Double-neg-like T"]
     Monocytes: ["Monocytes"]
 
+  # Using this parameter (a list) to specify which cell types (or subtypes) should be output and include in the simulated bulk samples
+  output_types:
+    - "Non-plasma B cells"
+    - "Plasma B cells"
+    - "CD4 T"
+    - "CD8 T (GZMK high)"
+    - "CD8 T effector"
+    - "DC"
+    - "Endothelial Cells"
+    - "Cancer Cells"
+    - "CAFs"
+    - "Myofibroblasts"
+    - "Macrophages"
+    - "Mast Cells"
+    - "NK"
+    - "Neutrophils"
+    - "Double-neg-like T"
+    - "Monocytes"
+
   # Coefficient to correct total RNA abundance
   total_rna_coefficient:
     B Cells: 1.0
@@ -69,7 +88,7 @@ parameters:
 datasets:
   Mixed_N100_segment:  # Dataset name
     n_samples: 100  # Number of bulk samples to simulate for each cell type
-    sampling_method: "segment"  # Sampling method: "random" or "segment"
+    sampling_method: "segment"  # Sampling method: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet'
     filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
     filtering_ref_types: null
     cell_prop_prior: null

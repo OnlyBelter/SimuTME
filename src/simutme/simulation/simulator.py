@@ -16,22 +16,66 @@ from ..utility import log_exp2cpm, non_log2cpm, log2_transform, get_cell_num, ge
 from .sampling import generate_cell_fraction
 
 
-def get_cell_type_used(cell_type2subtype: Dict[str, List[str]]) -> Tuple[List[str], List[str]]:
+def get_cell_type_used(cell_type2subtype: Dict[str, List[str]], output_types: list[str] = None) -> Tuple[List[str], List[str],]:
     """Extracts used cell types and subtypes from the mapping dictionary."""
     cell_type_used = list(cell_type2subtype.keys())
     sub_cell_type_used = [i for v in cell_type2subtype.values() for i in v if i not in cell_type_used]
+    if output_types is not None:
+        cell_type_used = [ct for ct in cell_type_used if ct in output_types]
+        sub_cell_type_used = [sct for sct in sub_cell_type_used if sct in output_types]
+        all_types = set(cell_type_used + sub_cell_type_used)
+        cell_type_not_existed = [ct for ct in output_types if ct not in all_types]
+        if len(cell_type_not_existed) > 0:
+            raise ValueError(f'The specified output_types contain cell types/subtypes not in the provided cell_type2subtype mapping: {cell_type_not_existed}. '
+                             f'Please check the config.yaml file and try again.')
     return cell_type_used, sub_cell_type_used
 
 
 class BulkGEPGenerator:
     """
-    Generate simulated bulk Gene Expression Profiles (GEPs) by aggregating single-cell datasets.
+Generate simulated bulk gene expression profiles (GEPs) by aggregating single-cell datasets.
 
-    Attributes:
-        simu_bulk_dir (str): Directory to save results.
-        merged_sc_dataset_file_path (str): Path to the merged single-cell dataset (.h5ad).
-        cell_type2subtype (dict): Mapping of cell types to subtypes.
-        sc_dataset_ids (list): List of dataset IDs to use from the merged file.
+    Parameters
+    ----------
+    simu_bulk_dir : str or pathlib.Path
+        Directory where simulated bulk GEPs and related outputs will be saved.
+    merged_sc_dataset_file_path : str or pathlib.Path
+        Path to the merged single-cell dataset (.h5ad).
+    sct_dataset_file_path : str or pathlib.Path, optional
+        Path to the single-cell tumor (sct) dataset file, if available. If None,
+        only merged_sc_dataset_file_path will be used.
+    cell_type2subtype : dict[str, list[str]]
+        Mapping from major cell types to their subtypes.
+    sc_dataset_ids : list[str]
+        List of dataset IDs (batch labels) to select from the merged single-cell file.
+    bulk_dataset_name : str, default="simulated_bulk"
+        Name used to label the simulated bulk dataset (e.g., in file names or metadata).
+    check_basic_info : bool, default=True
+        If True, run basic consistency checks on the input single-cell datasets
+        (e.g., gene overlap, cell type annotations).
+    zero_ratio_threshold : float, default=0.97
+        Threshold on the fraction of zero entries used to filter genes from the
+        single-cell GEPs before simulation. Genes with a higher zero ratio may be removed.
+    sc_dataset_gep_type : str, default="log_space"
+        Type/scale of the single-cell GEP data. Typically "log_space" for log-normalized
+        expression or "count" for raw counts.
+    tcga2cancer_type_file_path : str or pathlib.Path, optional
+        Path to a file mapping TCGA project IDs to higher-level cancer types.
+        Used when simulating TCGA-like bulk cohorts. If None, TCGA-specific
+        annotations will be skipped.
+    total_rna_coefficient : dict[str, float], optional
+        Optional mapping from cell type (or subtype) to a scaling coefficient
+        representing relative total RNA content. If provided, these coefficients
+        are used to weight cells when aggregating single-cell GEPs into bulk GEPs.
+    subtype_col_name : str, optional
+        Name of the column in the single-cell AnnData object that stores subtype labels.
+        If None, only the major cell type labels are used.
+    cell_type_col_name : str, default="cell_type"
+        Name of the column in the single-cell AnnData object that stores major
+        cell type labels.
+    output_types : list[str], optional
+        Types and subtypes of cells to generate. This list should be a sublist of all cell types and subtypes.
+        If None, all cell types and their subtypes will be included.
     """
 
     def __init__(self,
@@ -47,7 +91,8 @@ class BulkGEPGenerator:
                  tcga2cancer_type_file_path: str | Path = None,
                  total_rna_coefficient: Optional[Dict[str, float]] = None,
                  subtype_col_name: Optional[str] = None,
-                 cell_type_col_name: str = 'cell_type'):
+                 cell_type_col_name: str = 'cell_type',
+                 output_types: Optional[List[str]] = None):
 
         self.simu_bulk_dir = Path(simu_bulk_dir)
         self.simu_bulk_dir.mkdir(parents=True, exist_ok=True)
@@ -94,7 +139,7 @@ class BulkGEPGenerator:
         self.total_cell_number = 0
 
         # Process cell types
-        self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype)
+        self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
 
         # Define file paths
         prefix = f'simu_bulk_exp_{self.bulk_dataset_name}'
@@ -608,7 +653,8 @@ class BulkGEPGenerator:
         if missing_ds:
             raise ValueError(f"Invalid datasets: {missing_ds}. Available: {self.dataset_in_sc}")
 
-        print(f"   > Using {len(self.cell_type_used)} cell types and {len(self.sc_dataset_used)} datasets.")
+        print(f"   > Using {len(self.cell_type_used)} cell types, "
+              f"{len(self.cell_subtype_used)} subtypes and {len(self.sc_dataset_used)} datasets.")
 
     def get_info_in_merged_single_cell_dataset(self, check_zero_ratio: bool = True, zero_ratio_threshold: float = 0.95):
         """Reads metadata from the merged single-cell dataset."""
@@ -761,7 +807,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                  zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space',
                  subtype_col_name: Optional[str] = None,
-                 cell_type_col_name: str = 'cell_type'):
+                 cell_type_col_name: str = 'cell_type',
+                 output_types: Optional[List[str]] = None):
 
         super().__init__(
             merged_sc_dataset_file_path=merged_sc_dataset_file_path,
@@ -773,7 +820,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             sct_dataset_file_path=None,
             sc_dataset_gep_type=sc_dataset_gep_type,
             subtype_col_name=subtype_col_name,
-            cell_type_col_name=cell_type_col_name
+            cell_type_col_name=cell_type_col_name,
+            output_types=output_types,
         )
 
     def generate_samples(self,

@@ -33,6 +33,7 @@ class SimuConfig:
     cell_type2subtypes: Dict[str, List[str]]
     total_rna_coefficient: Dict[str, float]
     n_base: int
+    output_types: List[str]
 
     # Filtering parameters
     gene_quantile_range: List[float]
@@ -109,6 +110,7 @@ def run_bulk_simulation(dataset_name: str,
             zero_ratio_threshold=params.get('zero_ratio_threshold', 0.97),
             cell_type_col_name=params.get('cell_type_col', 'cell_type'),
             subtype_col_name=params.get('cell_subtype_col', 'cell_subtype'),
+            output_types=config.output_types,
         )
         generated_sct_fp = sct_generator.generated_bulk_gep_fp
         if not generated_sct_fp.exists():
