@@ -59,9 +59,10 @@ for dataset_name, params in datasets_to_run.items():
 
 To capture the heterogeneity of real-world tumor samples, SimuTME implements multiple strategies for generating cell type fractions. These methods ensure that downstream models are robust to various biological scenarios, from immune-cold tumors (sparse) to high-purity samples.
 
-The following sampling functions are available in `simutme.simulation`:
+### Sampling Methods for Cellular Proportions
+The following sampling functions (for cellular proportions) are available in `simutme.simulation`:
 
-### 1. Sparse Random Sampling (`sparse_random_sampling`)
+#### 1. Sparse Random Sampling (`sparse_random_sampling`)
 **Source:** Adapted from *Menden et al. (2020)* (Scaden).
 
 In the TME, specific immune subsets (e.g., B cells, NK cells) are often completely absent from a given tissue sample. To simulate this "sparsity," this method performs a leave-out procedure:
@@ -69,26 +70,36 @@ In the TME, specific immune subsets (e.g., B cells, NK cells) are often complete
 2.  Random fractions are generated for the remaining present cell types.
 3.  This is crucial for training Deep Learning models to predict true zeros and avoid over-predicting rare cell types.
 
-### 2. Dirichlet Sampling (`dirichlet_sampling`)
+#### 2. Dirichlet Sampling (`dirichlet_sampling`)
 The **Dirichlet distribution** is the standard probability distribution for compositional data (vectors that sum to 1). It allows for precise control over the "concentration" of cell types via the $\alpha$ parameter:
 *   **$\alpha = 1.0$:** Uniform distribution (unbiased).
 *   **$\alpha < 1.0$:** Sparse distribution (samples tend toward the "corners" of the simplex).
 *   **$\alpha > 1.0$:** Dense distribution (samples tend toward equal proportions).
 
-### 3. Segment-Random Sampling (`seg_random_sampling`)
+#### 3. Segment-Random Sampling (`seg_random_sampling`)
 **Use Case:** High Tumor Purity / Dominant Cell Types.
 
 Tumor biopsies often consist largely of malignant cells with a smaller fraction of infiltrating immune and stromal cells. This method simulates such scenarios by:
 1.  Assigning a **dominant fraction** (e.g., 80% Tumor Cells) to one randomly selected cell type.
 2.  Distributing the remaining fraction (e.g., 20%) randomly among the background cell types.
 
-### 4. Segment Sampling (`segment_sampling`)
+#### 4. Segment Sampling (`segment_sampling`)
 **Source:** Adapted from *Xiong et al. (2024)* (DeSide).
 
 Uses an iterative "stick-breaking" approach to generate distributions with high variance. This creates skewed datasets where cell proportions decay rapidly, testing the model's ability to detect cell types across a wide dynamic range.
 
-### 5. Random (Dense) Sampling (`random_sampling`)
+#### 5. Random (Dense) Sampling (`random_sampling`)
 A baseline method generating "dense" compositions where all cell types are likely to be present, derived from a uniform distribution normalized to sum to 1.
+
+
+### Sampling Methods for sctGEPs
+SimuTME also provides strategies for sampling single cells to construct bulk single-cell-type GEPs (sctGEPs).
+
+#### 1. Random Sampling (`random`)
+Randomly samples `n_base` single cells from each cell type to create the sctGEPs.
+
+#### 2. Nearest Neighbors Sampling (`n_neighbors`)
+Sample 1 cell randomly, then select its `n_base - 1` nearest neighbors based on Euclidean distance across all cells within the same type. This captures local transcriptional similarity.
 
 ---
 

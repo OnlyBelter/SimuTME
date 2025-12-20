@@ -2,18 +2,22 @@ import logging
 import os
 import sys
 import time
-from typing import Union, List, Dict, Optional
+from multiprocessing import shared_memory
+from typing import Union, List, Dict, Optional, Tuple, Any
 from pathlib import Path
 import csv
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib as mpl
+from joblib import dump, load
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from joblib import dump, load
-from anndata import AnnData, read_h5ad
 from sklearn.decomposition import PCA
+from anndata import AnnData, read_h5ad
+from scipy.spatial.distance import pdist, squareform
+from dataclasses import dataclass
+logger = logging.getLogger(__name__)
 
 from ..config import DEFAULT_CELL_TYPES, DEFAULT_CORE_MARKER_GENES
 
@@ -295,56 +299,127 @@ def get_cell_num(cell_type_frac, total_num=500):
     return cell_num.round(0).astype(int)
 
 
-def get_sample_id(obs_df, n, cell_type, n_base, class_by='leiden', sep_by_patient=False,
-                  sc_dataset=None, minimum_n_base=1, glioma_epi_ratio=0.1):
+def get_sample_id_random(
+        obs_df: pd.DataFrame,
+        n_samples: int,
+        cell_type: str,
+        n_base: int,
+        class_by: str = 'leiden',
+        sep_by_patient: bool = False,
+        sc_dataset: Optional[str] = None,
+        minimum_n_base: int = 1,
+        glioma_epi_ratio: float = 0.1,
+) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
     """
-    select sample id by random sampling
-    :param obs_df: adata.obs in .h5ad file
-    :param n: the number of cells to be generated
-    :param cell_type: sampling only within this cell types (cell_type) or sub cell types (leiden)
-    :param n_base: the number of single cells to average
-    :param class_by: leiden or cell_type, the column name of cell type (or subtype) in .h5ad file
-    :param sep_by_patient: only sampling from one patient in original dataset if True
-    :param glioma_epi_ratio: the ratio of glioma cells and epithelial cells when sampling from cancer cells
-    :param sc_dataset: the single cell dataset used for sampling
-    :param minimum_n_base: the minimum number of cells to average for each SCT sample
-    :return: a tuple of tuples  (('s1', 's2'), ('s3', 's5')), each tuple contains n_base ids for a single sample
+    Select sample IDs by random sampling from single-cell metadata.
+
+    Parameters
+    ----------
+    obs_df : pd.DataFrame
+        DataFrame corresponding to `adata.obs` from a single-cell dataset.
+        The index contains unique cell IDs.
+    n_samples : int
+        Number of simulated samples to generate.
+    cell_type : str
+        Target cell type or subtype to sample from (must be a value in `obs_df[class_by]`).
+    n_base : int
+        Number of single cells to average per simulated sample. If 0, returns an empty tuple.
+    class_by : str, default='leiden'
+        Column name in `obs_df` that defines the class for sampling.
+    sep_by_patient : bool, default=False
+        If True, sample cells for each simulated sample from a single patient
+        (based on the 'sample_id' column). Only patients with more than `n_base + 10`
+        cells in the target class are considered.
+    sc_dataset : str, optional
+        Name of the single-cell dataset. If 'sct_dataset' and `cell_type == 'Cancer Cells'`,
+        further split into glioma vs epithelial cells according to `glioma_epi_ratio`.
+    minimum_n_base : int, default=1
+        Minimum number of cells required to form a simulated sample.
+    glioma_epi_ratio : float, default=0.1
+        Probability of sampling glioma cells (vs epithelial) when splitting cancer cells.
+
+    Returns
+    -------
+    ids : tuple of str or tuple of tuple of str
+        If `n_samples == 1`, returns a single tuple of cell IDs: `('cell1', 'cell2', ...)`.
+        If `n_samples > 1`, returns a tuple of tuples: `(('cell1', 'cell2'), ('cell3', 'cell4'), ...)`.
+
+    Raises
+    ------
+    ValueError
+        If fewer than `minimum_n_base` cells are available, or if constraints cannot be satisfied.
     """
     if n_base == 0:
         return tuple()
+
+    # Optional splitting of cancer cells into glioma vs epithelial
     if sc_dataset == 'sct_dataset' and cell_type == 'Cancer Cells':
-        all_cols = obs_df.columns.tolist()
-        if 'Epithelial Cells' in all_cols and 'Glioma Cells' in all_cols:
-            random_float = np.random.random()
-            if random_float <= glioma_epi_ratio:
-                cell_type = 'Glioma Cells'
-            else:
-                cell_type = 'Epithelial Cells'
-    obs_df = obs_df.loc[obs_df[class_by] == cell_type, :].copy()
+        available_types = obs_df[class_by].unique()
+        if 'Epithelial Cells' in available_types and 'Glioma Cells' in available_types:
+            cell_type = 'Glioma Cells' if np.random.random() <= glioma_epi_ratio else 'Epithelial Cells'
+
+    # Filter by target class
+    if class_by not in obs_df.columns:
+        raise KeyError(f'Column "{class_by}" not found in obs_df.')
+
+    obs_df = obs_df.loc[obs_df[class_by] == cell_type].copy()
     all_samples_id = obs_df.index.to_list()
+
+    if len(all_samples_id) < minimum_n_base:
+        raise ValueError(
+            f"The number of cells in '{cell_type}' ({len(all_samples_id)}) is less than "
+            f"minimum_n_base ({minimum_n_base})."
+        )
+
+    # Optional patient-wise sampling
     groupby_patient_count = None
     if sep_by_patient:
-        groupby_patient_count = obs_df.groupby(['sample_id']).count()
-        groupby_patient_count = groupby_patient_count.loc[groupby_patient_count['leiden'] > n_base + 10, :].copy()
-    selected_samples = {}
-    while len(selected_samples) < n:
-        _s = tuple()
-        if (groupby_patient_count is not None) and (groupby_patient_count.shape[0] > 1):
-            selected_patient_id = groupby_patient_count.sample(1).index.to_list()[0]
-            all_samples_id = obs_df.loc[obs_df['sample_id'] == selected_patient_id, :].index.to_list()
-        if minimum_n_base <= len(all_samples_id) <= n_base:
-            # print(cell_type, len(all_samples_id), n_base)
-            _s = tuple(all_samples_id)
-        elif len(all_samples_id) < minimum_n_base:
-            raise ValueError(f'The number of cells in {cell_type} is less than minimum_n_base {minimum_n_base}')
+        if 'sample_id' not in obs_df.columns:
+            raise KeyError('Column "sample_id" required when sep_by_patient=True.')
+
+        groupby_patient_count = obs_df.groupby('sample_id')[class_by].count()
+        groupby_patient_count = groupby_patient_count[groupby_patient_count > n_base + 10]
+
+        if groupby_patient_count.empty:
+            raise ValueError(
+                f"No patient has enough cells (> {n_base + 10}) in '{cell_type}'."
+            )
+
+    selected_samples: Dict[Tuple[str, ...], int] = {}
+    max_iterations = n_samples * 100  # Prevent infinite loop
+    iterations = 0
+
+    # Main sampling loop
+    while len(selected_samples) < n_samples:
+        iterations += 1
+        if iterations > max_iterations:
+            raise RuntimeError(
+                f"Could not generate {n_samples} unique samples after {max_iterations} iterations. "
+                "Consider relaxing constraints or increasing the cell pool."
+            )
+
+        # Optionally restrict to one patient per simulated sample
+        if groupby_patient_count is not None and len(groupby_patient_count) > 0:
+            selected_patient_id = np.random.choice(groupby_patient_count.index)
+            all_samples_id = obs_df.loc[obs_df['sample_id'] == selected_patient_id].index.to_list()
         else:
-            _s = np.random.choice(all_samples_id, n_base, replace=False)
-        _s = tuple(sorted(_s))
-        if _s not in selected_samples:
-            selected_samples[_s] = 1
-    if n == 1:
-        return tuple(selected_samples.keys())[0]  # return a tuple  ('s1', 's2', ...)
-    return tuple(selected_samples.keys())  # return a tuple of tuples  (('s1', 's2'), ('s3', 's5'))
+            all_samples_id = obs_df.index.to_list()
+
+        # Sample cells
+        if minimum_n_base <= len(all_samples_id) <= n_base:
+            sample_ids = tuple(sorted(all_samples_id))
+        elif len(all_samples_id) < minimum_n_base:
+            continue  # Skip this patient if not enough cells
+        else:
+            sample_ids = tuple(sorted(np.random.choice(all_samples_id, n_base, replace=False)))
+
+        # Store unique samples
+        if sample_ids not in selected_samples:
+            selected_samples[sample_ids] = 1
+
+    if n_samples == 1:
+        return tuple(selected_samples.keys())[0]  # Single tuple of cell IDs
+    return tuple(selected_samples.keys())  # Tuple of tuples
 
 
 def create_h5ad_dataset(simulated_bulk_exp_file_path, cell_fraction_file_path: str | Path | pd.DataFrame,
@@ -676,3 +751,277 @@ def do_pca_analysis(exp_df, n_components=5, pca_result_fp=None, save_model: bool
         if save_model:
             dump(pca, pca_result_fp)
     return pca
+
+
+def get_distance_matrices_by_class(
+        adata_X: np.ndarray,
+        obs_df: pd.DataFrame,
+        class_by: str = 'cell_type',
+        metric: str = 'euclidean'
+) -> Dict[str, Tuple[np.ndarray, List[str]]]:
+    """
+    Compute pairwise distance matrices for each class separately.
+
+    Parameters
+    ----------
+    adata_X : np.ndarray
+        Gene expression matrix (n_cells × n_genes).
+    obs_df : pd.DataFrame
+        DataFrame corresponding to `adata.obs`. Index contains cell IDs.
+    class_by : str, default='cell_type'
+        Column name in `obs_df` that defines the classes.
+    metric : str, default='euclidean'
+        Distance metric. Options: 'euclidean', 'cosine', 'correlation', etc.
+
+    Returns
+    -------
+    distance_dict : dict
+        Dictionary mapping each class to a tuple of:
+        - distance_matrix (np.ndarray): Pairwise distance matrix for cells in this class
+        - cell_ids (list of str): Ordered list of cell IDs corresponding to the matrix rows/cols
+
+    Examples
+    --------
+    >>> dist_dict = get_distance_matrices_by_class(adata.X, adata.obs, class_by='cell_type')
+    >>> # Access T cell distance matrix
+    >>> t_cell_dist, t_cell_ids = dist_dict['T cells']
+    >>> print(t_cell_dist.shape)  # (n_t_cells, n_t_cells)
+    """
+    if class_by not in obs_df.columns:
+        raise KeyError(f'Column "{class_by}" not found in obs_df.')
+
+    distance_dict = {}
+    unique_classes = obs_df[class_by].unique()
+
+    for cell_class in unique_classes:
+        print('Processing class:', cell_class)
+        # Get cells belonging to this class
+        mask = obs_df[class_by] == cell_class
+        cell_ids = obs_df.loc[mask].index.to_list()
+        cell_indices = [obs_df.index.get_loc(cid) for cid in cell_ids]
+
+        # Extract expression matrix for this class
+        X_subset = adata_X[cell_indices, :]
+
+        # Compute distance matrix
+        if len(cell_ids) > 1:
+            condensed_dist = pdist(X_subset, metric=metric)
+            distance_matrix = squareform(condensed_dist)
+        else:
+            # Single cell: distance to itself is 0
+            distance_matrix = np.array([[0.0]])
+
+        distance_dict[cell_class] = (distance_matrix, cell_ids)
+        print(f"Computed distance matrix for '{cell_class}': {distance_matrix.shape}")
+
+    return distance_dict
+
+
+def get_sample_id_with_neighbors(
+        obs_df: pd.DataFrame,
+        n_samples: int,
+        cell_type: str,
+        n_base: int,
+        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        class_by: str = 'cell_type',
+        sep_by_patient: bool = False,
+        sc_dataset: str = 'merged_sc_dataset',
+        minimum_n_base: int = 1,
+        glioma_epi_ratio: float = 0.1,
+) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
+    """
+    Select sample IDs by nearest-neighbor sampling using pre-computed per-class distance matrices.
+
+    Parameters
+    ----------
+    obs_df : pd.DataFrame
+        DataFrame corresponding to `adata.obs` from a single-cell dataset.
+        The index contains unique cell IDs.
+    n_samples : int
+        Number of simulated samples to generate.
+    cell_type : str
+        Target cell type or subtype to sample from (must be a value in `obs_df[class_by]`).
+    n_base : int
+        Number of single cells to average per simulated sample. Must be >= 1.
+    distance_dict : dict
+        Dictionary from `compute_distance_matrices_by_class` mapping each class to
+        (distance_matrix, cell_ids).
+    class_by : str, default='cell_type'
+        Column name in `obs_df` that defines the class for sampling.
+    sep_by_patient : bool, default=False
+        If True, sample cells for each simulated sample from a single patient.
+    sc_dataset : str, Name of the single-cell dataset, which will be used to simulate sctGEPs.
+    minimum_n_base : int, default=1
+        Minimum number of cells required to form a simulated sample.
+    glioma_epi_ratio : float, default=0.1
+        Probability of sampling glioma cells (vs epithelial) when splitting cancer cells.
+
+    Returns
+    -------
+    ids : tuple of str or tuple of tuple of str
+        If `n_samples == 1`, returns a single tuple of cell IDs.
+        If `n_samples > 1`, returns a tuple of tuples.
+
+    Raises
+    ------
+    ValueError
+        If the requested cell type is not found in `distance_dict`, or if constraints
+        cannot be satisfied.
+    """
+    if n_base == 0:
+        return tuple()
+
+    # Optional splitting of cancer cells into glioma vs epithelial
+    if sc_dataset == 'sct_dataset' and cell_type == 'Cancer Cells':
+        available_types = obs_df[class_by].unique()
+        if 'Epithelial Cells' in available_types and 'Glioma Cells' in available_types:
+            cell_type = 'Glioma Cells' if np.random.random() <= glioma_epi_ratio else 'Epithelial Cells'
+
+    # Get pre-computed distance matrix for this cell type
+    if cell_type not in distance_dict:
+        raise ValueError(
+            f"Cell type '{cell_type}' not found in distance_dict. "
+            f"Available types: {list(distance_dict.keys())}"
+        )
+
+    distance_matrix, all_samples_id = distance_dict[cell_type]
+
+    if len(all_samples_id) < minimum_n_base:
+        raise ValueError(
+            f"The number of cells in '{cell_type}' ({len(all_samples_id)}) is less than "
+            f"minimum_n_base ({minimum_n_base})."
+        )
+
+    # Filter obs_df for this cell type
+    obs_df_filtered = obs_df.loc[obs_df[class_by] == cell_type].copy()
+
+    # Optional patient-wise sampling
+    groupby_patient_count = None
+    if sep_by_patient:
+        if 'sample_id' not in obs_df_filtered.columns:
+            raise KeyError('Column "sample_id" required when sep_by_patient=True.')
+
+        groupby_patient_count = obs_df_filtered.groupby('sample_id')[class_by].count()
+        groupby_patient_count = groupby_patient_count[groupby_patient_count > n_base + 10]
+
+        if groupby_patient_count.empty:
+            raise ValueError(
+                f"No patient has enough cells (> {n_base + 10}) in '{cell_type}'."
+            )
+
+    selected_samples: Dict[Tuple[str, ...], int] = {}
+    max_iterations = n_samples * 100
+    iterations = 0
+
+    # Main sampling loop
+    while len(selected_samples) < n_samples:
+        iterations += 1
+        if iterations > max_iterations:
+            raise RuntimeError(
+                f"Could not generate {n_samples} unique samples after {max_iterations} iterations. "
+                "Consider relaxing constraints or increasing the cell pool."
+            )
+
+        # Optionally restrict to one patient per simulated sample
+        if groupby_patient_count is not None and len(groupby_patient_count) > 0:
+            selected_patient_id = np.random.choice(groupby_patient_count.index)
+            patient_mask = obs_df_filtered['sample_id'] == selected_patient_id
+            patient_cell_ids = obs_df_filtered.loc[patient_mask].index.to_list()
+            # Map to indices in the distance matrix
+            patient_indices = [all_samples_id.index(cid) for cid in patient_cell_ids]
+            id_pool = patient_cell_ids
+            indices_pool = patient_indices
+        else:
+            id_pool = all_samples_id
+            indices_pool = list(range(len(all_samples_id)))
+
+        # Check if enough cells available
+        if len(id_pool) < minimum_n_base:
+            continue
+
+        # Special case: use all available cells if between minimum_n_base and n_base
+        if minimum_n_base <= len(id_pool) <= n_base:
+            sample_ids = tuple(sorted(id_pool))
+        else:
+            # Step 1: Randomly select 1 anchor cell
+            anchor_local_idx = np.random.randint(0, len(id_pool))
+            anchor_matrix_idx = indices_pool[anchor_local_idx]
+            anchor_id = id_pool[anchor_local_idx]
+
+            if n_base == 1:
+                sample_ids = (anchor_id,)
+            else:
+                # Step 2: Find (n_base - 1) nearest neighbors
+                # Get distances from anchor to all cells in the pool
+                distances = distance_matrix[anchor_matrix_idx, indices_pool]
+
+                # Get top n_base nearest cells (including anchor itself)
+                nearest_local_indices = np.argsort(distances)[:n_base]
+
+                # Get cell IDs
+                neighbor_ids = [id_pool[i] for i in nearest_local_indices]
+                sample_ids = tuple(sorted(neighbor_ids))
+
+        # Store unique samples
+        if sample_ids not in selected_samples:
+            selected_samples[sample_ids] = 1
+
+    if n_samples == 1:
+        return tuple(selected_samples.keys())[0]
+    return tuple(selected_samples.keys())
+
+@dataclass
+class WorkerSharedData:
+    """Container for shared data in worker processes."""
+    obs_df: Any  # pd.DataFrame
+    distance_dict: Dict[str, Tuple[np.ndarray, List[str]]]
+    shm_handles: List[shared_memory.SharedMemory]  # Track for cleanup
+
+    def close(self):
+        """Close all shared memory handles (don't unlink - main process does that)."""
+        for shm in self.shm_handles:
+            try:
+                shm.close()
+            except Exception as e:
+                logger.warning(f"Error closing shared memory handle: {e}")
+        self.shm_handles.clear()
+
+
+@dataclass
+class SampleTaskArgs:
+    """Typed arguments for worker_sample task."""
+    cell_type: str
+    n_samples: int
+    n_base: int
+    class_by: str
+    sep_by_patient: bool
+    sc_dataset: str
+    minimum_n_base: int
+    glioma_epi_ratio: float
+
+    def to_tuple(self) -> tuple:
+        """Convert to tuple for multiprocessing."""
+        return (
+            self.cell_type,
+            self.n_samples,
+            self.n_base,
+            self.class_by,
+            self.sep_by_patient,
+            self.sc_dataset,
+            self.minimum_n_base,
+            self.glioma_epi_ratio,
+        )
+
+    @classmethod
+    def from_tuple(cls, args: tuple) -> 'SampleTaskArgs':
+        """Create from tuple."""
+        return cls(
+            cell_type=args[0],
+            n_samples=args[1],
+            n_base=args[2],
+            class_by=args[3],
+            sep_by_patient=args[4],
+            sc_dataset=args[5],
+            minimum_n_base=args[6],
+            glioma_epi_ratio=args[7],
+        )

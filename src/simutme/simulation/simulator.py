@@ -1,28 +1,43 @@
 import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
 import json
-import multiprocessing
+import pickle
+import atexit
+import warnings
 import numpy as np
 import pandas as pd
 from scipy import stats
-from typing import List, Dict, Union, Optional, Tuple
+import multiprocessing
 from tqdm import tqdm
 from pathlib import Path
 from joblib import dump, load
 from sklearn.decomposition import PCA
+from multiprocessing import Pool, shared_memory
+multiprocessing.set_start_method('spawn', force=True)
+from typing import List, Dict, Union, Optional, Tuple, Any
+import logging
+logger = logging.getLogger(__name__)
+
 
 from ..utility import get_gene_list_filtered_by_quantile_range, get_quantile, check_dir
 from ..utility import ReadExp, ReadH5AD, ExpObj, QueryNeighbors, read_single_cell_type_dataset
-from ..utility import log_exp2cpm, non_log2cpm, log2_transform, get_cell_num, get_sample_id, create_h5ad_dataset, print_msg
+from ..utility import log_exp2cpm, non_log2cpm, log2_transform, get_cell_num, get_sample_id_random, create_h5ad_dataset, print_msg
+from ..utility import get_distance_matrices_by_class, get_sample_id_with_neighbors, WorkerSharedData, SampleTaskArgs
 from .sampling import generate_cell_fraction
 
+
+# Global worker state
+_worker_data: Optional[WorkerSharedData] = None
 
 def get_cell_type_used(cell_type2subtype: Dict[str, List[str]], output_types: list[str] = None) -> Tuple[List[str], List[str],]:
     """Extracts used cell types and subtypes from the mapping dictionary."""
     cell_type_used = list(cell_type2subtype.keys())
-    sub_cell_type_used = [i for v in cell_type2subtype.values() for i in v if i not in cell_type_used]
+    sub_cell_type_used = [i for v in cell_type2subtype.values() for i in v if i not in cell_type_used]  # exclude cell types without subtypes (same name)
     if output_types is not None:
         cell_type_used = [ct for ct in cell_type_used if ct in output_types]
-        sub_cell_type_used = [sct for sct in sub_cell_type_used if sct in output_types]
+        sub_cell_type_used = [sub_ct for sub_ct in sub_cell_type_used if sub_ct in output_types]
         all_types = set(cell_type_used + sub_cell_type_used)
         cell_type_not_existed = [ct for ct in output_types if ct not in all_types]
         if len(cell_type_not_existed) > 0:
@@ -90,7 +105,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                  sc_dataset_gep_type: str = 'log_space',
                  tcga2cancer_type_file_path: str | Path = None,
                  total_rna_coefficient: Optional[Dict[str, float]] = None,
-                 subtype_col_name: Optional[str] = None,
+                 subtype_col_name: Optional[str] = 'cell_subtype',
                  cell_type_col_name: str = 'cell_type',
                  output_types: Optional[List[str]] = None):
 
@@ -149,11 +164,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.sampled_sc_cell_id_file_path = self.simu_bulk_dir / f'{prefix}_sampled_sc_cell_id.csv'
         self.generated_bulk_gep_fp = self.generated_bulk_gep_csv_fp.parent / self.generated_bulk_gep_csv_fp.name.replace('.csv', '.h5ad')
 
-        if check_basic_info and not self.generated_bulk_gep_fp.exists():
+        if check_basic_info and not self.generated_bulk_gep_fp.exists():  # Put this checker the last one
             self._check_basic_info()
 
     def generate_gep(self, n_samples: int,
-                     sampling_method: str = 'segment',
+                     sampling_method_prop: str = 'segment',
                      total_cell_number: int = 100,
                      n_threads: int = 10,
                      filtering: bool = True,
@@ -221,9 +236,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             while self.generated_bulk_gep_counter < self.n_samples:
                 # 1. Generate Fractions
                 generated_cell_frac = generate_cell_fraction(
-                    sampling_method=sampling_method,
+                    sampling_method=sampling_method_prop,
                     n_cell_frac=min_n_cell_frac,
-                    sample_prefix=f's_{sampling_method}_{self.n_round}',
+                    sample_prefix=f's_{sampling_method_prop}_{self.n_round}',
                     cell_prop_prior=cell_prop_prior if filtering else None,
                     cell_type2subtype=self.cell_type2subtype
                 )
@@ -295,30 +310,37 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 self.n_round += 1
 
         # Finalize
-        self._finalize_generation(sampling_method, filtering_method, log_file_path)
+        self._finalize_generation(sampling_method_prop, filtering_method, log_file_path)
 
     def _load_sc_data_for_generation(self, simu_method):
         """Helper to load and prepare single cell dataframes."""
-        obs_df = self.merged_sc_dataset_obs
-        sc_dataset = 'merged_sc_dataset'
-
         if (self.merged_sc_fp is None) and (self.sct_dataset_file_path is None):
             raise FileNotFoundError('Either "merged_sc_dataset_file_path" or "sct_dataset_file_path" is required.')
+        obs_df = pd.DataFrame()
+        sc_dataset = ''
+        gene_list = []
 
-        if (self.merged_sc_fp is not None) and (self.merged_sc_dataset_df is None):
-            reader = ReadH5AD(self.merged_sc_fp)  # TODO, improve to read faster??
-            self.merged_sc_dataset_df = reader.get_df(
-                convert_to_tpm=True) if self.sc_dataset_gep_type == 'log_space' else reader.get_df()
+        if simu_method == 'ave': # generate average expression profiles for sctGEPs
+            obs_df = self.merged_sc_dataset_obs
+            sc_dataset = 'merged_sc_dataset'
 
-        gene_list = self.merged_sc_dataset_df.columns.to_list()
+            if (self.merged_sc_fp is not None) and (self.merged_sc_dataset_df is None):
+                reader = ReadH5AD(self.merged_sc_fp)  # TODO, improve to read faster??
+                self.merged_sc_dataset_df = reader.get_df(
+                    convert_to_tpm=True) if self.sc_dataset_gep_type == 'log_space' else reader.get_df()
 
-        if simu_method == 'mul':
+            gene_list = self.merged_sc_dataset_df.columns.to_list()
+
+        elif simu_method == 'mul':
             self.total_cell_number = 1
             if (self.sct_dataset_file_path is not None) and (self.sct_dataset_df is None):
                 self.sct_dataset_obs, self.sct_dataset_df = self._read_sct_dataset()
                 sc_dataset = 'sct_dataset'
                 obs_df = self.sct_dataset_obs
                 gene_list = self.sct_dataset_df.columns.to_list()
+
+        else:
+            raise TypeError('Invalid simulation method "{}", only "ave" and "mul" are supported.'.format(simu_method))
 
         return obs_df, gene_list, sc_dataset
 
@@ -485,10 +507,37 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         return None
 
     def _sc_sampling(self, cell_frac: pd.DataFrame, obs_df: pd.DataFrame, n_threads: int = 10,
-                     total_cell_number: int = None, sep_by_patient=False, sc_dataset=None,
-                     minimum_n_base: int = 1) -> pd.DataFrame:
+                     total_cell_number: int = None, sep_by_patient=False, sc_dataset=None, minimum_n_base: int = 1,
+                     cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = None, sampling_method_gep: str = 'random',
+                     ) -> pd.DataFrame:
         """
         Select specific single cells to construct the bulk samples.
+        Parameters
+        ----------
+        cell_frac : pd.DataFrame
+            DataFrame where each row corresponds to a sample and each column to a cell type,
+            with values indicating the fraction of each cell type in that sample.
+        obs_df : pd.DataFrame
+            DataFrame containing metadata for single cells or sctGEPs, including cell type annotations.
+        n_threads : int
+            Number of threads to use for parallel processing.
+        total_cell_number : int, optional
+            Total number of cells to sample for each bulk sample. If None, uses the instance's total_cell_number.
+        sep_by_patient : bool
+            Whether to separate sampling by patient (if patient info is available in obs_df).
+        sc_dataset : str
+            Identifier for the single-cell dataset to use (e.g., 'merged_sc_dataset' or 'sct_dataset').
+        minimum_n_base : int
+            Minimum number of base cells to sample per cell type.
+        sampling_method_gep: str
+            Method for sampling cells to simulate bulk sctGEPs, either 'random' or 'n_neighbors'.
+        cell_distance_dict : Dict[str, Tuple[np.ndarray, List[str]]], optional
+            Cell distance matrices for each cell type, if precomputed. If provided, sampling cells by n_neighbors will use these distances.
+            n_neighbors will consider cell similarity and find the nearest (n_base - 1) cells to form a sctGEP.
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with sampled cell IDs for each bulk sample and cell type.
         """
         if total_cell_number is not None:
             self.total_cell_number = total_cell_number
@@ -501,8 +550,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         for cell_type in cell_num.columns:
             _part = pd.DataFrame({'n_cell': cell_num[cell_type]})
             _part['cell_type'] = cell_type
-            _part[
-                'class_by'] = self.subtype_col_name if cell_type in self.cell_subtype_used else self.cell_type_col_name
+            _part['class_by'] = self.subtype_col_name if cell_type in self.cell_subtype_used else self.cell_type_col_name
             cell_num_flatten.append(_part)
 
         sampled_cell_ids = pd.concat(cell_num_flatten)
@@ -510,16 +558,26 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Prepare arguments for multiprocessing
         # Note: passing large 'obs_df' to starmap can be slow due to pickling.
         # If obs_df is huge, consider using shared memory or passing only necessary columns.
-        paras = [(obs_df, 1, row['cell_type'], row['n_cell'], row['class_by'],
-                  sep_by_patient, sc_dataset, minimum_n_base)
-                 for i, row in sampled_cell_ids.iterrows()]
-
         n_threads = min(multiprocessing.cpu_count() - 2, n_threads)
+        if sc_dataset == 'merged_sc_dataset' and sampling_method_gep == 'n_neighbors':
+            sampling_tasks = [{'cell_type': row['cell_type'], 'n_samples': 1,
+                      'n_base': row['n_cell'], 'class_by': row['class_by']} for i, row in sampled_cell_ids.iterrows()]
+            results = parallel_sample_with_shared_memory(
+                obs_df=obs_df,
+                distance_dict=cell_distance_dict,
+                sampling_tasks=sampling_tasks,
+                n_processes=n_threads,
+            )
+            sampled_cell_ids['selected_cell_id'] = [';'.join(sample_ids) for _, sample_ids in results.items()]
 
-        with multiprocessing.get_context('spawn').Pool(n_threads) as p:
-            results = p.starmap(get_sample_id, paras)
+        else:
+            sampling_tasks = [(obs_df, 1, row['cell_type'], row['n_cell'], row['class_by'],
+                      sep_by_patient, sc_dataset, minimum_n_base)
+                     for i, row in sampled_cell_ids.iterrows()]
+            with multiprocessing.get_context('spawn').Pool(n_threads) as p:
+                results = p.starmap(get_sample_id_random, sampling_tasks)
 
-        sampled_cell_ids['selected_cell_id'] = [';'.join(i) for i in results]
+            sampled_cell_ids['selected_cell_id'] = [';'.join(i) for i in results]
         sampled_cell_ids.index.name = 'sample_id'
         sampled_cell_ids.sort_values(by=['sample_id', 'cell_type'], inplace=True)
 
@@ -658,8 +716,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
     def get_info_in_merged_single_cell_dataset(self, check_zero_ratio: bool = True, zero_ratio_threshold: float = 0.95):
         """Reads metadata from the merged single-cell dataset."""
+        reader = ReadH5AD(self.merged_sc_fp)
         if self.merged_sc_dataset is None:
-            self.merged_sc_dataset = ReadH5AD(self.merged_sc_fp).get_h5ad()
+            self.merged_sc_dataset = reader.get_h5ad()
 
         self.cell_type_in_sc = [str(i) for i in self.merged_sc_dataset.obs[self.cell_type_col_name].unique() if
                                 str(i) != 'nan']
@@ -673,7 +732,6 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Zero ratio check
         if check_zero_ratio:
             if self.merged_sc_dataset_df is None:
-                reader = ReadH5AD(self.merged_sc_fp)
                 self.merged_sc_dataset_df = reader.get_df(
                     convert_to_tpm=True) if self.sc_dataset_gep_type == 'log_space' else reader.get_df()
 
@@ -683,6 +741,19 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             if not high_zero_cells.empty:
                 print(f'   > Removing {len(high_zero_cells)} cells with zero ratio > {zero_ratio_threshold}')
                 self.merged_sc_dataset_obs = self.merged_sc_dataset_obs.drop(high_zero_cells, errors='ignore')
+        output_types = self.cell_type_used + self.cell_subtype_used
+        cond_a = self.merged_sc_dataset_obs[self.subtype_col_name].isin(output_types)
+        cond_b = self.merged_sc_dataset_obs[self.cell_type_col_name].isin(output_types)
+        choices = [self.merged_sc_dataset_obs[self.subtype_col_name], self.merged_sc_dataset_obs[self.cell_type_col_name]]
+        self.merged_sc_dataset_obs['output_types'] = np.select(
+            condlist=[cond_a, cond_b],
+            choicelist=choices,
+            default='Unknown'
+        )
+        self.merged_sc_dataset_obs = self.merged_sc_dataset_obs[
+            self.merged_sc_dataset_obs['output_types'] != 'Unknown'].copy()
+        self.merged_sc_dataset_df = self.merged_sc_dataset_df.loc[self.merged_sc_dataset_obs.index, :].copy()
+        self.merged_sc_dataset = self.merged_sc_dataset[self.merged_sc_dataset_obs.index, :]
 
     def _check_intermediate_generated_gep(self):
         """
@@ -729,7 +800,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         if cell_fraction is not None:
             if not os.path.exists(self.generated_cell_fraction_fp):
-                cell_fraction.to_csv(self.generated_cell_fraction_fp, float_format='%g')
+                cell_fraction.to_csv(self.generated_cell_fraction_fp, float_format='%g', index_label='sample_id')
             else:
                 cell_fraction.to_csv(self.generated_cell_fraction_fp, header=False, mode='a', float_format='%g')
 
@@ -824,6 +895,9 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             output_types=output_types,
         )
 
+        # Cell distance matrix
+        self.cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+
     def generate_samples(self,
                          n_sample_each_cell_type: int = 10000,
                          n_base_for_positive_samples: int = 100,
@@ -832,7 +906,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                          simu_method: str = 'ave',
                          test_set: bool = False,
                          minimum_n_base: int = 1,
-                         ref_gene_list_file_path: Optional[str] = None):
+                         ref_gene_list_file_path: Optional[str] = None,
+                         sampling_method: str = 'random',):
         """
         Generate simulated samples (Positive: pure cell types; Negative: mixtures).
 
@@ -844,6 +919,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         :param test_set: If True, restricts cell types to major types only.
         :param minimum_n_base: Minimum required cells to form a sample.
         :param ref_gene_list_file_path: Path to a CSV containing the gene list to filter by.
+        :param sampling_method: 'random' or 'n_neighbors' for cell selection.
+            n_neighbors considers cell similarity to find (n_base - 1) nearest neighbors around 1 randomly selected cell within the same cell type.
         """
         if self.generated_bulk_gep_fp.exists():
             print(f'   > Previous result exists: {self.generated_bulk_gep_fp}')
@@ -862,9 +939,12 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         # 3. Prepare Gene Expression Data (Manager Step)
         self._prepare_gene_expression(ref_gene_list_file_path)
 
-        # 4. Main Generation Loop
-        chunk_size = max(100,
-                         int(n_sample_each_cell_type / 10)) if n_sample_each_cell_type > 1000 else n_sample_each_cell_type
+        # 4. Calculate cell distance dict if using n_neighbors sampling
+        if sampling_method == 'n_neighbors' and not self.cell_distance_dict:
+            self._get_cell_distance_dict()
+
+        # 5. Main Generation Loop
+        chunk_size = max(100, int(n_sample_each_cell_type / 10)) if n_sample_each_cell_type > 1000 else n_sample_each_cell_type
 
         # Check for existing partial results
         existed_ids = pd.Index([])
@@ -876,7 +956,10 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         with pd.read_csv(self.generated_cell_fraction_fp, chunksize=chunk_size, index_col=0) as reader:
             for chunk_rows in tqdm(reader, desc="Processing Chunks"):
                 # Filter already generated samples
-                chunk_rows = chunk_rows.loc[~chunk_rows.index.isin(existed_ids)].copy()
+                if not existed_ids.empty:
+                    chunk_rows = chunk_rows.loc[~chunk_rows.index.isin(existed_ids)].copy()
+                    # Update existed_ids by removing interactions
+                    existed_ids = existed_ids.difference(chunk_rows.index)
 
                 if not chunk_rows.empty:
                     self._process_chunk(
@@ -885,10 +968,11 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                         n_base=n_base_for_positive_samples,
                         min_n_base=minimum_n_base,
                         sep_by_patient=sep_by_patient,
-                        simu_method=simu_method
+                        simu_method=simu_method,
+                        sampling_method_gep=sampling_method,
                     )
 
-        # 5. Finalize
+        # 6. Finalize
         self._finalize_dataset()
 
     def _prepare_fractions(self, sample_type: str, n_sample_each_cell_type: int):
@@ -899,7 +983,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                 sample_type=sample_type,
                 sample_prefix=f'{self.bulk_dataset_name}_{sample_type[:3]}'
             )
-            generated_cell_frac.to_csv(self.generated_cell_fraction_fp, float_format='%g')
+            generated_cell_frac.to_csv(self.generated_cell_fraction_fp, float_format='%g', index_label='sample_id')
         else:
             print(f'   > Using existing cell fractions: {self.generated_cell_fraction_fp}')
 
@@ -916,8 +1000,19 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             self.merged_sc_dataset_df = sc_df_obj.get_exp()
             print(f'   > Dataset aligned. Genes: {self.merged_sc_dataset_df.shape[1]}')
 
+    def _get_cell_distance_dict(self):
+        """Calculate cell distance dictionary for n_neighbors sampling for all cell types in "output_types"."""
+        print('   > Calculating cell distance dictionary for n_neighbors sampling...')
+        self.cell_distance_dict = get_distance_matrices_by_class(
+            adata_X=self.merged_sc_dataset.X.toarray(),
+            obs_df=self.merged_sc_dataset_obs,
+            class_by='output_types',
+            metric='euclidean'
+        )
+
     def _process_chunk(self, rows: pd.DataFrame, sample_type: str, n_base: int,
-                       min_n_base: int, sep_by_patient: bool, simu_method: str):
+                       min_n_base: int, sep_by_patient: bool, simu_method: str = 'ave',
+                       sampling_method_gep: str = 'random'):
         """
         Process a single chunk of samples: select cells -> aggregate -> save.
         """
@@ -929,7 +1024,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             total_cell_number = 0
 
             # Filter Observation DataFrame based on sample type
-        current_obs_df = self.merged_sc_dataset_obs
+        # current_obs_df = self.merged_sc_dataset_obs
+        current_obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(simu_method)
 
         if sample_type == 'positive':
             # Identify the single active cell type in this chunk
@@ -956,7 +1052,10 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             total_cell_number=total_cell_number,
             obs_df=current_obs_df,
             sep_by_patient=sep_by_patient,
-            minimum_n_base=min_n_base
+            minimum_n_base=min_n_base,
+            sc_dataset=sc_dataset_key,
+            cell_distance_dict=self.cell_distance_dict,
+            sampling_method_gep=sampling_method_gep,
         )
 
         # Aggregation
@@ -1075,3 +1174,451 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                 current_idx = end_idx
 
         return generated_frac_df.round(4)
+
+
+class SharedDataManager:
+    """
+    Manager for shared memory objects across processes.
+
+    Features:
+    - Automatic cleanup via context manager and atexit
+    - Proper error handling during creation and cleanup
+    - Thread-safe cleanup tracking
+    - Support for both numpy arrays and DataFrames
+    """
+
+    def __init__(
+            self,
+            obs_df: pd.DataFrame,
+            distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+            dtype: np.dtype = np.float64
+    ):
+        """
+        Initialize shared memory for obs_df and distance matrices.
+
+        Parameters
+        ----------
+        obs_df : pd.DataFrame
+            The observation DataFrame to share.
+        distance_dict : dict
+            Dictionary mapping cell_type -> (distance_matrix, cell_ids).
+        dtype : np.dtype
+            Data type for distance matrices (default: float64).
+        """
+        self._cleaned_up = False
+        self._shm_objects: List[shared_memory.SharedMemory] = []  # Track all shm for cleanup
+
+        try:
+            # Serialize obs_df to bytes
+            self.obs_df_bytes = pickle.dumps(obs_df)
+            self.obs_df_size = len(self.obs_df_bytes)
+
+            # Create shared memory for obs_df
+            self.shm_obs = shared_memory.SharedMemory(create=True, size=self.obs_df_size)
+            self._shm_objects.append(self.shm_obs)
+
+            # Copy data to shared memory buffer
+            np.copyto(
+                np.ndarray(self.obs_df_size, dtype=np.uint8, buffer=self.shm_obs.buf),
+                np.frombuffer(self.obs_df_bytes, dtype=np.uint8)
+            )
+
+            # Store distance matrices in shared memory
+            self.distance_shms: Dict[str, str] = {}
+            self.distance_shapes: Dict[str, Tuple[int, ...]] = {}
+            self.distance_dtypes: Dict[str, np.dtype] = {}
+            self.distance_cell_ids: Dict[str, List[str]] = {}
+
+            for cell_type, (dist_matrix, cell_ids) in distance_dict.items():
+                # Ensure consistent dtype
+                dist_matrix = np.asarray(dist_matrix, dtype=dtype)
+
+                # Create shared memory for distance matrix
+                shm = shared_memory.SharedMemory(create=True, size=dist_matrix.nbytes)
+                self._shm_objects.append(shm)
+
+                # Create view and copy data
+                shm_array = np.ndarray(
+                    dist_matrix.shape,
+                    dtype=dist_matrix.dtype,
+                    buffer=shm.buf
+                )
+                np.copyto(shm_array, dist_matrix)
+
+                self.distance_shms[cell_type] = shm.name
+                self.distance_shapes[cell_type] = dist_matrix.shape
+                self.distance_dtypes[cell_type] = dist_matrix.dtype
+                self.distance_cell_ids[cell_type] = cell_ids
+
+            # Register cleanup at exit as a safety net
+            atexit.register(self.cleanup)
+
+        except Exception as e:
+            # Clean up any partially created shared memory on failure
+            self.cleanup()
+            raise RuntimeError(f"Failed to initialize shared memory: {e}") from e
+
+    def get_metadata(self) -> dict:
+        """
+        Get metadata needed by worker processes.
+
+        Returns
+        -------
+        dict
+            Metadata dictionary containing shared memory names and shapes.
+        """
+        if self._cleaned_up:
+            raise RuntimeError("SharedDataManager has been cleaned up")
+
+        return {
+            'obs_shm_name': self.shm_obs.name,
+            'obs_size': self.obs_df_size,
+            'distance_shms': self.distance_shms.copy(),
+            'distance_shapes': self.distance_shapes.copy(),
+            'distance_dtypes': {k: str(v) for k, v in self.distance_dtypes.items()},
+            'distance_cell_ids': self.distance_cell_ids.copy(),
+        }
+
+    def cleanup(self):
+        """Clean up all shared memory objects safely."""
+        if self._cleaned_up:
+            return
+
+        self._cleaned_up = True
+
+        # Unregister atexit handler to avoid double cleanup
+        try:
+            atexit.unregister(self.cleanup)
+        except Exception:
+            pass
+
+        errors = []
+
+        # Clean up all tracked shared memory objects
+        for shm in self._shm_objects:
+            try:
+                shm.close()
+            except Exception as e:
+                errors.append(f"Error closing {shm.name}: {e}")
+
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                # Already unlinked, ignore
+                pass
+            except Exception as e:
+                errors.append(f"Error unlinking {shm.name}: {e}")
+
+        self._shm_objects.clear()
+
+        if errors:
+            warnings.warn(f"Errors during cleanup: {'; '.join(errors)}")
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
+        self.cleanup()
+        return False
+
+    def __del__(self):
+        """Destructor - attempt cleanup if not already done."""
+        try:
+            self.cleanup()
+        except Exception:
+            pass
+
+
+class SharedDataReader:
+    """
+    Reader for shared memory data in worker processes.
+
+    Use this class in worker processes to access shared data
+    without copying.
+    """
+
+    def __init__(self, metadata: dict):
+        """
+        Initialize reader from metadata.
+
+        Parameters
+        ----------
+        metadata : dict
+            Metadata from SharedDataManager.get_metadata()
+        """
+        self._metadata = metadata
+        self._shm_obs: Optional[shared_memory.SharedMemory] = None
+        self._shm_distances: Dict[str, shared_memory.SharedMemory] = {}
+        self._obs_df: Optional[pd.DataFrame] = None
+
+    def get_obs_df(self) -> pd.DataFrame:
+        """
+        Get the observation DataFrame from shared memory.
+
+        Returns
+        -------
+        pd.DataFrame
+            The shared observation DataFrame.
+        """
+        if self._obs_df is None:
+            self._shm_obs = shared_memory.SharedMemory(name=self._metadata['obs_shm_name'])
+            obs_bytes = bytes(self._shm_obs.buf[:self._metadata['obs_size']])
+            self._obs_df = pickle.loads(obs_bytes)
+        return self._obs_df
+
+    def get_distance_matrix(self, cell_type: str) -> Tuple[np.ndarray, List[str]]:
+        """
+        Get distance matrix for a cell type from shared memory.
+
+        Parameters
+        ----------
+        cell_type : str
+            The cell type to get distance matrix for.
+
+        Returns
+        -------
+        tuple
+            (distance_matrix, cell_ids) - matrix is a VIEW into shared memory.
+        """
+        if cell_type not in self._metadata['distance_shms']:
+            raise KeyError(f"Unknown cell type: {cell_type}")
+
+        if cell_type not in self._shm_distances:
+            shm_name = self._metadata['distance_shms'][cell_type]
+            self._shm_distances[cell_type] = shared_memory.SharedMemory(name=shm_name)
+
+        shm = self._shm_distances[cell_type]
+        shape = self._metadata['distance_shapes'][cell_type]
+        dtype = np.dtype(self._metadata['distance_dtypes'][cell_type])
+
+        # Return a VIEW into shared memory (no copy)
+        matrix = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+        cell_ids = self._metadata['distance_cell_ids'][cell_type]
+
+        return matrix, cell_ids
+
+    def close(self):
+        """Close all shared memory connections (but don't unlink)."""
+        if self._shm_obs is not None:
+            try:
+                self._shm_obs.close()
+            except Exception:
+                pass
+            self._shm_obs = None
+
+        for shm in self._shm_distances.values():
+            try:
+                shm.close()
+            except Exception:
+                pass
+        self._shm_distances.clear()
+        self._obs_df = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+
+def worker_init(metadata: dict) -> None:
+    """
+    Initialize worker process with shared memory access.
+
+    Called once per worker process by Pool initializer.
+
+    Parameters
+    ----------
+    metadata : dict
+        Metadata from SharedDataManager.get_metadata()
+    """
+    global _worker_data
+
+    # Clean up any existing state (shouldn't happen, but be safe)
+    if _worker_data is not None:
+        _worker_data.close()
+        _worker_data = None
+
+    shm_handles: List[shared_memory.SharedMemory] = []
+
+    try:
+        # Reconstruct obs_df from shared memory
+        shm_obs = shared_memory.SharedMemory(name=metadata['obs_shm_name'])
+        shm_handles.append(shm_obs)
+
+        obs_bytes = bytes(shm_obs.buf[:metadata['obs_size']])
+        obs_df = pickle.loads(obs_bytes)
+
+        # Reconstruct distance matrices from shared memory
+        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+
+        for cell_type, shm_name in metadata['distance_shms'].items():
+            shm = shared_memory.SharedMemory(name=shm_name)
+            shm_handles.append(shm)
+
+            shape = metadata['distance_shapes'][cell_type]
+
+            # Get dtype from metadata, fallback to float64
+            dtype_str = metadata.get('distance_dtypes', {}).get(cell_type, 'float64')
+            dtype = np.dtype(dtype_str)
+
+            # Create a VIEW into shared memory (no copy)
+            dist_matrix = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+            cell_ids = metadata['distance_cell_ids'][cell_type]
+
+            distance_dict[cell_type] = (dist_matrix, cell_ids)
+
+        # Store in global state
+        _worker_data = WorkerSharedData(
+            obs_df=obs_df,
+            distance_dict=distance_dict,
+            shm_handles=shm_handles
+        )
+
+        logger.debug(f"Worker initialized with {len(distance_dict)} distance matrices")
+
+    except Exception as e:
+        # Clean up on failure
+        for shm in shm_handles:
+            try:
+                shm.close()
+            except Exception:
+                pass
+        raise RuntimeError(f"Failed to initialize worker: {e}") from e
+
+
+def worker_cleanup() -> None:
+    """
+    Clean up worker process shared memory handles.
+
+    Call this via Pool's finalizer or atexit in workers if needed.
+    """
+    global _worker_data
+
+    if _worker_data is not None:
+        _worker_data.close()
+        _worker_data = None
+
+
+def worker_sample(
+        args: Union[tuple, SampleTaskArgs]
+) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
+    """
+    Worker function that uses shared memory to sample cells.
+
+    Parameters
+    ----------
+    args : tuple or SampleTaskArgs
+        Task arguments containing:
+        - cell_type: str
+        - n_samples: int
+        - n_base: int
+        - class_by: str
+        - sep_by_patient: bool
+        - sc_dataset: str
+        - minimum_n_base: int
+        - glioma_epi_ratio: float
+
+    Returns
+    -------
+    tuple
+        Sample IDs with neighbors.
+
+    Raises
+    ------
+    RuntimeError
+        If worker was not initialized properly.
+    """
+    global _worker_data
+
+    # Check initialization
+    if _worker_data is None:
+        raise RuntimeError(
+            "Worker not initialized. Ensure worker_init() is called via Pool initializer."
+        )
+
+    # Parse arguments
+    if isinstance(args, SampleTaskArgs):
+        task = args
+    else:
+        task = SampleTaskArgs.from_tuple(args)
+
+    # Validate cell_type exists in distance_dict
+    if task.cell_type not in _worker_data.distance_dict:
+        available = list(_worker_data.distance_dict.keys())
+        raise ValueError(
+            f"Unknown cell_type '{task.cell_type}'. Available: {available}"
+        )
+
+    try:
+        return get_sample_id_with_neighbors(
+            obs_df=_worker_data.obs_df,
+            n_samples=task.n_samples,
+            cell_type=task.cell_type,
+            n_base=task.n_base,
+            distance_dict=_worker_data.distance_dict,
+            class_by=task.class_by,
+            sep_by_patient=task.sep_by_patient,
+            sc_dataset=task.sc_dataset,
+            minimum_n_base=task.minimum_n_base,
+            glioma_epi_ratio=task.glioma_epi_ratio,
+        )
+    except Exception as e:
+        logger.error(f"Error processing cell_type={task.cell_type}: {e}")
+        raise
+
+
+def parallel_sample_with_shared_memory(
+        obs_df: pd.DataFrame,
+        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        sampling_tasks: List[dict],
+        n_processes: int = 4
+) -> Dict[str, any]:
+    """
+    Run sampling in parallel using shared memory.
+
+    Parameters
+    ----------
+    obs_df : pd.DataFrame
+        Observation DataFrame.
+    distance_dict : dict
+        Pre-computed distance matrices by cell type.
+    sampling_tasks : list of dict
+        Each dict contains parameters for one sampling task:
+        {'cell_type': 'T cells', 'n_samples': 100, 'n_base': 50, ...}
+    n_processes : int
+        Number of parallel processes.
+
+    Returns
+    -------
+    results : dict
+        Dictionary mapping task index to sampling results.
+    """
+    # Prepare arguments for workers
+    args_list = [
+        (
+            task['cell_type'],
+            task['n_samples'],
+            task['n_base'],
+            task.get('class_by', 'leiden'),
+            task.get('sep_by_patient', False),
+            task.get('sc_dataset', 'merged_sc_dataset'),
+            task.get('minimum_n_base', 1),
+            task.get('glioma_epi_ratio', 0.1),
+        )
+        for task in sampling_tasks
+    ]
+    # Create shared memory
+    print("Setting up shared memory...")
+    # Use context manager for automatic cleanup
+    # Run parallel sampling
+    print(f"Running {len(sampling_tasks)} tasks on {n_processes} processes...")
+    with SharedDataManager(obs_df, distance_dict) as manager:
+        metadata = manager.get_metadata()
+        with Pool(processes=n_processes, initializer=worker_init, initargs=(metadata,)) as pool:
+            results = pool.map(worker_sample, args_list)
+
+    return {i: result for i, result in enumerate(results)}

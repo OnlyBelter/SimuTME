@@ -96,7 +96,6 @@ def run_bulk_simulation(dataset_name: str,
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
-    sampling_method = params['sampling_method']
     n_base = config.n_base
     sc_dataset_dir = simu_bulk_dir / f'generated_sc_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
     if params.get('dataset_type', 'mixed').lower() == 'sct':  # single-cell-type dataset
@@ -116,18 +115,22 @@ def run_bulk_simulation(dataset_name: str,
         if not generated_sct_fp.exists():
             sct_generator.generate_samples(n_sample_each_cell_type=params['n_samples'],
                                            sample_type='positive',
+                                           simu_method='ave',  # average multiple cells to get one sct GEP
                                            sep_by_patient=False,
-                                           n_base_for_positive_samples=n_base)
+                                           n_base_for_positive_samples=n_base,
+                                           sampling_method=params.get('sampling_method_gep', 'random'), # sampling method for finding single cells
+                                           )
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
         else:
             logging.info(f"   > Single-Cell-Type GEP file exists: {generated_sct_fp}")
         return str(generated_sct_fp)
-    else:
+    else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
         if params['filtering']:
             filtering_str = f'with_filtering_{config.gep_filtering_quantile[1]}'
         else:
             filtering_str = 'no_filtering'
+        sampling_method = params['sampling_method_prop']  # sampling method for cell proportions
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
@@ -149,8 +152,8 @@ def run_bulk_simulation(dataset_name: str,
         if not os.path.exists(generated_bulk_gep_fp):
             bulk_generator.generate_gep(
                 n_samples=params['n_samples'],
-                simu_method='mul',
-                sampling_method=params['sampling_method'],
+                simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
+                sampling_method_prop=params['sampling_method_prop'],
                 reference_file=config.tcga_merged_tpm_file_path,
                 ref_exp_type='TPM',
                 filtering=params.get('filtering', False),
