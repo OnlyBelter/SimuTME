@@ -7,4 +7,3 @@ from .pub_func import get_core_zone_of_pca, cal_corr_gene_exp_with_cell_frac
 from .pub_func import do_pca_analysis, plot_pca
 from .pub_func import get_distance_matrices_by_class, get_sample_id_with_neighbors
 from .read_file import ReadH5AD, ReadExp, read_single_cell_type_dataset
-from .pub_func import WorkerSharedData, SampleTaskArgs
