@@ -1,11 +1,5 @@
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
 import json
-import pickle
-import atexit
-import warnings
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -13,8 +7,8 @@ import multiprocessing
 from tqdm import tqdm
 from pathlib import Path
 from joblib import dump, load
+from dataclasses import dataclass, field
 from sklearn.decomposition import PCA
-multiprocessing.set_start_method('spawn', force=True)
 from typing import List, Dict, Union, Optional, Tuple, Any
 import logging
 logger = logging.getLogger(__name__)
@@ -22,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 from ..utility import get_gene_list_filtered_by_quantile_range, get_quantile, check_dir
 from ..utility import ReadExp, ReadH5AD, ExpObj, QueryNeighbors, read_single_cell_type_dataset
-from ..utility import log_exp2cpm, non_log2cpm, log2_transform, get_cell_num, get_sample_id_random, create_h5ad_dataset, print_msg
-from ..utility import get_distance_matrices_by_class
+from ..utility import get_available_threads, non_log2cpm, log2_transform, get_cell_num, create_h5ad_dataset, print_msg
 from .sampling import generate_cell_fraction
-from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
+from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
+                          should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType)
+# from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
 
 
 def get_cell_type_used(cell_type2subtype: Dict[str, List[str]], output_types: list[str] = None) -> Tuple[List[str], List[str],]:
@@ -41,6 +36,42 @@ def get_cell_type_used(cell_type2subtype: Dict[str, List[str]], output_types: li
             raise ValueError(f'The specified output_types contain cell types/subtypes not in the provided cell_type2subtype mapping: {cell_type_not_existed}. '
                              f'Please check the config.yaml file and try again.')
     return cell_type_used, sub_cell_type_used
+
+
+@dataclass
+class GEPGenerationConfig:
+    """Configuration for GEP generation."""
+    n_samples: int
+    sampling_method_prop: str = 'segment'
+    total_cell_number: int = 100
+    n_threads: int = 10
+    filtering: bool = True
+    reference_file: Optional[Union[str, pd.DataFrame, Path]] = None
+    ref_exp_type: Optional[str] = None
+    gep_filtering_quantile: Tuple[Optional[float], float] = (None, 0.95)
+    log_file_path: Optional[str] = None
+    n_top: int = 20
+    simu_method: str = 'mul'
+    filtering_method: str = 'median_gep'
+    add_noise: bool = False
+    noise_params: tuple = ()
+    filtering_ref_types: Optional[List[str]] = None
+    show_filtering_info: bool = False
+    cell_prop_prior: Optional[Dict] = None
+    high_corr_gene_list: Optional[List[str]] = None
+    filtering_by_gene_range: bool = False
+    min_percentage_within_gene_range: float = 0.95
+    gene_quantile_range: Optional[List[float]] = None
+    filtering_in_pca_space: bool = False
+    pca_n_components: Union[int, float] = 0.9
+    norm_ord: int = 1
+
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.n_samples <= 0:
+            raise ValueError("n_samples must be positive")
+        if self.simu_method not in ('ave', 'mul'):
+            raise ValueError(f"Invalid simu_method: {self.simu_method}")
 
 
 class BulkGEPGenerator:
@@ -164,66 +195,43 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if check_basic_info and not self.generated_bulk_gep_fp.exists():  # Put this checker the last one
             self._check_basic_info()
 
-    def generate_gep(self, n_samples: int,
-                     sampling_method_prop: str = 'segment',
-                     total_cell_number: int = 100,
-                     n_threads: int = 10,
-                     filtering: bool = True,
-                     reference_file: str | pd.DataFrame | Path = None,
-                     ref_exp_type: str = None,
-                     gep_filtering_quantile: tuple = (None, 0.95),
-                     log_file_path: str = None,
-                     n_top: int = 20,
-                     simu_method: str = 'mul',
-                     filtering_method: str = 'media_gep',
-                     add_noise: bool = False,
-                     noise_params: tuple = (),
-                     filtering_ref_types: List[str] = None,
-                     show_filtering_info: bool = False,
-                     cell_prop_prior: Dict = None,
-                     high_corr_gene_list: List[str] = None,
-                     filtering_by_gene_range: bool = False,
-                     min_percentage_within_gene_range: float = 0.95,
-                     gene_quantile_range: List[float] = None,
-                     filtering_in_pca_space: bool = False,
-                     pca_n_components: Union[int, float] = 0.9,
-                     norm_ord: int = 1):
+    def generate_gep(self, config: GEPGenerationConfig) -> None:
         """
         Main method to generate simulated bulk GEPs.
         """
-        self.n_samples = n_samples
-        self.total_cell_number = total_cell_number
-        self.filtering_quantile_lower, self.filtering_quantile_upper = gep_filtering_quantile
+        self.n_samples = config.n_samples
+        self.total_cell_number = config.total_cell_number
+        self.filtering_quantile_lower, self.filtering_quantile_upper = config.gep_filtering_quantile
 
         # Adjust threads
         n_total_cpus = multiprocessing.cpu_count()
-        n_threads = min(n_total_cpus - 1, n_threads)
+        n_threads = min(n_total_cpus - 1, config.n_threads)
 
-        if 'linear_mmd' in filtering_method:
+        if 'linear_mmd' in config.filtering_method:
             norm_ord = 2
 
         # Determine batch size for generation
-        min_n_cell_frac = min(5000, n_samples) if filtering else min(1000, n_samples)
+        min_n_cell_frac = min(5000, config.n_samples) if config.filtering else min(1000, config.n_samples)
 
-        if os.path.exists(self.generated_bulk_gep_fp):
-            print(f'   Previous result existed: {self.generated_bulk_gep_fp}')
-            print(self.__str__())
+        if self.generated_bulk_gep_fp.exists():
+            logger.info(f'Previous result existed: {self.generated_bulk_gep_fp}')
+            logger.info(self.__str__())
             return
 
         # Resume check
         self._check_intermediate_generated_gep()
 
         # Load Data
-        obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(simu_method)
-        if sc_dataset_key == 'merged_sc_dataset':
+        obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(config.simu_method)
+        if sc_dataset_key == DatasetType.MERGED_SC:
             min_n_cell_frac = 300  # Smaller batch for merged dataset due to sparsity
 
         # Setup Filtering Reference
         sample_id_for_filtering = []
-        if filtering and filtering_ref_types:
+        if config.filtering and config.filtering_ref_types:
             s2c = pd.read_csv(self.tcga2cancer_type_file_path, index_col=0)
-            sample_id_for_filtering = s2c.loc[s2c['cancer_type'].isin(filtering_ref_types)].index.to_list()
-            print(f'   > {len(sample_id_for_filtering)} samples used for filtering.')
+            sample_id_for_filtering = s2c.loc[s2c['cancer_type'].isin(config.filtering_ref_types)].index.to_list()
+            logger.info(f'{len(sample_id_for_filtering)} samples used for filtering.')
 
         # Main Generation Loop
         with tqdm(total=self.n_samples) as pbar:
@@ -233,10 +241,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             while self.generated_bulk_gep_counter < self.n_samples:
                 # 1. Generate Fractions
                 generated_cell_frac = generate_cell_fraction(
-                    sampling_method=sampling_method_prop,
+                    sampling_method=config.sampling_method_prop,
                     n_cell_frac=min_n_cell_frac,
-                    sample_prefix=f's_{sampling_method_prop}_{self.n_round}',
-                    cell_prop_prior=cell_prop_prior if filtering else None,
+                    sample_prefix=f's_{config.sampling_method_prop}_{self.n_round}',
+                    cell_prop_prior=config.cell_prop_prior if config.filtering else None,
                     cell_type2subtype=self.cell_type2subtype
                 )
 
@@ -251,34 +259,34 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 # 3. Aggregate Expression
                 simulated_gep = self._map_cell_id2exp(
                     selected_cell_id=selected_cell_ids,
-                    simu_method=simu_method,
+                    simu_method=config.simu_method,
                     sc_dataset=sc_dataset_key,
                     cell_frac=generated_cell_frac,
-                    add_noise=add_noise,
-                    noise_params=noise_params
+                    add_noise=config.add_noise,
+                    noise_params=config.noise_params
                 )
 
                 simulated_gep_bak = simulated_gep.copy()  # Keep TPM version
 
                 # 4. Filtering (GEP-level filtering during generation)
-                if filtering:
+                if config.filtering:
                     simulated_gep = self._filter_simulated_geps(
                         simulated_gep=simulated_gep,
                         simulated_gep_bak=simulated_gep_bak,
-                        reference_file=reference_file,
-                        ref_exp_type=ref_exp_type,
-                        filtering_method=filtering_method,
+                        reference_file=config.reference_file,
+                        ref_exp_type=config.ref_exp_type,
+                        filtering_method=config.filtering_method,
                         sample_id_for_filtering=sample_id_for_filtering,
                         gene_list_in_sc_ds=gene_list_in_sc_ds,
-                        high_corr_gene_list=high_corr_gene_list,
-                        filtering_by_gene_range=filtering_by_gene_range,
-                        min_percentage_within_gene_range=min_percentage_within_gene_range,
-                        gene_quantile_range=gene_quantile_range,
-                        filtering_in_pca_space=filtering_in_pca_space,
-                        pca_n_components=pca_n_components,
-                        norm_ord=norm_ord,
-                        n_top=n_top,
-                        show_filtering_info=show_filtering_info
+                        high_corr_gene_list=config.high_corr_gene_list,
+                        filtering_by_gene_range=config.filtering_by_gene_range,
+                        min_percentage_within_gene_range=config.min_percentage_within_gene_range,
+                        gene_quantile_range=config.gene_quantile_range,
+                        filtering_in_pca_space=config.filtering_in_pca_space,
+                        pca_n_components=config.pca_n_components,
+                        norm_ord=config.norm_ord,
+                        n_top=config.n_top,
+                        show_filtering_info=config.show_filtering_info
                     )
 
                 # 5. Save Results
@@ -307,19 +315,34 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 self.n_round += 1
 
         # Finalize
-        self._finalize_generation(sampling_method_prop, filtering_method, log_file_path)
+        self._finalize_generation(config.sampling_method_prop, config.filtering_method, config.log_file_path)
 
-    def _load_sc_data_for_generation(self, simu_method):
-        """Helper to load and prepare single cell dataframes."""
+    def _load_sc_data_for_generation(
+            self,
+            simu_method: str
+    ) -> Tuple[pd.DataFrame, List[str], str]:
+        """
+        Load and prepare single-cell dataframes for generation.
+
+        Parameters
+        ----------
+        simu_method : str
+            Simulation method ('ave' or 'mul').
+
+        Returns
+        -------
+        tuple
+            (obs_df, gene_list, sc_dataset_key)
+        """
         if (self.merged_sc_fp is None) and (self.sct_dataset_file_path is None):
             raise FileNotFoundError('Either "merged_sc_dataset_file_path" or "sct_dataset_file_path" is required.')
         obs_df = pd.DataFrame()
         sc_dataset = ''
         gene_list = []
 
-        if simu_method == 'ave': # generate average expression profiles for sctGEPs
+        if simu_method == SimuMethod.AVERAGE: # generate average expression profiles for sctGEPs
             obs_df = self.merged_sc_dataset_obs
-            sc_dataset = 'merged_sc_dataset'
+            sc_dataset = DatasetType.MERGED_SC
 
             if (self.merged_sc_fp is not None) and (self.merged_sc_dataset_df is None):
                 reader = ReadH5AD(self.merged_sc_fp)  # TODO, improve to read faster??
@@ -328,16 +351,17 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
             gene_list = self.merged_sc_dataset_df.columns.to_list()
 
-        elif simu_method == 'mul':
+        elif simu_method == SimuMethod.MULTIPLY:  # generate multi-cell-type bulk GEPs by matrix multiplication
             self.total_cell_number = 1
             if (self.sct_dataset_file_path is not None) and (self.sct_dataset_df is None):
                 self.sct_dataset_obs, self.sct_dataset_df = self._read_sct_dataset()
-                sc_dataset = 'sct_dataset'
+                sc_dataset = DatasetType.SCT
                 obs_df = self.sct_dataset_obs
                 gene_list = self.sct_dataset_df.columns.to_list()
 
         else:
-            raise TypeError('Invalid simulation method "{}", only "ave" and "mul" are supported.'.format(simu_method))
+            raise TypeError(f'Invalid simulation method "{simu_method}", '
+                            f'only {', '.join([k for k, v in SimuMethod.__dict__.items() if not k.startswith('__')])} are supported.')
 
         return obs_df, gene_list, sc_dataset
 
@@ -413,7 +437,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     valid = False
                 valid_gep_list.append(valid)
             if show_filtering_info:
-                print(f'   > {np.sum(valid_gep_list)} were kept after filtering by gene range.')
+                logger.info(f'{np.sum(valid_gep_list)} were kept after filtering by gene range.')
             simulated_gep = simulated_gep.loc[valid_gep_list, :].copy()
 
             # 4. Distance / PCA Filtering
@@ -433,7 +457,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     pca_model = load(pca_model_path)
                     gene_list_in_pca = pd.read_csv(gene_list_in_pca_file_path,
                                                    index_col='0').index.to_list()
-                    print(f'   > PCA model was loaded from {pca_model_path}, '
+                    logger.info(f'PCA model was loaded from {pca_model_path}, '
                           f'and gene list was loaded from {gene_list_in_pca_file_path}')
                     # align reference GEPs with the gene list in the PCA model
                     exp_obj_ref = ReadExp(exp_file=exp_ref_df, exp_type=ref_exp_type)
@@ -459,7 +483,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     exp_ref_df.to_csv(os.path.join(pca_model_dir, 'tcga_pca_ref.csv'))
                 cumsum = np.cumsum(pca_model.explained_variance_ratio_)
                 d = len(cumsum)
-                print(f'   > {d} dimensions are needed to explain '
+                logger.info(f'{d} dimensions are needed to explain '
                       f'{cumsum.max() * 100}% variance.')  # 1515
                 # exp_ref_df = exp_ref_df.iloc[:, :d].copy()
                 # align simulated GEP with the gene list in the PCA model
@@ -503,93 +527,56 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             return simulated_gep_bak.loc[simulated_gep.index].copy()
         return None
 
-    def _sc_sampling(self, cell_frac: pd.DataFrame, obs_df: pd.DataFrame, n_threads: int = 10,
-                     total_cell_number: int = None, sep_by_patient=False, sc_dataset=None, minimum_n_base: int = 1,
-                     cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = None, sampling_method_gep: str = 'random',
-                     ) -> pd.DataFrame:
-        """
-        Select specific single cells to construct the bulk samples.
-        Parameters
-        ----------
-        cell_frac : pd.DataFrame
-            DataFrame where each row corresponds to a sample and each column to a cell type,
-            with values indicating the fraction of each cell type in that sample.
-        obs_df : pd.DataFrame
-            DataFrame containing metadata for single cells or sctGEPs, including cell type annotations.
-        n_threads : int
-            Number of threads to use for parallel processing.
-        total_cell_number : int, optional
-            Total number of cells to sample for each bulk sample. If None, uses the instance's total_cell_number.
-        sep_by_patient : bool
-            Whether to separate sampling by patient (if patient info is available in obs_df).
-        sc_dataset : str
-            Identifier for the single-cell dataset to use (e.g., 'merged_sc_dataset' or 'sct_dataset').
-        minimum_n_base : int
-            Minimum number of base cells to sample per cell type.
-        sampling_method_gep: str
-            Method for sampling cells to simulate bulk sctGEPs, either 'random' or 'n_neighbors'.
-        cell_distance_dict : Dict[str, Tuple[np.ndarray, List[str]]], optional
-            Cell distance matrices for each cell type, if precomputed. If provided, sampling cells by n_neighbors will use these distances.
-            n_neighbors will consider cell similarity and find the nearest (n_base - 1) cells to form a sctGEP.
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with sampled cell IDs for each bulk sample and cell type.
-        """
+    def _sc_sampling(
+            self,
+            cell_frac: pd.DataFrame,
+            obs_df: pd.DataFrame,
+            n_threads: int = 10,
+            total_cell_number: Optional[int] = None,
+            sep_by_patient: bool = False,
+            sc_dataset: Optional[str] = None,
+            minimum_n_base: int = 1,
+            cell_distance_dict: Optional[Dict[str, Tuple[np.ndarray, List[str]]]] = None,
+            sampling_method_gep: str = 'random',
+    ) -> pd.DataFrame:
+        """Select single cells to construct bulk samples."""
         if total_cell_number is not None:
             self.total_cell_number = total_cell_number
 
-        # Calculate how many cells of each type are needed per sample
-        cell_num = get_cell_num(cell_type_frac=cell_frac, total_num=self.total_cell_number)
+        # Prepare sampling tasks by getting the required number of cells per type to be sampled
+        sampled_cell_ids = self._prepare_sampling_tasks(cell_frac)
 
-        # Prepare sampling tasks
-        cell_num_flatten = []
-        for cell_type in cell_num.columns:
-            _part = pd.DataFrame({'n_cell': cell_num[cell_type]})
-            _part['cell_type'] = cell_type
-            _part['class_by'] = self.subtype_col_name if cell_type in self.cell_subtype_used else self.cell_type_col_name
-            cell_num_flatten.append(_part)
+        # Adjust thread count
+        n_threads = get_available_threads(n_threads)
 
-        sampled_cell_ids: pd.DataFrame = pd.concat(cell_num_flatten)
-
-        # Prepare arguments for multiprocessing
-        # Note: passing large 'obs_df' to starmap can be slow due to pickling.
-        # If obs_df is huge, consider using shared memory or passing only necessary columns.
-        n_threads = min(multiprocessing.cpu_count() - 2, n_threads)
-        if sc_dataset == 'merged_sc_dataset' and sampling_method_gep == 'n_neighbors':
-            sampling_tasks = [{'cell_type': row['cell_type'], 'n_samples': 1,
-                      'n_base': row['n_cell'], 'class_by': row['class_by']} for i, row in sampled_cell_ids.iterrows()]
-            results = parallel_sample_with_nearest_neighbors(
-                obs_df=obs_df,
-                distance_dict=cell_distance_dict,
-                sampling_tasks=sampling_tasks,
-                n_processes=n_threads,
+        # Execute sampling based on method
+        if should_use_neighbor_sampling(sc_dataset, sampling_method_gep):
+            results = sample_with_neighbors(
+                sampled_cell_ids, obs_df, cell_distance_dict, n_threads
             )
-            sampled_cell_ids['selected_cell_id'] = [';'.join(sample_ids) for _, sample_ids in results.items()]
-
         else:
-            sampling_tasks = [(obs_df, 1, row['cell_type'], row['n_cell'], row['class_by'],
-                      sep_by_patient, sc_dataset, minimum_n_base)
-                     for i, row in sampled_cell_ids.iterrows()]
-            with multiprocessing.get_context('spawn').Pool(n_threads) as p:
-                results = p.starmap(get_sample_id_random, sampling_tasks)
+            results = sample_random(
+                sampled_cell_ids, obs_df, sep_by_patient,
+                sc_dataset, minimum_n_base, n_threads
+            )
 
-            sampled_cell_ids['selected_cell_id'] = [';'.join(i) for i in results]
+        # Format results
+        sampled_cell_ids['selected_cell_id'] = [';'.join(r) for r in results]
         sampled_cell_ids.index.name = 'sample_id'
         sampled_cell_ids.sort_values(by=['sample_id', 'cell_type'], inplace=True)
 
         return sampled_cell_ids
 
-    def _map_cell_id2exp(self, selected_cell_id: pd.DataFrame, sc_dataset: str = 'merged_sc_dataset',
-                         simu_method: str = 'ave', cell_frac: pd.DataFrame = None,
+    def _map_cell_id2exp(self, selected_cell_id: pd.DataFrame, sc_dataset: str = DatasetType.MERGED_SC,
+                         simu_method: str = SimuMethod.AVERAGE, cell_frac: pd.DataFrame = None,
                          gep_type='MCT', add_noise: bool = False, noise_params: tuple = ()) -> pd.DataFrame:
         """
         Aggregates single-cell expression to bulk.
         """
         # Select source dataframe
-        if sc_dataset == 'sct_dataset':
+        if sc_dataset == DatasetType.SCT:
             sc_ds_df = self.sct_dataset_df
-        elif sc_dataset == 'merged_sc_dataset':
+        elif sc_dataset == DatasetType.MERGED_SC:
             sc_ds_df = self.merged_sc_dataset_df
         else:
             sc_ds_df = self.generated_sc_dataset_df
@@ -688,6 +675,23 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if log_file_path:
             print_msg(str(self), log_file_path=log_file_path)
 
+    def _prepare_sampling_tasks(self, cell_frac: pd.DataFrame) -> pd.DataFrame:
+        """Prepare sampling task DataFrame from cell fractions."""
+        cell_num = get_cell_num(cell_type_frac=cell_frac, total_num=self.total_cell_number)
+
+        tasks = []
+        for cell_type in cell_num.columns:
+            part = pd.DataFrame({'n_cell': cell_num[cell_type]})
+            part['cell_type'] = cell_type
+            part['class_by'] = (
+                self.subtype_col_name
+                if cell_type in self.cell_subtype_used
+                else self.cell_type_col_name
+            )
+            tasks.append(part)
+
+        return pd.concat(tasks)
+
     @staticmethod
     def _sample_noise(miu=0, s=566.1, f=0.25, n_samples=10000) -> np.ndarray:
         """Generate log-normal noise."""
@@ -736,7 +740,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             high_zero_cells = zero_ratios[zero_ratios > zero_ratio_threshold].index
 
             if not high_zero_cells.empty:
-                print(f'   > Removing {len(high_zero_cells)} cells with zero ratio > {zero_ratio_threshold}')
+                logger.info(f'Removing {len(high_zero_cells)} cells with zero ratio > {zero_ratio_threshold}')
                 self.merged_sc_dataset_obs = self.merged_sc_dataset_obs.drop(high_zero_cells, errors='ignore')
         output_types = self.cell_type_used + self.cell_subtype_used
         cond_a = self.merged_sc_dataset_obs[self.subtype_col_name].isin(output_types)
@@ -757,10 +761,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if the generation process broke accidentally,
         generated intermediate result can be used to recovery generation process
         """
-        if os.path.exists(self.generated_cell_fraction_fp):
+        if self.generated_cell_fraction_fp.exists():
             gen_cell_frac = pd.read_csv(self.generated_cell_fraction_fp, index_col=0)
             gen_cell_frac = gen_cell_frac[~gen_cell_frac.index.duplicated(keep='first')].copy()
-            if os.path.exists(self.generated_bulk_gep_csv_fp):
+            if self.generated_bulk_gep_csv_fp.exists():
                 gen_bulk_gep = pd.read_csv(self.generated_bulk_gep_csv_fp, index_col=0, usecols=[0, 1])
                 gen_bulk_gep = gen_bulk_gep[~gen_bulk_gep.index.duplicated(keep='first')].copy()
                 common_inx = [i for i in gen_cell_frac.index if i in gen_bulk_gep.index]
@@ -771,38 +775,46 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     else:
                         n_round = int(gen_cell_frac.iloc[-1].name.split('_')[2])
                     self.n_round = n_round + 1
-                    print(f'   The following intermediate generated result will be reused: \n'
+                    logger.info(f'The following intermediate generated result will be reused: \n'
                           f'{self.generated_cell_fraction_fp}, {self.generated_bulk_gep_csv_fp}.\n'
                           f'self.n_round will be reset to {self.n_round}, '
                           f'self.generated_bulk_gep_counter will be reset to {self.generated_bulk_gep_counter}')
-                    if os.path.exists(self.ref_neighbor_counter_fp):
+                    if self.ref_neighbor_counter_fp.exists():
                         ref2n_neighbors = pd.read_csv(self.ref_neighbor_counter_fp, index_col=0).to_dict()['0']
                         self.ref_neighbor_counter = ref2n_neighbors.copy()
                 else:
-                    os.remove(self.generated_cell_fraction_fp)
-                    os.remove(self.generated_bulk_gep_csv_fp)
-                    os.remove(self.sampled_sc_cell_id_file_path)
+                    files_to_remove = [
+                        self.generated_cell_fraction_fp,
+                        self.generated_bulk_gep_csv_fp,
+                        self.sampled_sc_cell_id_file_path,
+                    ]
+                    for fp in files_to_remove:
+                        try:
+                            Path(fp).unlink(missing_ok=True)
+                        except Exception as e:
+                            logger.warning(f"Failed to remove {fp}: {e}")
 
-    def _save_simulated_bulk_gep(self, gep: pd.DataFrame, cell_id: pd.DataFrame, cell_fraction: pd.DataFrame = None):
-
-        if not os.path.exists(self.generated_bulk_gep_csv_fp):
-            gep.to_csv(self.generated_bulk_gep_csv_fp, float_format='%g')
-        else:
-            gep.to_csv(self.generated_bulk_gep_csv_fp, header=False, mode='a', float_format='%g')
-
-        if not os.path.exists(self.sampled_sc_cell_id_file_path):
-            cell_id.to_csv(self.sampled_sc_cell_id_file_path)
-        else:
-            cell_id.to_csv(self.sampled_sc_cell_id_file_path, header=False, mode='a')
+    def _save_simulated_bulk_gep(
+            self,
+            gep: pd.DataFrame,
+            cell_id: pd.DataFrame,
+            cell_fraction: Optional[pd.DataFrame] = None
+    ) -> None:
+        """Save generated GEPs and metadata."""
+        append_to_csv(gep, self.generated_bulk_gep_csv_fp)
+        append_to_csv(cell_id, self.sampled_sc_cell_id_file_path)
 
         if cell_fraction is not None:
-            if not os.path.exists(self.generated_cell_fraction_fp):
-                cell_fraction.to_csv(self.generated_cell_fraction_fp, float_format='%g', index_label='sample_id')
-            else:
-                cell_fraction.to_csv(self.generated_cell_fraction_fp, header=False, mode='a', float_format='%g')
+            append_to_csv(
+                cell_fraction,
+                self.generated_cell_fraction_fp,
+                index_label='sample_id'
+            )
 
         if self.ref_neighbor_counter:
-            pd.DataFrame.from_dict(self.ref_neighbor_counter, orient='index').to_csv(self.ref_neighbor_counter_fp)
+            pd.DataFrame.from_dict(
+                self.ref_neighbor_counter, orient='index'
+            ).to_csv(self.ref_neighbor_counter_fp)
 
     def _filter_gep_by_reference(self, simulated_gep, n_top: int = None) -> Union[pd.DataFrame, None]:
         """
@@ -824,7 +836,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             qn1 = QueryNeighbors(df_file=self.marker_ratio_ref)
             # quantile of distance
             self.q_dis_nn_ref_upper = qn1.get_quantile_of_nn_distance(quantile=self.filtering_quantile_upper)
-            print(f'   > Quantile distance of {self.filtering_quantile_upper * 100}% is: {self.q_dis_nn_ref_upper}')
+            logger.info(f'Quantile distance of {self.filtering_quantile_upper * 100}% is: {self.q_dis_nn_ref_upper}')
         # nn_dis = qn1.get_nn()
 
         qn2 = QueryNeighbors(df_file=marker_ratio_simu_gep)
@@ -838,7 +850,6 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         _keep_neighbors = []
         for i, n_n in ref2n_neighbors.iterrows():
             self.ref_neighbor_counter[i] += n_n['nn']
-        # print(f'   There are {ref_neighbors_within_radius.shape[0]} simulated GEPs left after filtering.')
         if ref_neighbors_within_radius.shape[0] > 0:
             return simulated_gep.loc[ref_neighbors_within_radius['nn'], :].copy()
         else:
@@ -854,320 +865,27 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                                           latent_z_nn_info_file=latent_z_nn_info_file)
         return sct_dataset_obs, sct_dataset_df
 
+    def _validate_inputs(self) -> None:
+        """Validate initialization inputs."""
+        if not self.merged_sc_fp and not self.sct_dataset_file_path:
+            raise ValueError(
+                "At least one of 'merged_sc_dataset_file_path' or "
+                "'sct_dataset_file_path' must be provided."
+            )
+
+        if self.merged_sc_fp and not Path(self.merged_sc_fp).exists():
+            raise FileNotFoundError(f"Merged SC dataset not found: {self.merged_sc_fp}")
+
+        if self.sct_dataset_file_path and not Path(self.sct_dataset_file_path).exists():
+            raise FileNotFoundError(f"SCT dataset not found: {self.sct_dataset_file_path}")
+
+        if not self.cell_type2subtype:
+            raise ValueError("cell_type2subtype mapping cannot be empty")
+
+        if self.zero_ratio_threshold < 0 or self.zero_ratio_threshold > 1:
+            raise ValueError(f"zero_ratio_threshold must be in [0, 1], got {self.zero_ratio_threshold}")
+
     def __str__(self):
         """JSON representation of the object configuration."""
         config = {k: v for k, v in self.__dict__.items() if isinstance(v, (list, str, int, float, dict))}
         return f"{self.__class__.__name__}:\n{json.dumps(config, indent=2)}"
-
-
-class SingleCellTypeGEPGenerator(BulkGEPGenerator):
-    """
-    Generator for Single Cell Type (SCT) GEPs or specific mixtures.
-    Inherits from BulkGEPGenerator.
-    """
-
-    def __init__(self,
-                 merged_sc_dataset_file_path: str | Path,
-                 cell_type2subtype: Dict[str, List[str]],
-                 sc_dataset_ids: List[str],
-                 simu_bulk_dir: str | Path,
-                 bulk_dataset_name: str,
-                 zero_ratio_threshold: float = 0.97,
-                 sc_dataset_gep_type: str = 'log_space',
-                 subtype_col_name: Optional[str] = None,
-                 cell_type_col_name: str = 'cell_type',
-                 output_types: Optional[List[str]] = None):
-
-        super().__init__(
-            merged_sc_dataset_file_path=merged_sc_dataset_file_path,
-            simu_bulk_dir=simu_bulk_dir,
-            cell_type2subtype=cell_type2subtype,
-            sc_dataset_ids=sc_dataset_ids,
-            bulk_dataset_name=bulk_dataset_name,
-            zero_ratio_threshold=zero_ratio_threshold,
-            sct_dataset_file_path=None,
-            sc_dataset_gep_type=sc_dataset_gep_type,
-            subtype_col_name=subtype_col_name,
-            cell_type_col_name=cell_type_col_name,
-            output_types=output_types,
-        )
-
-        # Cell distance matrix
-        self.cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
-
-    def generate_samples(self,
-                         n_sample_each_cell_type: int = 10000,
-                         n_base_for_positive_samples: int = 100,
-                         sample_type: str = 'positive',
-                         sep_by_patient: bool = False,
-                         simu_method: str = 'ave',
-                         test_set: bool = False,
-                         minimum_n_base: int = 1,
-                         ref_gene_list_file_path: Optional[str] = None,
-                         sampling_method: str = 'random',):
-        """
-        Generate simulated samples (Positive: pure cell types; Negative: mixtures).
-
-        :param n_sample_each_cell_type: Number of samples per cell type.
-        :param n_base_for_positive_samples: Number of single cells to average for 'positive' samples.
-        :param sample_type: 'positive' (1 cell type) or 'negative' (mixed types).
-        :param sep_by_patient: If True, sample from a single patient's cells.
-        :param simu_method: 'ave' (average) or other simulation methods.
-        :param test_set: If True, restricts cell types to major types only.
-        :param minimum_n_base: Minimum required cells to form a sample.
-        :param ref_gene_list_file_path: Path to a CSV containing the gene list to filter by.
-        :param sampling_method: 'random' or 'n_neighbors' for cell selection.
-            n_neighbors considers cell similarity to find (n_base - 1) nearest neighbors around 1 randomly selected cell within the same cell type.
-        """
-        if self.generated_bulk_gep_fp.exists():
-            print(f'   > Previous result exists: {self.generated_bulk_gep_fp}')
-            return
-
-        # 1. Setup Configuration
-        if test_set:
-            self.cell_type_used = [k for k, v in self.cell_type2subtype.items() if k == v[0]]
-
-        total_types = len(self.cell_type_used) + len(self.cell_subtype_used)
-        self.n_samples = n_sample_each_cell_type * total_types
-
-        # 2. Prepare Fractions (Manager Step)
-        self._prepare_fractions(sample_type, n_sample_each_cell_type)
-
-        # 3. Prepare Gene Expression Data (Manager Step)
-        self._prepare_gene_expression(ref_gene_list_file_path)
-
-        # 4. Calculate cell distance dict if using n_neighbors sampling
-        if sampling_method == 'n_neighbors' and not self.cell_distance_dict:
-            self._get_cell_distance_dict()
-
-        # 5. Main Generation Loop
-        chunk_size = max(100, int(n_sample_each_cell_type / 10)) if n_sample_each_cell_type > 1000 else n_sample_each_cell_type
-
-        # Check for existing partial results
-        existed_ids = pd.Index([])
-        if self.generated_bulk_gep_csv_fp.exists():
-            existed_ids = pd.read_csv(self.generated_bulk_gep_csv_fp, index_col=0, usecols=[0]).index
-
-        print(f"   > Starting generation: {self.n_samples} samples, chunk size {chunk_size}")
-
-        with pd.read_csv(self.generated_cell_fraction_fp, chunksize=chunk_size, index_col=0) as reader:
-            for chunk_rows in tqdm(reader, desc="Processing Chunks"):
-                # Filter already generated samples
-                if not existed_ids.empty:
-                    chunk_rows = chunk_rows.loc[~chunk_rows.index.isin(existed_ids)].copy()
-                    # Update existed_ids by removing interactions
-                    existed_ids = existed_ids.difference(chunk_rows.index)
-
-                if not chunk_rows.empty:
-                    self._process_chunk(
-                        rows=chunk_rows,
-                        sample_type=sample_type,
-                        n_base=n_base_for_positive_samples,
-                        min_n_base=minimum_n_base,
-                        sep_by_patient=sep_by_patient,
-                        simu_method=simu_method,
-                        sampling_method_gep=sampling_method,
-                    )
-
-        # 6. Finalize
-        self._finalize_dataset()
-
-    def _prepare_fractions(self, sample_type: str, n_sample_each_cell_type: int):
-        """Helper to generate or verify cell fraction file."""
-        if not os.path.exists(self.generated_cell_fraction_fp):
-            print(f'   > Generating cell proportions for {self.bulk_dataset_name} ({sample_type})...')
-            generated_cell_frac = self.generate_frac_sc(
-                sample_type=sample_type,
-                sample_prefix=f'{self.bulk_dataset_name}_{sample_type[:3]}'
-            )
-            generated_cell_frac.to_csv(self.generated_cell_fraction_fp, float_format='%g', index_label='sample_id')
-        else:
-            print(f'   > Using existing cell fractions: {self.generated_cell_fraction_fp}')
-
-    def _prepare_gene_expression(self, ref_gene_list_fp: Optional[str]):
-        """Helper to align expression data with reference gene list."""
-        if ref_gene_list_fp:
-            print(f'   > Aligning with reference genes from: {ref_gene_list_fp}')
-            ref_gene_list = pd.read_csv(ref_gene_list_fp, index_col=0).index.to_list()
-
-            # Use ReadExp for safe handling
-            sc_df_obj = ReadExp(self.merged_sc_dataset_df, exp_type='TPM')
-            sc_df_obj.align_with_gene_list(ref_gene_list)
-            # Update the main dataframe in memory
-            self.merged_sc_dataset_df = sc_df_obj.get_exp()
-            print(f'   > Dataset aligned. Genes: {self.merged_sc_dataset_df.shape[1]}')
-
-    def _get_cell_distance_dict(self):
-        """Calculate cell distance dictionary for n_neighbors sampling for all cell types in "output_types"."""
-        print('   > Calculating cell distance dictionary for n_neighbors sampling...')
-        self.cell_distance_dict = get_distance_matrices_by_class(
-            adata_X=self.merged_sc_dataset.X.toarray(),
-            obs_df=self.merged_sc_dataset_obs,
-            class_by='output_types',
-            metric='euclidean'
-        )
-
-    def _process_chunk(self, rows: pd.DataFrame, sample_type: str, n_base: int,
-                       min_n_base: int, sep_by_patient: bool, simu_method: str = 'ave',
-                       sampling_method_gep: str = 'random'):
-        """
-        Process a single chunk of samples: select cells -> aggregate -> save.
-        """
-        # Determine total cells to aggregate
-        if sample_type == 'positive' and n_base > 1:
-            total_cell_number = n_base
-        else:
-            # For negative samples or single-cell positive samples
-            total_cell_number = 0
-
-            # Filter Observation DataFrame based on sample type
-        # current_obs_df = self.merged_sc_dataset_obs
-        current_obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(simu_method)
-
-        if sample_type == 'positive':
-            # Identify the single active cell type in this chunk
-            # Note: This assumes the chunk is homogeneous or we process row by row.
-            # If chunk has mixed types, we must be careful.
-            # The original code assumed 1 chunk = 1 type or handled it via argmax.
-            # Here we iterate to be safe if a chunk contains multiple types (rare but possible).
-
-            # Optimization: If all rows in chunk target the same cell type
-            unique_targets = rows.idxmax(axis=1).unique()
-
-            if len(unique_targets) == 1:
-                target_type = unique_targets[0]
-                current_obs_df = self._get_obs_for_type(target_type, min_n_base, n_base)
-            else:
-                # Mixed chunk: This is complex. For performance, we pass full obs
-                # and let _sc_sampling handle filtering, or we split the chunk.
-                # Passing full obs is safer here.
-                pass
-
-        # Sampling
-        selected_cell_ids = self._sc_sampling(
-            cell_frac=rows,
-            total_cell_number=total_cell_number,
-            obs_df=current_obs_df,
-            sep_by_patient=sep_by_patient,
-            minimum_n_base=min_n_base,
-            sc_dataset=sc_dataset_key,
-            cell_distance_dict=self.cell_distance_dict,
-            sampling_method_gep=sampling_method_gep,
-        )
-
-        # Aggregation
-        simulated_gep = self._map_cell_id2exp(
-            selected_cell_id=selected_cell_ids,
-            simu_method=simu_method,
-            cell_frac=rows,
-            sc_dataset='merged_sc_dataset',
-            gep_type='SCT'
-        )
-
-        # Save
-        if simulated_gep is not None:
-            simulated_gep = log2_transform(simulated_gep)
-            self.generated_bulk_gep_counter += simulated_gep.shape[0]
-
-            # Ensure alignment
-            valid_indices = simulated_gep.index
-            selected_cell_ids = selected_cell_ids.loc[valid_indices].copy()
-
-            self._save_simulated_bulk_gep(gep=simulated_gep, cell_id=selected_cell_ids)
-
-    def _get_obs_for_type(self, cell_type: str, min_n: int, warn_n: int) -> pd.DataFrame:
-        """Helper to filter obs for a specific cell type."""
-        col_name = self.subtype_col_name if cell_type in self.cell_subtype_used else self.cell_type_col_name
-
-        if col_name not in self.merged_sc_dataset_obs.columns:
-            raise ValueError(f"Column '{col_name}' not found in obs.")
-
-        filtered_obs = self.merged_sc_dataset_obs.loc[
-            self.merged_sc_dataset_obs[col_name] == cell_type
-            ].copy()
-
-        if filtered_obs.shape[0] < min_n:
-            raise ValueError(f"Insufficient cells for {cell_type}: {filtered_obs.shape[0]} < {min_n}")
-        elif filtered_obs.shape[0] <= warn_n:
-            print(f"   > Warning: {cell_type} has only {filtered_obs.shape[0]} cells (requested {warn_n}).")
-
-        return filtered_obs
-
-    def _finalize_dataset(self):
-        """Create final H5AD."""
-        data_info = f'Simulated {self.generated_bulk_gep_counter} SCT GEPs, log2(TPM + 1)'
-        create_h5ad_dataset(
-            simulated_bulk_exp_file_path=self.generated_bulk_gep_csv_fp,
-            cell_fraction_file_path=self.generated_cell_fraction_fp,
-            dataset_info=data_info,
-            result_file_path=self.generated_bulk_gep_fp
-        )
-
-    def generate_frac_sc(self, sample_prefix: str = None, sample_type: str = 'positive') -> pd.DataFrame:
-        """
-        Generate cell fractions for single cell samples.
-
-        Positive: 100% of one cell type.
-        Negative: Mixture of >= 2 cell types.
-
-        :param sample_prefix: Prefix for sample names.
-        :param sample_type: 'positive' or 'negative'.
-        :return: DataFrame (samples x cell_types).
-        """
-        if sample_prefix is None:
-            sample_prefix = f's_sc_{sample_type}'
-
-        cols = self.cell_type_used + self.cell_subtype_used
-        n_cell_types = len(cols)
-
-        # Initialize empty DataFrame
-        # Note: creating a huge zero matrix can be memory intensive.
-        # If n_samples is huge, consider generating in chunks.
-        generated_frac_df = pd.DataFrame(
-            0.0,
-            index=[f'{sample_prefix}_{i}' for i in range(self.n_samples)],
-            columns=cols
-        )
-
-        if sample_type == 'positive':
-            # Evenly distribute samples across all cell types
-            samples_per_type = self.n_samples // n_cell_types
-
-            for i, cell_type in enumerate(cols):
-                start_idx = i * samples_per_type
-                # Handle remainder for the last cell type
-                end_idx = self.n_samples if i == n_cell_types - 1 else (i + 1) * samples_per_type
-
-                generated_frac_df.iloc[start_idx:end_idx, i] = 1.0
-
-        else:  # Negative samples (Mixtures)
-            # Distribute samples across different "complexity levels" (2 types, 3 types ... N types)
-            # Range: 2 to n_cell_types
-            complexity_levels = list(range(2, n_cell_types + 1))
-            n_levels = len(complexity_levels)
-            samples_per_level = self.n_samples // n_levels
-
-            current_idx = 0
-
-            for level_i, n_ct in enumerate(complexity_levels):
-                # Determine range for this complexity level
-                end_idx = self.n_samples if level_i == n_levels - 1 else current_idx + samples_per_level
-
-                n_rows = end_idx - current_idx
-                if n_rows <= 0: break
-
-                frac_val = 1.0 / n_ct
-
-                # Vectorized generation for this block isn't easy due to random choice per row,
-                # but we can optimize the loop.
-                for row_idx in range(current_idx, end_idx):
-                    if n_ct < n_cell_types:
-                        chosen_indices = np.random.choice(n_cell_types, size=n_ct, replace=False)
-                    else:
-                        chosen_indices = np.arange(n_cell_types)
-
-                    generated_frac_df.iloc[row_idx, chosen_indices] = frac_val
-
-                current_idx = end_idx
-
-        return generated_frac_df.round(4)

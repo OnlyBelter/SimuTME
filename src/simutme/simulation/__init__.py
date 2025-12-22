@@ -1,1 +1,2 @@
-from .simulator import BulkGEPGenerator, SingleCellTypeGEPGenerator
+from .simulator import BulkGEPGenerator
+from .simulator_sct import SingleCellTypeGEPGenerator
