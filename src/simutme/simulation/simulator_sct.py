@@ -49,13 +49,13 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     def generate_samples(self,
                          n_sample_each_cell_type: int = 10000,
                          n_base_for_positive_samples: int = 100,
-                         sample_type: str = SampleType.POSITIVE,
+                         sample_type: str = 'positive',
                          sep_by_patient: bool = False,
-                         simu_method: str = SimuMethod.AVERAGE,
+                         simu_method: str = 'ave',
                          test_set: bool = False,
                          minimum_n_base: int = 1,
                          ref_gene_list_file_path: Optional[str] = None,
-                         sampling_method: str = SamplingMethodGEP.RANDOM,
+                         sampling_method: str = 'random',
                          ) -> None:
         """
         Generate simulated samples (Positive: pure cell types; Negative: mixtures).
@@ -137,7 +137,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                     pbar.set_postfix({'processed': processed_samples, 'total': self.n_samples})
         logger.info(f"Generation completed: {self.generated_bulk_gep_counter} samples generated.")
         # 6. Finalize
-        self._finalize_dataset()
+        self._finalize_dataset(sampling_method=sampling_method)
 
     def _prepare_fractions(self, sample_type: str, n_sample_each_cell_type: int):
         """Helper to generate or verify cell fraction file."""
@@ -316,9 +316,10 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
         return filtered_obs
 
-    def _finalize_dataset(self):
+    def _finalize_dataset(self, sampling_method: str = 'random') -> None:
         """Create final H5AD."""
         data_info = f'Simulated {self.generated_bulk_gep_counter} SCT GEPs, log2(TPM + 1)'
+        self.generated_bulk_gep_fp = self.generated_bulk_gep_fp.parent / self.generated_bulk_gep_fp.name.replace('SCT', f'SCT_{sampling_method}')
         create_h5ad_dataset(
             simulated_bulk_exp_file_path=self.generated_bulk_gep_csv_fp,
             cell_fraction_file_path=self.generated_cell_fraction_fp,
