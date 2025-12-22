@@ -4,16 +4,16 @@ import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from joblib import dump, load
+from joblib import load
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Tuple, Any
 
 from .utility import do_pca_analysis, plot_pca
 from .utility import cal_corr_gene_exp_with_cell_frac
 # Assuming these are existing imports in your project
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
-from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator
+from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
 
 
 # --- 1. Configuration Management ---
@@ -150,7 +150,7 @@ def run_bulk_simulation(dataset_name: str,
 
         # 2. Generate GEP (if it doesn't exist)
         if not os.path.exists(generated_bulk_gep_fp):
-            bulk_generator.generate_gep(
+            gep_gen_config = GEPGenerationConfig(
                 n_samples=params['n_samples'],
                 simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
                 sampling_method_prop=params['sampling_method_prop'],
@@ -168,6 +168,7 @@ def run_bulk_simulation(dataset_name: str,
                 norm_ord=1,
                 pca_n_components=config.pca_n_components
             )
+            bulk_generator.generate_gep(config=gep_gen_config)
         else:
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
 
