@@ -171,7 +171,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             adata_X=self.merged_sc_dataset.X.toarray(),
             obs_df=self.merged_sc_dataset_obs,
             class_by='output_types',
-            metric='euclidean'
+            n_jobs= max(os.cpu_count() - 2, 1)
         )
 
     def _process_chunk(

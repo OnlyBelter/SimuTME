@@ -1,20 +1,25 @@
-import logging
 import os
 import csv
 import time
+import logging
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from tqdm import tqdm
 import multiprocessing
 from pathlib import Path
 import matplotlib as mpl
+import multiprocessing as mp
 from joblib import dump, load
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from sklearn.decomposition import PCA
 from anndata import AnnData, read_h5ad
-from scipy.spatial.distance import pdist, squareform
+from sklearn.metrics import euclidean_distances
 from typing import Union, List, Dict, Optional, Tuple
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 logger = logging.getLogger(__name__)
 
 from ..config import DEFAULT_CELL_TYPES, DEFAULT_CORE_MARKER_GENES
@@ -34,7 +39,7 @@ def set_fig_style(font_family: str = None, font_size: int = None):
     except (OSError, ImportError):
         print('Warning: "SciencePlots" style not found. Falling back to seaborn default. '
               'See https://github.com/garrettj403/SciencePlots')
-        sns.set(palette='muted', font_scale=1.5)
+        sns.set_theme(palette='muted', font_scale=1.5)
 
     # Set global parameters
     params = {
@@ -632,7 +637,8 @@ def get_distance_matrices_by_class(
         adata_X: np.ndarray,
         obs_df: pd.DataFrame,
         class_by: str = 'cell_type',
-        metric: str = 'euclidean'
+        n_jobs: int = 1,
+        show_progress: bool = True
 ) -> Dict[str, Tuple[np.ndarray, List[str]]]:
     """
     Compute pairwise distance matrices for each class separately.
@@ -645,51 +651,133 @@ def get_distance_matrices_by_class(
         DataFrame corresponding to `adata.obs`. Index contains cell IDs.
     class_by : str, default='cell_type'
         Column name in `obs_df` that defines the classes.
-    metric : str, default='euclidean'
-        Distance metric. Options: 'euclidean', 'cosine', 'correlation', etc.
+    n_jobs : int, default=1
+        Number of parallel jobs. Use -1 for all CPU cores.
+    show_progress : bool, default=True
+        Whether to show progress bar.
 
     Returns
     -------
     distance_dict : dict
         Dictionary mapping each class to a tuple of:
-        - distance_matrix (np.ndarray): Pairwise distance matrix for cells in this class
-        - cell_ids (list of str): Ordered list of cell IDs corresponding to the matrix rows/cols
-
-    Examples
-    --------
-    >>> dist_dict = get_distance_matrices_by_class(adata.X, adata.obs, class_by='cell_type')
-    >>> # Access T cell distance matrix
-    >>> t_cell_dist, t_cell_ids = dist_dict['T cells']
-    >>> print(t_cell_dist.shape)  # (n_t_cells, n_t_cells)
+        - distance_matrix (np.ndarray): Pairwise distance matrix
+        - cell_ids (list of str): Ordered list of cell IDs
     """
+    # Validation
     if class_by not in obs_df.columns:
         raise KeyError(f'Column "{class_by}" not found in obs_df.')
 
+    # Convert to float32
+    adata_X = adata_X.astype(np.float32)
+
+    # Group by class
+    grouped = obs_df.groupby(class_by, observed=True)
+
+    # Determine number of workers
+    if n_jobs == -1:
+        n_jobs = mp.cpu_count()
+
+    # Sequential processing (default)
+    if n_jobs == 1:
+        return _compute_distances_sequential(
+            adata_X, grouped, obs_df, show_progress
+        )
+
+    # Parallel processing
+    return _compute_distances_parallel(
+        adata_X, grouped, obs_df, n_jobs, show_progress
+    )
+
+
+def _compute_distances_sequential(
+        adata_X: np.ndarray,
+        grouped: pd.core.groupby.DataFrameGroupBy,
+        obs_df: pd.DataFrame,
+        show_progress: bool
+) -> Dict[str, Tuple[np.ndarray, List[str]]]:
+    """Sequential distance computation."""
     distance_dict = {}
-    unique_classes = obs_df[class_by].unique()
 
-    for cell_class in unique_classes:
-        print('Processing class:', cell_class)
-        # Get cells belonging to this class
-        mask = obs_df[class_by] == cell_class
-        cell_ids = obs_df.loc[mask].index.to_list()
-        cell_indices = [obs_df.index.get_loc(cid) for cid in cell_ids]
+    iterator = grouped
+    if show_progress:
+        iterator = tqdm(grouped, desc='Computing distances', unit='class')
 
-        # Extract expression matrix for this class
+    for cell_class, group in iterator:
+        cell_ids = group.index.to_list()
+        cell_indices = obs_df.index.get_indexer(cell_ids)
         X_subset = adata_X[cell_indices, :]
 
-        # Compute distance matrix
         if len(cell_ids) > 1:
-            condensed_dist = pdist(X_subset, metric=metric)
-            distance_matrix = squareform(condensed_dist)
+            distance_matrix = euclidean_distances(X_subset).astype(np.float32)
         else:
-            # Single cell: distance to itself is 0
-            distance_matrix = np.array([[0.0]])
+            distance_matrix = np.array([[0.0]], dtype=np.float32)
 
         distance_dict[cell_class] = (distance_matrix, cell_ids)
-        print(f"Computed distance matrix for '{cell_class}': {distance_matrix.shape}")
+
+        if show_progress:
+            iterator.set_postfix({'cells': len(cell_ids)})
 
     return distance_dict
+
+
+def _compute_distances_parallel(
+        adata_X: np.ndarray,
+        grouped: pd.core.groupby.DataFrameGroupBy,
+        obs_df: pd.DataFrame,
+        n_jobs: int,
+        show_progress: bool
+) -> Dict[str, Tuple[np.ndarray, List[str]]]:
+    """Parallel distance computation."""
+    # Prepare tasks
+    tasks = []
+    for cell_class, group in grouped:
+        cell_ids = group.index.to_list()
+        cell_indices = obs_df.index.get_indexer(cell_ids)
+        X_subset = adata_X[cell_indices, :]
+        tasks.append((cell_class, X_subset, cell_ids))
+
+    distance_dict = {}
+
+    # Process in parallel
+    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        # Submit all tasks
+        future_to_class = {
+            executor.submit(_compute_single_distance, X_subset, cell_ids): cell_class
+            for cell_class, X_subset, cell_ids in tasks
+        }
+
+        # Collect results with progress bar
+        iterator = as_completed(future_to_class)
+        if show_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(tasks),
+                desc=f'Computing distances ({n_jobs} workers)',
+                unit='class'
+            )
+
+        for future in iterator:
+            cell_class = future_to_class[future]
+            distance_matrix, cell_ids = future.result()
+            distance_dict[cell_class] = (distance_matrix, cell_ids)
+
+            if show_progress:
+                iterator.set_postfix({'cells': len(cell_ids)})
+
+    return distance_dict
+
+
+def _compute_single_distance(
+        X_subset: np.ndarray,
+        cell_ids: List[str]
+) -> Tuple[np.ndarray, List[str]]:
+    """Worker function for parallel processing."""
+    if len(cell_ids) > 1:
+        distance_matrix = euclidean_distances(X_subset).astype(np.float32)
+    else:
+        distance_matrix = np.array([[0.0]], dtype=np.float32)
+
+    return distance_matrix, cell_ids
 
 
 def get_available_threads(requested: int) -> int:
