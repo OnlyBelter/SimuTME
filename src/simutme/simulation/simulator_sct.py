@@ -167,11 +167,12 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     def _get_cell_distance_dict(self):
         """Calculate cell distance dictionary for n_neighbors sampling for all cell types in "output_types"."""
         logging.info('Calculating cell distance dictionary for n_neighbors sampling...')
+        max_cpu = os.cpu_count() - 2 if os.cpu_count() and os.cpu_count() >= 4 else 1
         self.cell_distance_dict = get_distance_matrices_by_class(
             adata_X=self.merged_sc_dataset.X.toarray(),
             obs_df=self.merged_sc_dataset_obs,
             class_by='output_types',
-            n_jobs= max(os.cpu_count() - 2, 1)
+            n_jobs= min(max_cpu, 10)
         )
 
     def _process_chunk(
