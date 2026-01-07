@@ -119,6 +119,7 @@ def run_bulk_simulation(dataset_name: str,
                                            sep_by_patient=False,
                                            n_base_for_positive_samples=n_base,
                                            sampling_method=params.get('sampling_method_gep', 'random'), # sampling method for finding single cells
+                                           max_cells_per_cell_type=params.get('max_cells_per_cell_type', 15000)
                                            )
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
         else:
