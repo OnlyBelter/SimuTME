@@ -638,10 +638,14 @@ def get_distance_matrices_by_class(
         obs_df: pd.DataFrame,
         class_by: str = 'cell_type',
         n_jobs: int = 1,
+        max_cells_per_class: Optional[int] = 15000,
+        random_seed: Optional[int] = 42,
         show_progress: bool = True
 ) -> Dict[str, Tuple[np.ndarray, List[str]]]:
     """
     Compute pairwise distance matrices for each class separately.
+
+    Automatically samples cells if a class has more than max_cells_per_class.
 
     Parameters
     ----------
@@ -652,7 +656,12 @@ def get_distance_matrices_by_class(
     class_by : str, default='cell_type'
         Column name in `obs_df` that defines the classes.
     n_jobs : int, default=1
-        Number of parallel jobs. Use -1 for all CPU cores.
+        Number of parallel jobs. Use -1 for auto (capped at 8).
+    max_cells_per_class : int or None, default=15000
+        Maximum number of cells to use per class. If a class has more cells,
+        randomly sample this many. Set to None to disable sampling.
+    random_seed : int or None, default=42
+        Random seed for reproducibility. Set to None for non-deterministic sampling.
     show_progress : bool, default=True
         Whether to show progress bar.
 
@@ -661,57 +670,120 @@ def get_distance_matrices_by_class(
     distance_dict : dict
         Dictionary mapping each class to a tuple of:
         - distance_matrix (np.ndarray): Pairwise distance matrix
-        - cell_ids (list of str): Ordered list of cell IDs
+        - cell_ids (list of str): Ordered list of cell IDs (sampled if applicable)
+
+    Examples
+    --------
+    >>> # Sample at most 15000 cells per type
+    >>> dist_dict = get_distance_matrices_by_class(
+    ...     adata.X, adata.obs,
+    ...     class_by='cell_type',
+    ...     max_cells_per_class=15000
+    ... )
+
+    >>> # Disable sampling
+    >>> dist_dict = get_distance_matrices_by_class(
+    ...     adata.X, adata.obs,
+    ...     class_by='cell_type',
+    ...     max_cells_per_class=None
+    ... )
     """
     # Validation
     if class_by not in obs_df.columns:
         raise KeyError(f'Column "{class_by}" not found in obs_df.')
 
     # Convert to float32
-    adata_X = adata_X.astype(np.float32)
+    if adata_X.dtype != np.float32:
+        adata_X = adata_X.astype(np.float32)
+
+    # Set random seed
+    if random_seed is not None:
+        np.random.seed(random_seed)
 
     # Group by class
     grouped = obs_df.groupby(class_by, observed=True)
 
     # Determine number of workers
     if n_jobs == -1:
-        n_jobs = mp.cpu_count()
+        n_jobs = min(mp.cpu_count(), 8)
 
-    # Sequential processing (default)
-    if n_jobs == 1:
-        return _compute_distances_sequential(
-            adata_X, grouped, obs_df, show_progress
+    # Prepare tasks with sampling
+    tasks = []
+    sampling_info = []
+
+    for cell_class, group in grouped:
+        n_cells_original = len(group)
+        cell_ids = group.index.to_list()
+
+        # Sample cells if needed
+        if max_cells_per_class is not None and n_cells_original > max_cells_per_class:
+            # Random sampling
+            sampled_indices = np.random.choice(
+                n_cells_original,
+                size=max_cells_per_class,
+                replace=False
+            )
+            sampled_indices.sort()  # Keep order for reproducibility
+
+            cell_ids_sampled = [cell_ids[i] for i in sampled_indices]
+            n_cells_sampled = len(cell_ids_sampled)
+
+            sampling_info.append({
+                'class': cell_class,
+                'original': n_cells_original,
+                'sampled': n_cells_sampled,
+                'ratio': n_cells_sampled / n_cells_original
+            })
+
+            cell_ids = cell_ids_sampled
+
+        # Get indices in original matrix
+        cell_indices = obs_df.index.get_indexer(cell_ids)
+
+        tasks.append((cell_class, cell_indices, cell_ids))
+
+    # Print sampling info
+    if sampling_info and show_progress:
+        print("\n" + "=" * 70)
+        print("CELL SAMPLING SUMMARY")
+        print("=" * 70)
+        for info in sampling_info:
+            print(f"{info['class']:30s}: {info['original']:7,} → {info['sampled']:7,} cells "
+                  f"({info['ratio'] * 100:.1f}%)")
+        print("=" * 70 + "\n")
+
+    # Compute distances
+    distance_dict = {}
+
+    if n_jobs > 1 and len(tasks) > 1:
+        # Parallel processing
+        distance_dict = _compute_distances_parallel(
+            adata_X, tasks, n_jobs, show_progress
+        )
+    else:
+        # Sequential processing
+        distance_dict = _compute_distances_sequential(
+            adata_X, tasks, show_progress
         )
 
-    # Parallel processing
-    return _compute_distances_parallel(
-        adata_X, grouped, obs_df, n_jobs, show_progress
-    )
+    return distance_dict
 
 
 def _compute_distances_sequential(
         adata_X: np.ndarray,
-        grouped: pd.core.groupby.DataFrameGroupBy,
-        obs_df: pd.DataFrame,
+        tasks: List[Tuple],
         show_progress: bool
 ) -> Dict[str, Tuple[np.ndarray, List[str]]]:
     """Sequential distance computation."""
     distance_dict = {}
 
-    iterator = grouped
+    iterator = tasks
     if show_progress:
-        iterator = tqdm(grouped, desc='Computing distances', unit='class')
+        iterator = tqdm(tasks, desc='Computing distances', unit='class')
 
-    for cell_class, group in iterator:
-        cell_ids = group.index.to_list()
-        cell_indices = obs_df.index.get_indexer(cell_ids)
+    for cell_class, cell_indices, cell_ids in iterator:
         X_subset = adata_X[cell_indices, :]
-
-        if len(cell_ids) > 1:
-            distance_matrix = euclidean_distances(X_subset).astype(np.float32)
-        else:
-            distance_matrix = np.array([[0.0]], dtype=np.float32)
-
+        distance_matrix = _compute_single_distance_matrix(X_subset)
         distance_dict[cell_class] = (distance_matrix, cell_ids)
 
         if show_progress:
@@ -722,31 +794,22 @@ def _compute_distances_sequential(
 
 def _compute_distances_parallel(
         adata_X: np.ndarray,
-        grouped: pd.core.groupby.DataFrameGroupBy,
-        obs_df: pd.DataFrame,
+        tasks: List[Tuple],
         n_jobs: int,
         show_progress: bool
 ) -> Dict[str, Tuple[np.ndarray, List[str]]]:
     """Parallel distance computation."""
-    # Prepare tasks
-    tasks = []
-    for cell_class, group in grouped:
-        cell_ids = group.index.to_list()
-        cell_indices = obs_df.index.get_indexer(cell_ids)
-        X_subset = adata_X[cell_indices, :]
-        tasks.append((cell_class, X_subset, cell_ids))
-
     distance_dict = {}
 
-    # Process in parallel
     with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-        # Submit all tasks
-        future_to_class = {
-            executor.submit(_compute_single_distance, X_subset, cell_ids): cell_class
-            for cell_class, X_subset, cell_ids in tasks
-        }
+        # Submit tasks
+        future_to_class = {}
+        for cell_class, cell_indices, cell_ids in tasks:
+            X_subset = adata_X[cell_indices, :]
+            future = executor.submit(_compute_single_distance_worker, X_subset, cell_ids)
+            future_to_class[future] = (cell_class, cell_ids)
 
-        # Collect results with progress bar
+        # Collect results
         iterator = as_completed(future_to_class)
         if show_progress:
             iterator = tqdm(
@@ -757,27 +820,34 @@ def _compute_distances_parallel(
             )
 
         for future in iterator:
-            cell_class = future_to_class[future]
-            distance_matrix, cell_ids = future.result()
-            distance_dict[cell_class] = (distance_matrix, cell_ids)
+            cell_class, cell_ids = future_to_class[future]
+            try:
+                distance_matrix = future.result()
+                distance_dict[cell_class] = (distance_matrix, cell_ids)
 
-            if show_progress:
-                iterator.set_postfix({'cells': len(cell_ids)})
+                if show_progress:
+                    iterator.set_postfix({'cells': len(cell_ids)})
+            except Exception as e:
+                print(f"\n Error processing class '{cell_class}': {e}")
+                raise
 
     return distance_dict
 
 
-def _compute_single_distance(
+def _compute_single_distance_worker(
         X_subset: np.ndarray,
         cell_ids: List[str]
-) -> Tuple[np.ndarray, List[str]]:
+) -> np.ndarray:
     """Worker function for parallel processing."""
-    if len(cell_ids) > 1:
-        distance_matrix = euclidean_distances(X_subset).astype(np.float32)
-    else:
-        distance_matrix = np.array([[0.0]], dtype=np.float32)
+    return _compute_single_distance_matrix(X_subset)
 
-    return distance_matrix, cell_ids
+
+def _compute_single_distance_matrix(X_subset: np.ndarray) -> np.ndarray:
+    """Compute distance matrix for a subset of cells."""
+    if X_subset.shape[0] == 1:
+        return np.array([[0.0]], dtype=np.float32)
+
+    return euclidean_distances(X_subset).astype(np.float32)
 
 
 def get_available_threads(requested: int) -> int:

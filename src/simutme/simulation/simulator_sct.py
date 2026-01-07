@@ -56,6 +56,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                          minimum_n_base: int = 1,
                          ref_gene_list_file_path: Optional[str] = None,
                          sampling_method: str = 'random',
+                         max_cells_per_cell_type: int = 15000,
                          ) -> None:
         """
         Generate simulated samples (Positive: pure cell types; Negative: mixtures).
@@ -68,6 +69,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         :param test_set: If True, restricts cell types to major types only.
         :param minimum_n_base: Minimum required cells to form a sample.
         :param ref_gene_list_file_path: Path to a CSV containing the gene list to filter by.
+        :param max_cells_per_cell_type: Max cells to consider per cell type for distance calculation.
         :param sampling_method: 'random' or 'n_neighbors' for cell selection.
             n_neighbors considers cell similarity to find (n_base - 1) nearest neighbors around 1 randomly selected cell within the same cell type.
         """
@@ -99,7 +101,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
         # 4. Calculate cell distance dict if using n_neighbors sampling
         if sampling_method == 'n_neighbors' and not self.cell_distance_dict:
-            self._get_cell_distance_dict()
+            self._get_cell_distance_dict(max_cells_per_cell_type=max_cells_per_cell_type)
 
         # 5. Main Generation Loop
         chunk_size = max(100, int(n_sample_each_cell_type / 5)) if n_sample_each_cell_type > 1000 else n_sample_each_cell_type
@@ -164,7 +166,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             self.merged_sc_dataset_df = sc_df_obj.get_exp()
             logging.info(f'Dataset aligned. Genes: {self.merged_sc_dataset_df.shape[1]}')
 
-    def _get_cell_distance_dict(self):
+    def _get_cell_distance_dict(self, max_cells_per_cell_type: int = 15000) -> None:
         """Calculate cell distance dictionary for n_neighbors sampling for all cell types in "output_types"."""
         logging.info('Calculating cell distance dictionary for n_neighbors sampling...')
         max_cpu = os.cpu_count() - 2 if os.cpu_count() and os.cpu_count() >= 4 else 1
@@ -172,7 +174,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             adata_X=self.merged_sc_dataset.X.toarray(),
             obs_df=self.merged_sc_dataset_obs,
             class_by='output_types',
-            n_jobs= min(max_cpu, 10)
+            n_jobs= min(max_cpu, 10),
+            max_cells_per_class=max_cells_per_cell_type,
         )
 
     def _process_chunk(
