@@ -360,8 +360,16 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 gene_list = self.sct_dataset_df.columns.to_list()
 
         else:
-            raise TypeError(f'Invalid simulation method "{simu_method}", '
-                            f'only {', '.join([k for k, v in SimuMethod.__dict__.items() if not k.startswith('__')])} are supported.')
+            supported = ", ".join(
+                [
+                    v
+                    for k, v in SimuMethod.__dict__.items()
+                    if (not k.startswith("__")) and isinstance(v, str)
+                ]
+            )
+            raise TypeError(
+                f'Invalid simulation method "{simu_method}", only {supported} are supported.'
+            )
 
         return obs_df, gene_list, sc_dataset
 
