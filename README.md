@@ -13,11 +13,13 @@ SimuTME is a Python package for simulating bulk RNA-seq gene expression profiles
 
 Requirements:
 
-- Python >= 3.12
+- Python = 3.12
 
 From source (recommended during development):
 
 ```bash
+conda create -n simutme python=3.12
+conda activate simutme
 pip install -e .
 ```
 
