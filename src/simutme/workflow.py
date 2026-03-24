@@ -131,10 +131,18 @@ def run_bulk_simulation(dataset_name: str,
             filtering_str = f'with_filtering_{config.gep_filtering_quantile[1]}'
         else:
             filtering_str = 'no_filtering'
-        sampling_method = params.get('sampling_method_prop')
-        if not sampling_method:
-            raise KeyError('Missing required parameter: "sampling_method_prop".')
-        simu_bulk_dir = simu_bulk_dir / f'{sampling_method}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
+        if not 'sampling_method_prop' in params:
+            logging.info("   > Warning: 'sampling_method_prop' not specified in params, defaulting to 'segment'")
+            sampling_method_prop = 'segment'
+        else:
+            sampling_method_prop = params.get('sampling_method_prop')
+        if not 'sampling_method_gep' in params:
+            logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
+            sampling_method_gep = 'random'
+        else:
+            sampling_method_gep = params.get('sampling_method_gep')
+
+        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_by_{sampling_method_gep}SCT_median_gep'
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
@@ -156,7 +164,7 @@ def run_bulk_simulation(dataset_name: str,
             gep_gen_config = GEPGenerationConfig(
                 n_samples=params['n_samples'],
                 simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
-                sampling_method_prop=sampling_method,
+                sampling_method_prop=sampling_method_prop,
                 reference_file=config.tcga_merged_tpm_file_path,
                 ref_exp_type='TPM',
                 filtering=params.get('filtering', False),
