@@ -121,21 +121,24 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         If None, all cell types and their subtypes will be included.
     """
 
-    def __init__(self,
-                 simu_bulk_dir: str | Path,
-                 merged_sc_dataset_file_path: str | Path,
-                 sct_dataset_file_path: Optional[Union[str, Path]],
-                 cell_type2subtype: Dict[str, List[str]],
-                 sc_dataset_ids: List[str],
-                 bulk_dataset_name: str = "simulated_bulk",
-                 check_basic_info: bool = True,
-                 zero_ratio_threshold: float = 0.97,
-                 sc_dataset_gep_type: str = 'log_space',
-                 tcga2cancer_type_file_path: str | Path = None,
-                 total_rna_coefficient: Optional[Dict[str, float]] = None,
-                 subtype_col_name: Optional[str] = 'cell_subtype',
-                 cell_type_col_name: str = 'cell_type',
-                 output_types: Optional[List[str]] = None):
+    def __init__(
+        self,
+        simu_bulk_dir: str | Path,
+        merged_sc_dataset_file_path: str | Path,
+        sct_dataset_file_path: Optional[Union[str, Path]],
+        cell_type2subtype: Dict[str, List[str]],
+        sc_dataset_ids: List[str],
+        bulk_dataset_name: str = "simulated_bulk",
+        check_basic_info: bool = True,
+        zero_ratio_threshold: float = 0.97,
+        sc_dataset_gep_type: str = 'log_space',
+        tcga2cancer_type_file_path: str | Path = None,
+        total_rna_coefficient: Optional[Dict[str, float]] = None,
+        subtype_col_name: Optional[str] = 'cell_subtype',
+        cell_type_col_name: str = 'cell_type',
+        output_types: Optional[List[str]] = None,
+        sampling_method_gep: str = 'random',
+    ):
 
         self.simu_bulk_dir = Path(simu_bulk_dir)
         self.simu_bulk_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +188,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
 
         # Define file paths
-        prefix = f'simu_bulk_exp_{self.bulk_dataset_name}'
+        prefix = f'simu_bulk_exp_{self.bulk_dataset_name}' + f'_by_{sampling_method_gep}SCT'
         self.generated_cell_fraction_fp = self.simu_bulk_dir / f'generated_frac_{self.bulk_dataset_name}.csv'
         self.ref_neighbor_counter_fp = self.simu_bulk_dir / f'ref2n_neighbors_{self.bulk_dataset_name}.csv'
         self.generated_bulk_gep_csv_fp = self.simu_bulk_dir / f'{prefix}_log2cpm1p.csv'

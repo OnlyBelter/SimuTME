@@ -142,7 +142,7 @@ def run_bulk_simulation(dataset_name: str,
         else:
             sampling_method_gep = params.get('sampling_method_gep')
 
-        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_by_{sampling_method_gep}SCT_median_gep'
+        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
@@ -154,7 +154,8 @@ def run_bulk_simulation(dataset_name: str,
             tcga2cancer_type_file_path=config.tcga2cancer_type_file_path,
             total_rna_coefficient=config.total_rna_coefficient,
             cell_type_col_name='cell_type',
-            subtype_col_name='cell_type'
+            subtype_col_name='cell_type',
+            sampling_method_gep=sampling_method_gep,
         )
 
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
