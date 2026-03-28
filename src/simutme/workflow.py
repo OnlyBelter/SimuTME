@@ -97,9 +97,15 @@ def run_bulk_simulation(dataset_name: str,
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
     n_base = config.n_base
-    sc_dataset_dir = simu_bulk_dir / f'generated_sc_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
     if params.get('dataset_type', 'mixed').lower() == 'sct':  # single-cell-type dataset
         logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
+        if 'sampling_method_gep' not in params:
+            logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
+            sampling_method_gep = 'random'
+        else:
+            sampling_method_gep = params.get('sampling_method_gep')
+
+        sc_dataset_dir = simu_bulk_dir / f'generated_sct_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
         sct_generator = SingleCellTypeGEPGenerator(
             simu_bulk_dir=sc_dataset_dir,
             cell_type2subtype=config.cell_type2subtypes,
@@ -110,6 +116,7 @@ def run_bulk_simulation(dataset_name: str,
             cell_type_col_name=params.get('cell_type_col', 'cell_type'),
             subtype_col_name=params.get('cell_subtype_col', 'cell_subtype'),
             output_types=config.output_types,
+            sampling_method_gep=sampling_method_gep,
         )
         generated_sct_fp = sct_generator.generated_bulk_gep_fp
         if not generated_sct_fp.exists():
@@ -118,7 +125,7 @@ def run_bulk_simulation(dataset_name: str,
                                            simu_method='ave',  # average multiple cells to get one sct GEP
                                            sep_by_patient=False,
                                            n_base_for_positive_samples=n_base,
-                                           sampling_method=params.get('sampling_method_gep', 'random'), # sampling method for finding single cells
+                                           sampling_method=sampling_method_gep, # sampling method for finding single cells
                                            max_cells_per_cell_type=params.get('max_cells_per_cell_type', 15000)
                                            )
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")

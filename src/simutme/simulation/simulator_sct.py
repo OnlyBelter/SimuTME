@@ -27,7 +27,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                  sc_dataset_gep_type: str = 'log_space',
                  subtype_col_name: Optional[str] = None,
                  cell_type_col_name: str = 'cell_type',
-                 output_types: Optional[List[str]] = None):
+                 output_types: Optional[List[str]] = None,
+                 sampling_method_gep: str = 'random'):
 
         super().__init__(
             merged_sc_dataset_file_path=merged_sc_dataset_file_path,
@@ -41,6 +42,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             subtype_col_name=subtype_col_name,
             cell_type_col_name=cell_type_col_name,
             output_types=output_types,
+            sampling_method_gep=sampling_method_gep,
         )
 
         # Cell distance matrix
@@ -323,7 +325,6 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
     def _finalize_dataset(self, sampling_method: str = 'random') -> None:
         """Create final H5AD."""
         data_info = f'Simulated {self.generated_bulk_gep_counter} SCT GEPs, log2(TPM + 1)'
-        self.generated_bulk_gep_fp = self.generated_bulk_gep_fp.parent / self.generated_bulk_gep_fp.name.replace('SCT', f'SCT_{sampling_method}')
         create_h5ad_dataset(
             simulated_bulk_exp_file_path=self.generated_bulk_gep_csv_fp,
             cell_fraction_file_path=self.generated_cell_fraction_fp,

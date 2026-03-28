@@ -188,9 +188,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
 
         # Define file paths
-        prefix = f'simu_bulk_exp_{self.bulk_dataset_name}' + f'_by_{sampling_method_gep}SCT'
-        self.generated_cell_fraction_fp = self.simu_bulk_dir / f'generated_frac_{self.bulk_dataset_name}.csv'
-        self.ref_neighbor_counter_fp = self.simu_bulk_dir / f'ref2n_neighbors_{self.bulk_dataset_name}.csv'
+        prefix = f'simu_gep_{self.bulk_dataset_name}_gepsamp-{sampling_method_gep}'
+        self.generated_cell_fraction_fp = (
+            self.simu_bulk_dir / f'cell_fractions_{self.bulk_dataset_name}_gepsamp-{sampling_method_gep}.csv'
+        )
+        self.ref_neighbor_counter_fp = (
+            self.simu_bulk_dir / f'ref2n_neighbors_{self.bulk_dataset_name}_gepsamp-{sampling_method_gep}.csv'
+        )
         self.generated_bulk_gep_csv_fp = self.simu_bulk_dir / f'{prefix}_log2cpm1p.csv'
         self.sampled_sc_cell_id_file_path = self.simu_bulk_dir / f'{prefix}_sampled_sc_cell_id.csv'
         self.generated_bulk_gep_fp = self.generated_bulk_gep_csv_fp.parent / self.generated_bulk_gep_csv_fp.name.replace('.csv', '.h5ad')
