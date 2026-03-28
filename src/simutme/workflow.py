@@ -16,6 +16,23 @@ from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filte
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
 
 
+def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str | None:
+    if not sct_dataset_file_path:
+        return None
+    p = str(sct_dataset_file_path).lower()
+    marker = "gepsamp-"
+    if marker in p:
+        tail = p.split(marker, 1)[1]
+        token = tail.split("/", 1)[0].split("_", 1)[0].split(".", 1)[0]
+        if token in {"random", "n_neighbors"}:
+            return token
+    if "n_neighbors" in p:
+        return "n_neighbors"
+    if "random" in p:
+        return "random"
+    return None
+
+
 # --- 1. Configuration Management ---
 @dataclass
 class SimuConfig:
@@ -144,8 +161,16 @@ def run_bulk_simulation(dataset_name: str,
         else:
             sampling_method_prop = params.get('sampling_method_prop')
         if not 'sampling_method_gep' in params:
-            logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
-            sampling_method_gep = 'random'
+            inferred = _infer_sampling_method_gep_from_sct_path(config.sct_dataset_file_path)
+            if inferred:
+                logging.info(
+                    "   > Warning: 'sampling_method_gep' not specified in params, inferred from sct_dataset_file_path:"
+                    f" {inferred}"
+                )
+                sampling_method_gep = inferred
+            else:
+                logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
+                sampling_method_gep = 'random'
         else:
             sampling_method_gep = params.get('sampling_method_gep')
 

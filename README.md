@@ -156,6 +156,8 @@ Valid values:
 - Mixed and SCT workflows write `.h5ad` datasets under `paths.simu_bulk_dir` (default GEPs are saved as $log_2 (TPM+1)$).
 - When `filtering: true`, the workflow may also generate filtered versions and PCA artifacts in the dataset output directory.
 
+Note for mixed bulk runs: if `sampling_method_gep` is omitted in a Mixed dataset config, it is inferred from `paths.sct_dataset_file_path` when the filename includes `gepsamp-random` or `gepsamp-n_neighbors`.
+
 ## Troubleshooting
 
 - `ModuleNotFoundError: No module named 'yaml'`: install dependencies (or use Poetry); YAML loading requires PyYAML.

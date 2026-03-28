@@ -1,7 +1,7 @@
 # --- File Paths ---
 paths:
   simu_bulk_dir: "./datasets/simulated_bulk_cell_dataset"
-  sct_dataset_file_path: "path/to/simu_bulk_exp_SCT_N10K_S1_16sct.h5ad"
+  sct_dataset_file_path: "path/to/sct_dataset_gepsamp-random.h5ad"
   tcga2cancer_type_file_path: "path/to/tcga_sample_id2cancer_type.csv"
   tcga_merged_tpm_file_path: "path/to/merged_tpm.csv"
   high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"
