@@ -16,10 +16,13 @@ from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filte
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
 
 
-def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Path) -> str | None:
+def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str | None:
     if not sct_dataset_file_path:
         return None
-    p = sct_dataset_file_path.name.lower()
+    try:
+        p = Path(sct_dataset_file_path).name.lower()
+    except TypeError:
+        p = str(sct_dataset_file_path).lower()
     if "n_neighbors" in p:
         return "n_neighbors"
     if "random" in p:
