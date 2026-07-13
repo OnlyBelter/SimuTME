@@ -14,6 +14,7 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
+from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 
 
 def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str | None:
@@ -54,6 +55,17 @@ class SimuConfig:
     gep_filtering_quantile: Tuple[float, float]
     pca_n_components: float
     gene_list_type: str
+    sorted_bulk_expr_file_path: Path | None = None
+    sorted_bulk_annot_file_path: Path | None = None
+    sorted_bulk_cell_type_mapping_file_path: Path | None = None
+    sorted_bulk_cell_type_col: str = "Tumor_model_annot"
+    sorted_bulk_imputation_eps: float = 1e-8
+    sorted_bulk_imputation_seed: int = 123
+    sorted_bulk_imputation_batch_size: int = 128
+    sorted_bulk_imputation_boxplot_sample_size: int = 1000
+    sorted_bulk_imputation_y_frac_threshold: float = 0.15
+    sorted_bulk_imputation_output_suffix: str = "_sorted_bulk_imputed"
+    sorted_bulk_imputation_out_dir: Path | None = None
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -145,6 +157,17 @@ def run_bulk_simulation(dataset_name: str,
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
         else:
             logging.info(f"   > Single-Cell-Type GEP file exists: {generated_sct_fp}")
+        config.sct_dataset_file_path = generated_sct_fp
+        if params.get('apply_sorted_bulk_imputation', False):
+            imputed_sct_fp = _run_sorted_bulk_imputation_for_sct_dataset(
+                dataset_name=dataset_name,
+                generated_sct_fp=generated_sct_fp,
+                params=params,
+                config=config,
+            )
+            config.sct_dataset_file_path = imputed_sct_fp
+            logging.info("   > Updated config.sct_dataset_file_path to imputed SCT dataset: %s", imputed_sct_fp)
+            return str(imputed_sct_fp)
         return str(generated_sct_fp)
     else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
@@ -174,6 +197,7 @@ def run_bulk_simulation(dataset_name: str,
                 )
         else:
             sampling_method_gep = params.get('sampling_method_gep')
+        logging.info("   > Mixed simulation will use SCT dataset: %s", config.sct_dataset_file_path)
 
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
@@ -448,3 +472,64 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
             create_h5ad_dataset(simulated_bulk_exp_file_path=bulk_exp,
                                 cell_fraction_file_path=cell_frac_file, dataset_info=dataset_info,
                                 result_file_path=h5ad_file_path)
+
+
+def _run_sorted_bulk_imputation_for_sct_dataset(
+    dataset_name: str,
+    generated_sct_fp: str | Path,
+    params: Dict[str, Any],
+    config: SimuConfig,
+) -> Path:
+    bulk_expr_value = params.get("sorted_bulk_expr_file_path", config.sorted_bulk_expr_file_path)
+    bulk_annot_value = params.get("sorted_bulk_annot_file_path", config.sorted_bulk_annot_file_path)
+    mapping_value = params.get(
+        "sorted_bulk_cell_type_mapping_file_path",
+        config.sorted_bulk_cell_type_mapping_file_path,
+    )
+    missing_inputs = [
+        name
+        for name, value in [
+            ("sorted_bulk_expr_file_path", bulk_expr_value),
+            ("sorted_bulk_annot_file_path", bulk_annot_value),
+            ("sorted_bulk_cell_type_mapping_file_path", mapping_value),
+        ]
+        if value in (None, "")
+    ]
+    if missing_inputs:
+        raise ValueError(
+            f"Missing required sorted-bulk imputation config for {dataset_name}: {missing_inputs}"
+        )
+
+    generated_sct_fp = Path(generated_sct_fp)
+    output_suffix = params.get("sorted_bulk_imputation_output_suffix", config.sorted_bulk_imputation_output_suffix)
+    output_h5ad = generated_sct_fp.with_name(f"{generated_sct_fp.stem}{output_suffix}{generated_sct_fp.suffix}")
+    out_dir_parent_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
+    out_dir_parent = Path(out_dir_parent_value) if out_dir_parent_value not in (None, "") else generated_sct_fp.parent
+    out_dir = out_dir_parent / dataset_name
+
+    logging.info("   > Running optional sorted-bulk-guided SCT imputation for %s", dataset_name)
+    return run_sorted_bulk_guided_sct_imputation(
+        input_h5ad=generated_sct_fp,
+        output_h5ad=output_h5ad,
+        bulk_expr=Path(bulk_expr_value),
+        bulk_annot=Path(bulk_annot_value),
+        cell_type_mapping=Path(mapping_value),
+        out_dir=out_dir,
+        output_prefix=dataset_name,
+        bulk_cell_type_col=params.get("sorted_bulk_cell_type_col", config.sorted_bulk_cell_type_col),
+        eps=float(params.get("sorted_bulk_imputation_eps", config.sorted_bulk_imputation_eps)),
+        seed=int(params.get("sorted_bulk_imputation_seed", config.sorted_bulk_imputation_seed)),
+        batch_size=int(params.get("sorted_bulk_imputation_batch_size", config.sorted_bulk_imputation_batch_size)),
+        sct_boxplot_sample_size=int(
+            params.get(
+                "sorted_bulk_imputation_boxplot_sample_size",
+                config.sorted_bulk_imputation_boxplot_sample_size,
+            )
+        ),
+        y_frac_threshold=float(
+            params.get(
+                "sorted_bulk_imputation_y_frac_threshold",
+                config.sorted_bulk_imputation_y_frac_threshold,
+            )
+        ),
+    )

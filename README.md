@@ -6,6 +6,7 @@ SimuTME is a Python package for simulating bulk RNA-seq gene expression profiles
 
 - Configuration-driven workflow (YAML) for generating multiple datasets in one run
 - Mixed (multi-cell-type) bulk simulation and SCT (single-cell-type) profile generation
+- Optional sorted-bulk-guided post-imputation for SCT datasets, with diagnostics and handoff into later Mixed simulations
 - Multiple proportion-sampling strategies to mimic tumor purity and immune sparsity
 - Optional TCGA-guided filtering and PCA-based validation plots
 
@@ -72,6 +73,13 @@ For filtering / validation you typically also provide:
 - `paths.high_corr_gene_file_path`
 - `paths.tcga2cancer_type_file_path`
 
+For the optional sorted-bulk-guided SCT imputation workflow, also provide:
+
+- `paths.sorted_bulk_expr_file_path`: sorted bulk reference expression matrix
+- `paths.sorted_bulk_annot_file_path`: annotation table for the sorted bulk samples
+- `paths.sorted_bulk_cell_type_mapping_file_path`: mapping from SCT cell types to sorted bulk reference cell types
+- `paths.sorted_bulk_imputation_out_dir`: parent output directory for the imputation diagnostics; SimuTME will save results under `<this_dir>/<dataset_name>/`
+
 ### Dataset Types
 
 Each item under `datasets:` is one dataset run. Supported dataset types:
@@ -117,6 +125,17 @@ Optional keys (common):
 - `zero_ratio_threshold`: remove cells with high zero ratio
 - `max_cells_per_cell_type`: cap for distance computation when using `n_neighbors`
 - `cell_type_col`, `cell_subtype_col`: column names in `adata.obs`
+- `apply_sorted_bulk_imputation`: run sorted-bulk-guided zero imputation after SCT generation
+
+If `apply_sorted_bulk_imputation: true`, SimuTME will:
+
+1. generate the SCT `.h5ad` dataset
+2. run the sorted-bulk-guided imputation workflow on that SCT dataset
+3. save the imputed SCT dataset beside the original SCT output using `parameters.sorted_bulk_imputation_output_suffix`
+4. write diagnostics such as pre/post SCT sparsity plots and `y_fraction_of_total` summaries under `paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
+5. update `config.sct_dataset_file_path` to the imputed SCT dataset so later Mixed simulations in the same run use the imputed SCT file
+
+When you want later Mixed datasets to consume the imputed SCT dataset, place the SCT dataset earlier than those Mixed datasets in the `datasets:` section, because the workflow runs datasets in YAML order.
 
 Example:
 
@@ -126,7 +145,27 @@ datasets:
     dataset_type: "SCT"
     n_samples: 10
     sampling_method_gep: "n_neighbors"
+    apply_sorted_bulk_imputation: true
     filtering: false
+```
+
+### Optional Sorted-Bulk-Guided SCT Imputation Parameters
+
+The following global parameters control the optional SCT post-imputation workflow:
+
+- `parameters.sorted_bulk_cell_type_col`: cell-type column in the sorted bulk annotation table
+- `parameters.sorted_bulk_imputation_eps`: zero threshold used for sparsity and imputation logic
+- `parameters.sorted_bulk_imputation_seed`: random seed for bulk-reference sampling
+- `parameters.sorted_bulk_imputation_batch_size`: batch size used during SCT imputation
+- `parameters.sorted_bulk_imputation_boxplot_sample_size`: number of SCT cells sampled for boxplot rendering
+- `parameters.sorted_bulk_imputation_y_frac_threshold`: cap for the fraction of newly added expression per SCT sample
+- `parameters.sorted_bulk_imputation_output_suffix`: suffix appended to the imputed SCT `.h5ad`
+
+This workflow is only applied to datasets whose dataset section sets:
+
+```yaml
+dataset_type: "SCT"
+apply_sorted_bulk_imputation: true
 ```
 
 ## Sampling Strategies
@@ -155,8 +194,15 @@ Valid values:
 
 - Mixed and SCT workflows write `.h5ad` datasets under `paths.simu_bulk_dir` (default GEPs are saved as $log_2 (TPM+1)$).
 - When `filtering: true`, the workflow may also generate filtered versions and PCA artifacts in the dataset output directory.
+- When sorted-bulk-guided SCT imputation is enabled, SimuTME additionally writes:
+  - an imputed SCT `.h5ad`
+  - SCT sparsity summaries before and after imputation
+  - `y_fraction_of_total` summaries before and after threshold adjustment
+  - sorted bulk reference sparsity summaries used by the workflow
+  - all diagnostic CSVs and figures under `paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
 
 Note for mixed bulk runs: if `sampling_method_gep` is omitted in a Mixed dataset config, it is inferred from `paths.sct_dataset_file_path` when the filename includes `gepsamp-random` or `gepsamp-n_neighbors`.
+If a preceding SCT dataset enabled sorted-bulk-guided imputation, then `paths.sct_dataset_file_path` is updated in memory to the imputed SCT dataset and that file is used by later Mixed runs in the same workflow execution.
 
 ## Troubleshooting
 
