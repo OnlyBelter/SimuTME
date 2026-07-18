@@ -77,7 +77,7 @@ For the optional sorted-bulk-guided SCT imputation workflow, also provide:
 
 - `paths.sorted_bulk_expr_file_path`: sorted bulk reference expression matrix
 - `paths.sorted_bulk_annot_file_path`: annotation table for the sorted bulk samples
-- `paths.sorted_bulk_cell_type_mapping_file_path`: mapping from SCT cell types to sorted bulk reference cell types
+- `paths.sorted_bulk_cell_type_mapping_file_path`: mapping from SCT cell types to sorted bulk reference cell types, including an `included` column that controls post-imputation behavior
 - `paths.sorted_bulk_imputation_out_dir`: parent output directory for the imputation diagnostics; SimuTME will save results under `<this_dir>/<dataset_name>/`
 
 ### Dataset Types
@@ -125,7 +125,7 @@ Optional keys (common):
 - `zero_ratio_threshold`: remove cells with high zero ratio
 - `max_cells_per_cell_type`: cap for distance computation when using `n_neighbors`
 - `cell_type_col`, `cell_subtype_col`: column names in `adata.obs`
-- `apply_sorted_bulk_imputation`: run sorted-bulk-guided zero imputation after SCT generation
+- `apply_sorted_bulk_imputation`: run sorted-bulk-guided SCT post-imputation after SCT generation
 
 If `apply_sorted_bulk_imputation: true`, SimuTME will:
 
@@ -134,6 +134,11 @@ If `apply_sorted_bulk_imputation: true`, SimuTME will:
 3. save the imputed SCT dataset beside the original SCT output using `parameters.sorted_bulk_imputation_output_suffix`
 4. write diagnostics such as pre/post SCT sparsity plots and `y_fraction_of_total` summaries under `paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
 5. update `config.sct_dataset_file_path` to the imputed SCT dataset so later Mixed simulations in the same run use the imputed SCT file
+
+Within the mapping file:
+
+- `included == 1`: randomly sample one matched sorted-bulk GEP and replace the SCT profile with the TPM-space average `0.5 * SCT + 0.5 * bulk`
+- `included == 0`: keep the original zero-guided replacement workflow, including `y` calculation and `y_frac_threshold`
 
 When you want later Mixed datasets to consume the imputed SCT dataset, place the SCT dataset earlier than those Mixed datasets in the `datasets:` section, because the workflow runs datasets in YAML order.
 
@@ -160,6 +165,9 @@ The following global parameters control the optional SCT post-imputation workflo
 - `parameters.sorted_bulk_imputation_boxplot_sample_size`: number of SCT cells sampled for boxplot rendering
 - `parameters.sorted_bulk_imputation_y_frac_threshold`: cap for the fraction of newly added expression per SCT sample
 - `parameters.sorted_bulk_imputation_output_suffix`: suffix appended to the imputed SCT `.h5ad`
+
+The `y` diagnostics only apply to the `included == 0` branch. Rows processed by
+the `included == 1` averaging branch contribute zero in the `y` output tables.
 
 This workflow is only applied to datasets whose dataset section sets:
 

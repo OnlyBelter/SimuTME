@@ -45,7 +45,11 @@ then reads `datasets` separately when executing the workflow.
   Annotation table for the sorted bulk samples.
 
 - `sorted_bulk_cell_type_mapping_file_path`
-  Cell-type mapping file from SCT labels to sorted bulk reference labels.
+  Cell-type mapping file from SCT labels to sorted bulk reference labels. This
+  file must also include an `included` column:
+  - `included == 1`: average the SCT TPM profile with one randomly sampled
+    matched sorted-bulk TPM profile using `0.5 / 0.5`
+  - `included == 0`: keep the zero-guided replacement workflow
 
 - `sorted_bulk_imputation_out_dir`
   Parent directory for SCT post-imputation diagnostics. The actual outputs are
@@ -100,7 +104,9 @@ Per-cell-type scaling coefficients used during bulk simulation.
   Number of SCT samples used when drawing diagnostic boxplots.
 
 - `sorted_bulk_imputation_y_frac_threshold`
-  Maximum fraction of newly added expression allowed in each SCT sample.
+  Maximum fraction of newly added expression allowed in each SCT sample for the
+  `included == 0` zero-guided branch. It is not used for rows processed by the
+  `included == 1` averaging branch.
 
 - `sorted_bulk_imputation_output_suffix`
   Suffix appended to the imputed SCT `.h5ad` filename.
@@ -180,6 +186,10 @@ If sorted-bulk-guided post-imputation is enabled:
 - `y_fraction` per-cell tables and summaries
 - `y_fraction` before/after-adjustment boxplots
 - sorted bulk sparsity summaries
+
+Rows processed through the `included == 1` averaging branch still appear in the
+same output files, but their `y` values are recorded as zero because no
+zero-guided addition or cap step is applied there.
 
 ### Mixed simulation outputs
 

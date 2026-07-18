@@ -417,25 +417,32 @@ def _assign_bulk_samples_for_sct_cells(
     mapping_df: pd.DataFrame,
     bulk_indices: Dict[str, np.ndarray],
     seed: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     sct_to_bulk = dict(zip(mapping_df["cell_type_SCT_N6K_13Jul"], mapping_df["cell_type_Kassandra_SortedBulk"]))
+    sct_to_included = dict(zip(mapping_df["cell_type_SCT_N6K_13Jul"], mapping_df["included"]))
     rng = np.random.default_rng(seed)
     assigned = np.empty(sct_cell_types.shape[0], dtype=int)
+    included_flags = np.empty(sct_cell_types.shape[0], dtype=np.int8)
     for i, sct_ct in enumerate(sct_cell_types.astype(str).tolist()):
         bulk_ct = sct_to_bulk.get(sct_ct)
         if bulk_ct is None:
             raise ValueError(f"SCT cell type {sct_ct!r} not found in cell_type_mapping.csv.")
+        included = sct_to_included.get(sct_ct)
+        if included is None:
+            raise ValueError(f"SCT cell type {sct_ct!r} is missing its included flag in cell_type_mapping.csv.")
         choices = bulk_indices.get(bulk_ct)
         if choices is None:
             raise ValueError(f"Bulk cell type {bulk_ct!r} has no sample index list.")
         assigned[i] = int(rng.choice(choices))
-    return assigned
+        included_flags[i] = int(included)
+    return assigned, included_flags
 
 
 def _impute_batch(
     x_batch_log2cpm1p: np.ndarray,
     bulk_tpm: np.ndarray,
     bulk_idx_batch: np.ndarray,
+    included_batch: np.ndarray,
     eps: float,
     y_frac_threshold: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -451,10 +458,19 @@ def _impute_batch(
         if rows.size == 0:
             continue
         bulk_vec = bulk_tpm[bulk_idx].astype(np.float32, copy=False)
+        include_rows = rows[included_batch[rows] == 1]
+        if include_rows.size > 0:
+            averaged = 0.5 * tpm_batch[include_rows, :] + 0.5 * bulk_vec[None, :]
+            out_tpm[include_rows, :] = averaged.astype(np.float32, copy=False)
+
+        zero_guided_rows = rows[included_batch[rows] != 1]
+        if zero_guided_rows.size == 0:
+            continue
+
         bulk_nonzero = bulk_vec > eps
-        impute_mask = mask0[rows, :] & bulk_nonzero[None, :]
+        impute_mask = mask0[zero_guided_rows, :] & bulk_nonzero[None, :]
         added_before = (bulk_vec[None, :] * impute_mask).sum(axis=1).astype(np.float32)
-        added_before_per_row[rows] = added_before
+        added_before_per_row[zero_guided_rows] = added_before
 
         cap_scale = np.ones_like(added_before, dtype=np.float32)
         over_cap = added_before > threshold_total
@@ -462,10 +478,10 @@ def _impute_batch(
             cap_scale[over_cap] = threshold_total / added_before[over_cap]
         adjusted_bulk = bulk_vec[None, :] * cap_scale[:, None]
         added_after = (adjusted_bulk * impute_mask).sum(axis=1).astype(np.float32)
-        added_after_per_row[rows] = added_after
+        added_after_per_row[zero_guided_rows] = added_after
 
         scale = ((1e6 - added_after) / 1e6).astype(np.float32, copy=False)
-        scaled = tpm_batch[rows, :] * scale[:, None]
+        scaled = tpm_batch[zero_guided_rows, :] * scale[:, None]
         merged = np.where(impute_mask, adjusted_bulk, scaled).astype(np.float32, copy=False)
 
         overflow = added_after >= 1e6
@@ -475,9 +491,9 @@ def _impute_batch(
             denom = overflow_vals.sum(axis=1, keepdims=True)
             denom[denom == 0] = 1.0
             merged[overflow, :] = ((overflow_vals / denom) * 1e6).astype(np.float32, copy=False)
-            added_after_per_row[rows[overflow]] = 1e6
+            added_after_per_row[zero_guided_rows[overflow]] = 1e6
 
-        out_tpm[rows, :] = merged
+        out_tpm[zero_guided_rows, :] = merged
 
     return _tpm_to_log2cpm1p(out_tpm).astype(np.float32, copy=False), added_before_per_row, added_after_per_row
 
@@ -530,7 +546,19 @@ def run_sorted_bulk_guided_sct_imputation(
     bulk_ref = _load_bulk_reference_as_tpm(bulk_expr, target_genes)
     sample_to_cell_type = _read_kassandra_annotation(bulk_annot, bulk_cell_type_col)
     bulk_indices = _build_bulk_cell_type_index(bulk_ref, sample_to_cell_type, bulk_cell_types)
-    assigned_bulk_idx = _assign_bulk_samples_for_sct_cells(sct_cell_types, mapping_df, bulk_indices, seed=seed)
+    assigned_bulk_idx, included_flags = _assign_bulk_samples_for_sct_cells(
+        sct_cell_types,
+        mapping_df,
+        bulk_indices,
+        seed=seed,
+    )
+    n_average = int(np.sum(included_flags == 1))
+    n_zero_guided = int(np.sum(included_flags != 1))
+    logging.info(
+        "SCT post-imputation branch counts: included==1 averaging for %d cells; included==0 zero-guided replacement for %d cells.",
+        n_average,
+        n_zero_guided,
+    )
 
     sct_sample_ids = adata.obs_names.astype(str).tolist()
     logging.info("Computing and saving pre-imputation SCT sparsity outputs.")
@@ -555,6 +583,7 @@ def run_sorted_bulk_guided_sct_imputation(
             adata.X[start:end, :],
             bulk_ref.tpm,
             assigned_bulk_idx[start:end],
+            included_flags[start:end],
             eps=eps,
             y_frac_threshold=y_frac_threshold,
         )

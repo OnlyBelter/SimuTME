@@ -114,9 +114,13 @@ dataset_type: "SCT"
 3. Map each SCT cell type to a sorted bulk reference cell type.
 4. For each SCT sample, randomly choose one sorted bulk sample from the mapped
    reference class.
-5. Impute genes that are near zero in the SCT sample using the chosen sorted
-   bulk sample.
-6. Limit the newly added expression by `sorted_bulk_imputation_y_frac_threshold`.
+5. Branch by the `included` flag in the mapping file:
+   - `included == 1`: replace the SCT profile with the TPM-space average
+     `0.5 * SCT + 0.5 * bulk`
+   - `included == 0`: impute genes that are near zero in the SCT sample using
+     the chosen sorted bulk sample
+6. For `included == 0`, limit the newly added expression by
+   `sorted_bulk_imputation_y_frac_threshold`.
 7. Save an imputed SCT `.h5ad`.
 8. Save diagnostics such as pre/post sparsity summaries and `y_fraction`
    summaries.
@@ -143,6 +147,10 @@ Examples of diagnostic files:
 - `<dataset_name>_sct_added_expression_y_summary.csv`
 - `<dataset_name>_sct_added_expression_y_fraction_before_adjustment_boxplot.png`
 - `<dataset_name>_sct_added_expression_y_fraction_after_adjustment_boxplot.png`
+
+The `y` diagnostics remain meaningful for rows processed with `included == 0`.
+Rows processed with `included == 1` use direct TPM averaging and therefore
+contribute zero in the `y` output tables.
 
 ## Handoff To Mixed Simulation
 
