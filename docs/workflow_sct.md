@@ -112,8 +112,8 @@ dataset_type: "SCT"
 1. Load the newly generated SCT `.h5ad`.
 2. Load and align the sorted bulk expression matrix to the SCT gene list.
 3. Map each SCT cell type to a sorted bulk reference cell type.
-4. For each SCT sample, randomly choose one sorted bulk sample from the mapped
-   reference class.
+4. For each SCT sample, find the Euclidean-nearest sorted bulk sample in TPM
+   space within the mapped reference class.
 5. Branch by the `included` flag in the mapping file:
    - `included == 1`: replace the SCT profile with the TPM-space average
      `0.5 * SCT + 0.5 * bulk`

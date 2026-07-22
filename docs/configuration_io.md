@@ -47,7 +47,7 @@ then reads `datasets` separately when executing the workflow.
 - `sorted_bulk_cell_type_mapping_file_path`
   Cell-type mapping file from SCT labels to sorted bulk reference labels. This
   file must also include an `included` column:
-  - `included == 1`: average the SCT TPM profile with one randomly sampled
+  - `included == 1`: average the SCT TPM profile with the Euclidean-nearest
     matched sorted-bulk TPM profile using `0.5 / 0.5`
   - `included == 0`: keep the zero-guided replacement workflow
 
@@ -95,7 +95,7 @@ Per-cell-type scaling coefficients used during bulk simulation.
   Zero threshold used by sparsity calculations and imputation logic.
 
 - `sorted_bulk_imputation_seed`
-  Random seed used when sampling sorted bulk reference samples.
+  Random seed used for diagnostic sampling such as boxplot subsampling.
 
 - `sorted_bulk_imputation_batch_size`
   Batch size used during SCT post-imputation.

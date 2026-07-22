@@ -412,18 +412,23 @@ def _build_bulk_cell_type_index(
     return result
 
 
-def _assign_bulk_samples_for_sct_cells(
+def _assign_nearest_bulk_samples_for_sct_cells(
+    x_log2cpm1p: np.ndarray,
     sct_cell_types: pd.Series,
     mapping_df: pd.DataFrame,
+    bulk_tpm: np.ndarray,
     bulk_indices: Dict[str, np.ndarray],
-    seed: int,
+    batch_size: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     sct_to_bulk = dict(zip(mapping_df["cell_type_SCT_N6K_13Jul"], mapping_df["cell_type_Kassandra_SortedBulk"]))
     sct_to_included = dict(zip(mapping_df["cell_type_SCT_N6K_13Jul"], mapping_df["included"]))
-    rng = np.random.default_rng(seed)
     assigned = np.empty(sct_cell_types.shape[0], dtype=int)
     included_flags = np.empty(sct_cell_types.shape[0], dtype=np.int8)
-    for i, sct_ct in enumerate(sct_cell_types.astype(str).tolist()):
+    sct_type_array = sct_cell_types.astype(str).to_numpy()
+    for sct_ct in pd.unique(sct_type_array).tolist():
+        rows = np.flatnonzero(sct_type_array == sct_ct)
+        if rows.size == 0:
+            continue
         bulk_ct = sct_to_bulk.get(sct_ct)
         if bulk_ct is None:
             raise ValueError(f"SCT cell type {sct_ct!r} not found in cell_type_mapping.csv.")
@@ -433,8 +438,31 @@ def _assign_bulk_samples_for_sct_cells(
         choices = bulk_indices.get(bulk_ct)
         if choices is None:
             raise ValueError(f"Bulk cell type {bulk_ct!r} has no sample index list.")
-        assigned[i] = int(rng.choice(choices))
-        included_flags[i] = int(included)
+        included_flags[rows] = int(included)
+        if choices.size == 1:
+            assigned[rows] = int(choices[0])
+            continue
+
+        candidate_tpm = bulk_tpm[choices, :].astype(np.float32, copy=False)
+        candidate_sq = np.einsum("ij,ij->i", candidate_tpm, candidate_tpm).astype(np.float32, copy=False)
+        for start in range(0, rows.size, batch_size):
+            batch_rows = rows[start:start + batch_size]
+            sct_tpm = _row_normalize_to_1e6(
+                _log2cpm1p_to_tpm(x_log2cpm1p[batch_rows, :].astype(np.float32, copy=False))
+            ).astype(np.float32, copy=False)
+            sct_sq = np.einsum("ij,ij->i", sct_tpm, sct_tpm).astype(np.float32, copy=False)
+            dot = sct_tpm @ candidate_tpm.T
+            dist_sq = sct_sq[:, None] + candidate_sq[None, :] - (2.0 * dot)
+            np.maximum(dist_sq, 0.0, out=dist_sq)
+            nearest_choice = np.argmin(dist_sq, axis=1)
+            assigned[batch_rows] = choices[nearest_choice]
+        logging.info(
+            "Matched SCT cell type %r to nearest sorted-bulk donors within bulk cell type %r (%d candidates, %d rows).",
+            sct_ct,
+            bulk_ct,
+            choices.size,
+            rows.size,
+        )
     return assigned, included_flags
 
 
@@ -546,11 +574,13 @@ def run_sorted_bulk_guided_sct_imputation(
     bulk_ref = _load_bulk_reference_as_tpm(bulk_expr, target_genes)
     sample_to_cell_type = _read_kassandra_annotation(bulk_annot, bulk_cell_type_col)
     bulk_indices = _build_bulk_cell_type_index(bulk_ref, sample_to_cell_type, bulk_cell_types)
-    assigned_bulk_idx, included_flags = _assign_bulk_samples_for_sct_cells(
+    assigned_bulk_idx, included_flags = _assign_nearest_bulk_samples_for_sct_cells(
+        adata.X,
         sct_cell_types,
         mapping_df,
+        bulk_ref.tpm,
         bulk_indices,
-        seed=seed,
+        batch_size=batch_size,
     )
     n_average = int(np.sum(included_flags == 1))
     n_zero_guided = int(np.sum(included_flags != 1))
