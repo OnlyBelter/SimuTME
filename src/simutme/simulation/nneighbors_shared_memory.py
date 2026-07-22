@@ -12,15 +12,10 @@ import warnings
 import logging
 import numpy as np
 import pandas as pd
-import multiprocessing
 from multiprocessing import shared_memory, Pool
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any, Union
 
-try:
-    multiprocessing.set_start_method('spawn', force=True)
-except RuntimeError:
-    pass  # Start method already set
 logger = logging.getLogger(__name__)
 
 # Set thread limits before numpy operations
@@ -332,8 +327,7 @@ def worker_init(metadata: dict) -> None:
         shm_obs = shared_memory.SharedMemory(name=metadata['obs_shm_name'])
         shm_handles.append(shm_obs)
 
-        obs_bytes = bytes(shm_obs.buf[:metadata['obs_size']])
-        obs_df = pickle.loads(obs_bytes)
+        obs_df = pickle.loads(shm_obs.buf[:metadata['obs_size']])
 
         # Reconstruct distance matrices from shared memory
         distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
@@ -375,7 +369,7 @@ def worker_cleanup() -> None:
         _worker_data = None
 
 
-def worker_sample(args: tuple) -> Tuple[str, ...]:
+def worker_sample(args: tuple) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
     """
     Worker function that uses shared memory to sample cells.
 
@@ -386,7 +380,7 @@ def worker_sample(args: tuple) -> Tuple[str, ...]:
 
     Returns
     -------
-    tuple
+    Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]
         Sample IDs with neighbors.
 
     Raises
@@ -572,6 +566,7 @@ def get_sample_id_with_neighbors(
         )
 
     distance_matrix, all_samples_id = distance_dict[cell_type]
+    cell_id_to_matrix_idx = {cell_id: idx for idx, cell_id in enumerate(all_samples_id)}
 
     if len(all_samples_id) < minimum_n_base:
         raise ValueError(
@@ -615,7 +610,7 @@ def get_sample_id_with_neighbors(
             patient_mask = obs_df_filtered['sample_id'] == selected_patient_id
             patient_cell_ids = obs_df_filtered.loc[patient_mask].index.to_list()
             # Map to indices in the distance matrix
-            patient_indices = [all_samples_id.index(cid) for cid in patient_cell_ids]
+            patient_indices = [cell_id_to_matrix_idx[cid] for cid in patient_cell_ids]
             id_pool = patient_cell_ids
             indices_pool = patient_indices
         else:
@@ -643,7 +638,8 @@ def get_sample_id_with_neighbors(
                 distances = distance_matrix[anchor_matrix_idx, indices_pool]
 
                 # Get top n_base nearest cells (including anchor itself)
-                nearest_local_indices = np.argsort(distances)[:n_base]
+                nearest_local_indices = np.argpartition(distances, n_base - 1)[:n_base]
+                nearest_local_indices = nearest_local_indices[np.argsort(distances[nearest_local_indices])]
 
                 # Get cell IDs
                 neighbor_ids = [id_pool[i] for i in nearest_local_indices]

@@ -1,8 +1,13 @@
 import yaml
+import multiprocessing as mp
 from simutme import run_bulk_simulation, SimuConfig
 
 
 if __name__ == '__main__':
+    try:
+        mp.set_start_method('spawn')
+    except (RuntimeError, NotImplementedError):
+        print('Warning: could not set multiprocessing start method to spawn')
     # 1. Load Configuration
     config_path = 'config_example.yaml'
     config = SimuConfig.from_yaml(config_path)
