@@ -27,6 +27,7 @@ reference for later Mixed simulations in the same run.
 ## Documentation Map
 
 - [Installation](installation.md)
+- [Changelog](changelog.md)
 - [SCT Workflow](workflow_sct.md)
 - [Mixed Workflow](workflow_mixed.md)
 - [Configuration and I/O Reference](configuration_io.md)
