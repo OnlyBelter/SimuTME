@@ -99,10 +99,12 @@ parameters:
 # If a Mixed dataset should use the imputed SCT dataset from a preceding SCT run,
 # place the SCT dataset earlier than the Mixed dataset in this section.
 datasets:
-  SCT_N10_07Jan_01:  # Dataset name
+  SCT_N10_hnscc_07Jan_01:  # Dataset name
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
     n_samples: 10  # Number of bulk samples to simulate for each cell type
     sampling_method_gep: "n_neighbors"  # Sampling method for finding single cells: 'random', 'n_neighbors'
+    cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
+    non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
     apply_sorted_bulk_imputation: false  # Optional post-step; if true, later Mixed simulations in the same run will use the imputed SCT dataset
     filtering: false  # Whether to apply gene filtering and TCGA-guided filtering
     filtering_ref_types: null

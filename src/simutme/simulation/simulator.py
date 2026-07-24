@@ -128,6 +128,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         sct_dataset_file_path: Optional[Union[str, Path]],
         cell_type2subtype: Dict[str, List[str]],
         sc_dataset_ids: List[str],
+        cancer_cell_dataset_ids: Optional[List[str]] = None,
+        non_cancer_cell_dataset_ids: Optional[List[str]] = None,
         bulk_dataset_name: str = "simulated_bulk",
         check_basic_info: bool = True,
         zero_ratio_threshold: float = 0.97,
@@ -148,6 +150,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.sct_dataset_file_path = sct_dataset_file_path
         self.cell_type2subtype = cell_type2subtype
         self.sc_dataset_used = sc_dataset_ids
+        self.cancer_cell_dataset_ids = cancer_cell_dataset_ids
+        self.non_cancer_cell_dataset_ids = non_cancer_cell_dataset_ids
         self.bulk_dataset_name = bulk_dataset_name
         self.zero_ratio_threshold = zero_ratio_threshold
         self.sc_dataset_gep_type = sc_dataset_gep_type
@@ -730,6 +734,17 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         print(f"   > Using {len(self.cell_type_used)} cell types, "
               f"{len(self.cell_subtype_used)} subtypes and {len(self.sc_dataset_used)} datasets.")
 
+    def _validate_dataset_id_subset(self, dataset_ids: Optional[List[str]], label: str) -> None:
+        """Validate configured dataset_id filters against the merged scRNA-seq obs."""
+        if not dataset_ids:
+            return
+        cleaned = [str(i).strip() for i in dataset_ids]
+        if any(i == '' for i in cleaned):
+            raise ValueError(f'Invalid empty dataset_id found in {label}.')
+        missing_ds = set(cleaned) - set(self.dataset_in_sc)
+        if missing_ds:
+            raise ValueError(f"Invalid datasets in {label}: {missing_ds}. Available: {self.dataset_in_sc}")
+
     def get_info_in_merged_single_cell_dataset(self, check_zero_ratio: bool = True, zero_ratio_threshold: float = 0.95):
         """Reads metadata from the merged single-cell dataset."""
         reader = ReadH5AD(self.merged_sc_fp)
@@ -740,10 +755,21 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                                 str(i) != 'nan']
         self.dataset_in_sc = list(self.merged_sc_dataset.obs['dataset_id'].unique())
 
-        # Filter obs by selected datasets
-        self.merged_sc_dataset_obs = self.merged_sc_dataset.obs.loc[
-            self.merged_sc_dataset.obs['dataset_id'].isin(self.sc_dataset_used)
-        ].copy()
+        self._validate_dataset_id_subset(self.cancer_cell_dataset_ids, 'cancer_cell_dataset_ids')
+        self._validate_dataset_id_subset(self.non_cancer_cell_dataset_ids, 'non_cancer_cell_dataset_ids')
+
+        if self.cancer_cell_dataset_ids is not None or self.non_cancer_cell_dataset_ids is not None:
+            cancer_dataset_ids = self.cancer_cell_dataset_ids or self.sc_dataset_used
+            non_cancer_dataset_ids = self.non_cancer_cell_dataset_ids or self.sc_dataset_used
+            is_cancer = self.merged_sc_dataset.obs[self.cell_type_col_name].astype(str) == 'Cancer Cells'
+            cancer_mask = is_cancer & self.merged_sc_dataset.obs['dataset_id'].isin(cancer_dataset_ids)
+            non_cancer_mask = (~is_cancer) & self.merged_sc_dataset.obs['dataset_id'].isin(non_cancer_dataset_ids)
+            self.merged_sc_dataset_obs = self.merged_sc_dataset.obs.loc[cancer_mask | non_cancer_mask].copy()
+        else:
+            # Filter obs by selected datasets
+            self.merged_sc_dataset_obs = self.merged_sc_dataset.obs.loc[
+                self.merged_sc_dataset.obs['dataset_id'].isin(self.sc_dataset_used)
+            ].copy()
 
         # Zero ratio check
         if check_zero_ratio:

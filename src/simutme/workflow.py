@@ -118,6 +118,11 @@ def run_bulk_simulation(dataset_name: str,
     :return: The file path of the final generated .h5ad file
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
+    if params.get('dataset_type', 'mixed').lower() != 'sct':
+        if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
+            raise ValueError(
+                '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
+            )
 
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
@@ -136,6 +141,8 @@ def run_bulk_simulation(dataset_name: str,
             simu_bulk_dir=sc_dataset_dir,
             cell_type2subtype=config.cell_type2subtypes,
             sc_dataset_ids=config.sc_dataset_ids,
+            cancer_cell_dataset_ids=params.get('cancer_cell_dataset_ids', None),
+            non_cancer_cell_dataset_ids=params.get('non_cancer_cell_dataset_ids', None),
             bulk_dataset_name=dataset_name,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
             zero_ratio_threshold=params.get('zero_ratio_threshold', 0.97),
