@@ -4,6 +4,43 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## July 25, 2026
+
+This release adds an explicit Mixed-dataset selector for choosing whether Mixed
+simulation should use the original SCT dataset or the sorted-bulk-imputed SCT
+dataset.
+
+### Mixed SCT version selection
+
+This update makes the Mixed dataset's SCT input explicit instead of relying
+only on the last in-memory `config.sct_dataset_file_path` update.
+
+- Added a new Mixed-only dataset parameter:
+  - `sct_dataset_version`
+- Supported values are:
+  - `original`
+  - `sorted_bulk_imputed`
+- Defaulted omitted values to `sorted_bulk_imputed` so existing workflows keep
+  preferring the imputed SCT dataset when it is available.
+- Added reversible path resolution so Mixed simulation can:
+  - use the original SCT path directly
+  - infer the imputed SCT path from `paths.sct_dataset_file_path` and
+    `sorted_bulk_imputation_output_suffix`
+- Added validation so:
+  - invalid `sct_dataset_version` values raise a clear error
+  - `sct_dataset_version` cannot be used on SCT datasets
+  - requesting the imputed SCT version fails clearly if the inferred file does
+    not exist
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `src/config_example.yaml`
+
+### Related spec
+
+- `docs/superpowers/specs/2026-07-25-mixed-sct-version-selection-design.md`
+
 ## July 24, 2026
 
 This release adds SCT-only dataset source selection by `dataset_id`, so you can

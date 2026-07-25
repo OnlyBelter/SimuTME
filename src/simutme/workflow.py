@@ -31,6 +31,86 @@ def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str 
     return None
 
 
+def _build_sorted_bulk_imputed_sct_path(
+    sct_dataset_file_path: str | Path,
+    output_suffix: str,
+) -> Path:
+    sct_dataset_file_path = Path(sct_dataset_file_path)
+    return sct_dataset_file_path.with_name(
+        f"{sct_dataset_file_path.stem}{output_suffix}{sct_dataset_file_path.suffix}"
+    )
+
+
+def _infer_original_sct_path(
+    sct_dataset_file_path: str | Path,
+    output_suffix: str,
+) -> Path:
+    sct_dataset_file_path = Path(sct_dataset_file_path)
+    if output_suffix and sct_dataset_file_path.stem.endswith(output_suffix):
+        original_stem = sct_dataset_file_path.stem[:-len(output_suffix)]
+        return sct_dataset_file_path.with_name(f"{original_stem}{sct_dataset_file_path.suffix}")
+    return sct_dataset_file_path
+
+
+def _resolve_mixed_sct_dataset_path(
+    dataset_name: str,
+    params: Dict[str, Any],
+    config: "SimuConfig",
+) -> Path:
+    requested_version = str(
+        params.get("sct_dataset_version", "sorted_bulk_imputed")
+    ).strip()
+    allowed_versions = {"original", "sorted_bulk_imputed"}
+    if requested_version not in allowed_versions:
+        raise ValueError(
+            f'Invalid "sct_dataset_version" for Mixed dataset "{dataset_name}": '
+            f'{requested_version!r}. Expected one of {sorted(allowed_versions)}.'
+        )
+
+    current_sct_path = config.sct_dataset_file_path
+    if current_sct_path in (None, ""):
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" requires "paths.sct_dataset_file_path" '
+            f"or a preceding SCT generation step."
+        )
+
+    output_suffix = str(
+        params.get(
+            "sorted_bulk_imputation_output_suffix",
+            config.sorted_bulk_imputation_output_suffix,
+        )
+    ).strip()
+    original_sct_path = _infer_original_sct_path(current_sct_path, output_suffix)
+    if requested_version == "original":
+        resolved_sct_path = original_sct_path
+    else:
+        if output_suffix == "":
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed" '
+                f'but "sorted_bulk_imputation_output_suffix" is empty.'
+            )
+        resolved_sct_path = _build_sorted_bulk_imputed_sct_path(
+            original_sct_path,
+            output_suffix,
+        )
+
+    if not resolved_sct_path.exists():
+        raise FileNotFoundError(
+            f'Mixed dataset "{dataset_name}" requested SCT dataset version '
+            f'"{requested_version}", but the resolved file does not exist: '
+            f"{resolved_sct_path}. Run the corresponding SCT generation first, "
+            f'or switch "sct_dataset_version" to "original".'
+        )
+
+    logging.info(
+        "   > Mixed dataset %s will use SCT dataset version '%s': %s",
+        dataset_name,
+        requested_version,
+        resolved_sct_path,
+    )
+    return resolved_sct_path
+
+
 # --- 1. Configuration Management ---
 @dataclass
 class SimuConfig:
@@ -118,17 +198,23 @@ def run_bulk_simulation(dataset_name: str,
     :return: The file path of the final generated .h5ad file
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
-    if params.get('dataset_type', 'mixed').lower() != 'sct':
+    dataset_type = params.get('dataset_type', 'mixed').lower()
+    if dataset_type != 'sct':
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
                 '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
+            )
+    else:
+        if 'sct_dataset_version' in params:
+            raise ValueError(
+                '"sct_dataset_version" is only supported for Mixed datasets.'
             )
 
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
     n_base = config.n_base
-    if params.get('dataset_type', 'mixed').lower() == 'sct':  # single-cell-type dataset
+    if dataset_type == 'sct':  # single-cell-type dataset
         logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
         if 'sampling_method_gep' not in params:
             logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
@@ -178,6 +264,11 @@ def run_bulk_simulation(dataset_name: str,
         return str(generated_sct_fp)
     else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
+        resolved_sct_dataset_file_path = _resolve_mixed_sct_dataset_path(
+            dataset_name=dataset_name,
+            params=params,
+            config=config,
+        )
         if params.get('filtering', False):
             filtering_str = f'with_filtering_{config.gep_filtering_quantile[1]}'
         else:
@@ -188,7 +279,7 @@ def run_bulk_simulation(dataset_name: str,
         else:
             sampling_method_prop = params.get('sampling_method_prop')
         if not 'sampling_method_gep' in params:
-            inferred = _infer_sampling_method_gep_from_sct_path(config.sct_dataset_file_path)
+            inferred = _infer_sampling_method_gep_from_sct_path(resolved_sct_dataset_file_path)
             if inferred:
                 logging.info(
                     "   > Warning: 'sampling_method_gep' not specified in params, inferred from sct_dataset_file_path:"
@@ -200,11 +291,10 @@ def run_bulk_simulation(dataset_name: str,
                     f'Missing "sampling_method_gep" for Mixed dataset "{dataset_name}". '
                     f'Provide params["sampling_method_gep"] explicitly, or include a marker in '
                     f'paths.sct_dataset_file_path (e.g., "random" or "n_neighbors"). '
-                    f"Current sct_dataset_file_path: {config.sct_dataset_file_path}"
+                    f"Current sct_dataset_file_path: {resolved_sct_dataset_file_path}"
                 )
         else:
             sampling_method_gep = params.get('sampling_method_gep')
-        logging.info("   > Mixed simulation will use SCT dataset: %s", config.sct_dataset_file_path)
 
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
@@ -213,7 +303,7 @@ def run_bulk_simulation(dataset_name: str,
             cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
             sc_dataset_ids=config.sc_dataset_ids,
             bulk_dataset_name=dataset_name,
-            sct_dataset_file_path=config.sct_dataset_file_path,
+            sct_dataset_file_path=resolved_sct_dataset_file_path,
             check_basic_info=False,
             tcga2cancer_type_file_path=config.tcga2cancer_type_file_path,
             total_rna_coefficient=config.total_rna_coefficient,
@@ -509,7 +599,7 @@ def _run_sorted_bulk_imputation_for_sct_dataset(
 
     generated_sct_fp = Path(generated_sct_fp)
     output_suffix = params.get("sorted_bulk_imputation_output_suffix", config.sorted_bulk_imputation_output_suffix)
-    output_h5ad = generated_sct_fp.with_name(f"{generated_sct_fp.stem}{output_suffix}{generated_sct_fp.suffix}")
+    output_h5ad = _build_sorted_bulk_imputed_sct_path(generated_sct_fp, output_suffix)
     out_dir_parent_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
     out_dir_parent = Path(out_dir_parent_value) if out_dir_parent_value not in (None, "") else generated_sct_fp.parent
     out_dir = out_dir_parent / dataset_name

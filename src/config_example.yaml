@@ -96,8 +96,10 @@ parameters:
 
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here.
-# If a Mixed dataset should use the imputed SCT dataset from a preceding SCT run,
-# place the SCT dataset earlier than the Mixed dataset in this section.
+# If a Mixed dataset depends on an SCT dataset generated earlier in the same
+# run, place the SCT dataset earlier than the Mixed dataset in this section.
+# Mixed datasets can then choose which SCT version to use through
+# `sct_dataset_version: "original"` or `"sorted_bulk_imputed"`.
 datasets:
   SCT_N10_hnscc_07Jan_01:  # Dataset name
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
@@ -105,7 +107,7 @@ datasets:
     sampling_method_gep: "n_neighbors"  # Sampling method for finding single cells: 'random', 'n_neighbors'
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
-    apply_sorted_bulk_imputation: false  # Optional post-step; if true, later Mixed simulations in the same run will use the imputed SCT dataset
+    apply_sorted_bulk_imputation: false  # Optional post-step; if true, an imputed SCT file is generated and later Mixed datasets can select it with `sct_dataset_version: "sorted_bulk_imputed"`
     filtering: false  # Whether to apply gene filtering and TCGA-guided filtering
     filtering_ref_types: null
     cell_prop_prior: null
@@ -115,6 +117,7 @@ datasets:
     max_cells_per_cell_type: 15000  # Maximum number of single cells to use per cell type to avoid memory issues when using n_neighbors sampling
   Mixed_N100_segment:  # Dataset name
     dataset_type: "Mixed"  # Type of dataset: "SCT" or "Mixed"
+    sct_dataset_version: "sorted_bulk_imputed"  # Mixed only: use "original" for paths.sct_dataset_file_path, or "sorted_bulk_imputed" to infer the imputed SCT path from paths.sct_dataset_file_path plus sorted_bulk_imputation_output_suffix
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "segment"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
