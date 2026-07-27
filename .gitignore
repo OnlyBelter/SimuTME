@@ -9,4 +9,4 @@ dist/
 *.egg-info/
 venv/
 .env
-docs/superpowers/*
+# docs/superpowers/*
