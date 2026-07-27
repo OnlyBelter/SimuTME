@@ -111,6 +111,25 @@ def _resolve_mixed_sct_dataset_path(
     return resolved_sct_path
 
 
+def _resolve_sorted_bulk_imputation_bulk_weight(
+    bulk_weight_value: Any,
+    context: str,
+) -> float:
+    try:
+        bulk_weight = float(bulk_weight_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f'Invalid "sorted_bulk_imputation_bulk_weight" for {context}: '
+            f"{bulk_weight_value!r}. Expected a numeric value in [0, 1]."
+        ) from exc
+    if not 0.0 <= bulk_weight <= 1.0:
+        raise ValueError(
+            f'Invalid "sorted_bulk_imputation_bulk_weight" for {context}: '
+            f"{bulk_weight}. Expected a value in [0, 1]."
+        )
+    return bulk_weight
+
+
 # --- 1. Configuration Management ---
 @dataclass
 class SimuConfig:
@@ -144,6 +163,7 @@ class SimuConfig:
     sorted_bulk_imputation_batch_size: int = 128
     sorted_bulk_imputation_boxplot_sample_size: int = 1000
     sorted_bulk_imputation_y_frac_threshold: float = 0.15
+    sorted_bulk_imputation_bulk_weight: float = 0.5
     sorted_bulk_imputation_output_suffix: str = "_sorted_bulk_imputed"
     sorted_bulk_imputation_out_dir: Path | None = None
 
@@ -169,6 +189,12 @@ class SimuConfig:
             config_data['gep_filtering_quantile'] = tuple(config_data['gep_filtering_quantile'])
 
         return cls(**config_data)
+
+    def __post_init__(self):
+        self.sorted_bulk_imputation_bulk_weight = _resolve_sorted_bulk_imputation_bulk_weight(
+            self.sorted_bulk_imputation_bulk_weight,
+            "global parameters",
+        )
 
     @property
     def high_corr_genes(self) -> List[str]:
@@ -603,6 +629,13 @@ def _run_sorted_bulk_imputation_for_sct_dataset(
     out_dir_parent_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
     out_dir_parent = Path(out_dir_parent_value) if out_dir_parent_value not in (None, "") else generated_sct_fp.parent
     out_dir = out_dir_parent / dataset_name
+    bulk_weight = _resolve_sorted_bulk_imputation_bulk_weight(
+        params.get(
+            "sorted_bulk_imputation_bulk_weight",
+            config.sorted_bulk_imputation_bulk_weight,
+        ),
+        f'SCT dataset "{dataset_name}"',
+    )
 
     logging.info("   > Running optional sorted-bulk-guided SCT imputation for %s", dataset_name)
     return run_sorted_bulk_guided_sct_imputation(
@@ -623,6 +656,7 @@ def _run_sorted_bulk_imputation_for_sct_dataset(
                 config.sorted_bulk_imputation_boxplot_sample_size,
             )
         ),
+        bulk_weight=bulk_weight,
         y_frac_threshold=float(
             params.get(
                 "sorted_bulk_imputation_y_frac_threshold",

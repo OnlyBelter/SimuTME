@@ -4,6 +4,36 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## July 27, 2026
+
+This release adds an explicit weight parameter for the sorted-bulk contribution
+used by the SCT post-imputation averaging branch.
+
+### Sorted-bulk imputation weight control
+
+This update removes the hard-coded `0.5 * SCT + 0.5 * bulk` blend for rows with
+`included == 1` and makes that contribution configurable.
+
+- Added a new parameter:
+  - `parameters.sorted_bulk_imputation_bulk_weight`
+- Defaulted the new parameter to `0.5` so existing workflows keep the previous
+  50/50 averaging behavior.
+- Applied the weight only to the `included == 1` averaging branch using:
+  - `(1 - bulk_weight) * SCT + bulk_weight * bulk`
+- Kept the `included == 0` zero-guided replacement branch unchanged.
+- Added validation so the weight must stay within `[0, 1]`.
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `src/simutme/sct_imputation.py`
+- `src/config_example.yaml`
+- `README.md`
+
+### Related spec
+
+- `docs/superpowers/specs/2026-07-27-sorted-bulk-imputation-weight-design.md`
+
 ## July 25, 2026
 
 This release adds an explicit Mixed-dataset selector for choosing whether Mixed

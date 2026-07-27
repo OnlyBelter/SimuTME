@@ -137,7 +137,7 @@ If `apply_sorted_bulk_imputation: true`, SimuTME will:
 
 Within the mapping file:
 
-- `included == 1`: find the most similar matched sorted-bulk GEP in TPM space and replace the SCT profile with the TPM-space average `0.5 * SCT + 0.5 * bulk`
+- `included == 1`: find the most similar matched sorted-bulk GEP in TPM space and replace the SCT profile with the weighted TPM-space blend `(1 - bulk_weight) * SCT + bulk_weight * bulk`, controlled by `parameters.sorted_bulk_imputation_bulk_weight`
 - `included == 0`: keep the original zero-guided replacement workflow, including `y` calculation and `y_frac_threshold`
 
 When you want later Mixed datasets to consume the imputed SCT dataset, place the SCT dataset earlier than those Mixed datasets in the `datasets:` section, because the workflow runs datasets in YAML order.
@@ -163,6 +163,7 @@ The following global parameters control the optional SCT post-imputation workflo
 - `parameters.sorted_bulk_imputation_seed`: random seed for diagnostic sampling such as boxplot subsampling
 - `parameters.sorted_bulk_imputation_batch_size`: batch size used during SCT imputation
 - `parameters.sorted_bulk_imputation_boxplot_sample_size`: number of SCT cells sampled for boxplot rendering
+- `parameters.sorted_bulk_imputation_bulk_weight`: sorted-bulk contribution for the `included == 1` averaging branch; `0.5` keeps the previous 50/50 blend, `0.0` keeps SCT only, and `1.0` uses sorted bulk only
 - `parameters.sorted_bulk_imputation_y_frac_threshold`: cap for the fraction of newly added expression per SCT sample
 - `parameters.sorted_bulk_imputation_output_suffix`: suffix appended to the imputed SCT `.h5ad`
 

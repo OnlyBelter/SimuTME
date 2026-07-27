@@ -103,6 +103,7 @@ dataset_type: "SCT"
 - `parameters.sorted_bulk_imputation_seed`
 - `parameters.sorted_bulk_imputation_batch_size`
 - `parameters.sorted_bulk_imputation_boxplot_sample_size`
+- `parameters.sorted_bulk_imputation_bulk_weight`
 - `parameters.sorted_bulk_imputation_y_frac_threshold`
 - `parameters.sorted_bulk_imputation_output_suffix`
 - `paths.sorted_bulk_imputation_out_dir`
@@ -115,8 +116,9 @@ dataset_type: "SCT"
 4. For each SCT sample, find the Euclidean-nearest sorted bulk sample in TPM
    space within the mapped reference class.
 5. Branch by the `included` flag in the mapping file:
-   - `included == 1`: replace the SCT profile with the TPM-space average
-     `0.5 * SCT + 0.5 * bulk`
+   - `included == 1`: replace the SCT profile with the weighted TPM-space
+     blend `(1 - bulk_weight) * SCT + bulk_weight * bulk`, controlled by
+     `sorted_bulk_imputation_bulk_weight`
    - `included == 0`: impute genes that are near zero in the SCT sample using
      the chosen sorted bulk sample
 6. For `included == 0`, limit the newly added expression by

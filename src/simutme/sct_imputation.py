@@ -472,6 +472,7 @@ def _impute_batch(
     bulk_idx_batch: np.ndarray,
     included_batch: np.ndarray,
     eps: float,
+    bulk_weight: float,
     y_frac_threshold: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     tpm_batch = _row_normalize_to_1e6(_log2cpm1p_to_tpm(x_batch_log2cpm1p.astype(np.float32, copy=False)))
@@ -480,6 +481,8 @@ def _impute_batch(
     added_before_per_row = np.zeros(tpm_batch.shape[0], dtype=np.float32)
     added_after_per_row = np.zeros(tpm_batch.shape[0], dtype=np.float32)
     threshold_total = np.float32(y_frac_threshold * 1e6)
+    sct_weight = np.float32(1.0 - bulk_weight)
+    bulk_weight = np.float32(bulk_weight)
 
     for bulk_idx in np.unique(bulk_idx_batch).tolist():
         rows = np.flatnonzero(bulk_idx_batch == bulk_idx)
@@ -488,7 +491,7 @@ def _impute_batch(
         bulk_vec = bulk_tpm[bulk_idx].astype(np.float32, copy=False)
         include_rows = rows[included_batch[rows] == 1]
         if include_rows.size > 0:
-            averaged = 0.5 * tpm_batch[include_rows, :] + 0.5 * bulk_vec[None, :]
+            averaged = sct_weight * tpm_batch[include_rows, :] + bulk_weight * bulk_vec[None, :]
             out_tpm[include_rows, :] = averaged.astype(np.float32, copy=False)
 
         zero_guided_rows = rows[included_batch[rows] != 1]
@@ -539,6 +542,7 @@ def run_sorted_bulk_guided_sct_imputation(
     seed: int = 123,
     batch_size: int = 128,
     sct_boxplot_sample_size: int = 1000,
+    bulk_weight: float = 0.5,
     y_frac_threshold: float = 0.15,
 ) -> Path:
     input_h5ad = Path(input_h5ad)
@@ -615,6 +619,7 @@ def run_sorted_bulk_guided_sct_imputation(
             assigned_bulk_idx[start:end],
             included_flags[start:end],
             eps=eps,
+            bulk_weight=bulk_weight,
             y_frac_threshold=y_frac_threshold,
         )
         adata.X[start:end, :] = imputed_batch

@@ -103,6 +103,11 @@ Per-cell-type scaling coefficients used during bulk simulation.
 - `sorted_bulk_imputation_boxplot_sample_size`
   Number of SCT samples used when drawing diagnostic boxplots.
 
+- `sorted_bulk_imputation_bulk_weight`
+  Sorted-bulk contribution used by the `included == 1` averaging branch during
+  SCT post-imputation. A value of `0.5` keeps the previous 50/50 blend, `0.0`
+  keeps the SCT profile, and `1.0` uses only the matched sorted-bulk profile.
+
 - `sorted_bulk_imputation_y_frac_threshold`
   Maximum fraction of newly added expression allowed in each SCT sample for the
   `included == 0` zero-guided branch. It is not used for rows processed by the

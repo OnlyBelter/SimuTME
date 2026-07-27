@@ -91,6 +91,7 @@ parameters:
   sorted_bulk_imputation_seed: 123  # Optional: random seed for diagnostic sampling during sorted-bulk-guided SCT imputation
   sorted_bulk_imputation_batch_size: 128  # Optional: batch size during SCT imputation
   sorted_bulk_imputation_boxplot_sample_size: 1000  # Optional: sample size for SCT boxplot rendering
+  sorted_bulk_imputation_bulk_weight: 0.5  # Optional: sorted-bulk contribution for the included==1 averaging branch; 0.5 keeps the previous 50/50 blend
   sorted_bulk_imputation_y_frac_threshold: 0.15  # Optional: cap for the newly added expression fraction in each SCT sample
   sorted_bulk_imputation_output_suffix: "_sorted_bulk_imputed"  # Optional: suffix appended to the imputed SCT h5ad
 
