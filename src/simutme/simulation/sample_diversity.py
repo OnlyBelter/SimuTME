@@ -160,6 +160,14 @@ def _safe_filename(text: str) -> str:
     return sanitized.strip("_") or "unknown"
 
 
+def _get_distance_axis_label(distance_metric: str) -> str:
+    if distance_metric == "cosine":
+        return "1-cosine distance to mGEP_log"
+    if distance_metric == "l2":
+        return "l2 distance to mGEP_log"
+    return f"{distance_metric} distance to mGEP_log"
+
+
 def _save_config_used(
     output_dir: Path,
     dataset_name: str,
@@ -189,14 +197,16 @@ def _save_config_used(
         yaml.safe_dump(config_used, fh, sort_keys=False, allow_unicode=False)
 
 
-def _plot_distance_boxplot(distance_df: pd.DataFrame, figure_dir: Path) -> None:
+def _plot_distance_boxplot(distance_df: pd.DataFrame, figure_dir: Path, distance_metric: str) -> None:
     if distance_df.empty:
         return
     plt.figure(figsize=(max(6, distance_df["cell_type"].nunique() * 0.6), 5))
-    sns.boxplot(data=distance_df, x="cell_type", y="distance", color="#8fb3d9")
+    ax = sns.boxplot(data=distance_df, x="cell_type", y="distance", color="#8fb3d9")
+    ax.yaxis.grid(True, linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.set_axisbelow(True)
     plt.xticks(rotation=45, ha="right")
     plt.xlabel("Cell type")
-    plt.ylabel("Distance to mGEP_log")
+    plt.ylabel(_get_distance_axis_label(distance_metric))
     plt.tight_layout()
     for suffix in ("png", "pdf"):
         plt.savefig(figure_dir / f"distance_boxplot_by_cell_type.{suffix}", dpi=300, bbox_inches="tight")
@@ -367,7 +377,7 @@ def run_sct_sample_diversity_analysis(
         merged_sc_dataset_file_path=merged_sc_path,
         reference_gene_variance_table_path=reference_gene_variance_table_path,
     )
-    _plot_distance_boxplot(distance_df=distance_df, figure_dir=figure_dir)
+    _plot_distance_boxplot(distance_df=distance_df, figure_dir=figure_dir, distance_metric=distance_metric)
     _plot_per_cell_type_distributions(distance_df=distance_df, figure_dir=figure_dir)
 
     logger.info("Sample diversity analysis outputs saved under: %s", output_dir)

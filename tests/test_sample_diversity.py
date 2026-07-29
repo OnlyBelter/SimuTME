@@ -4,7 +4,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-from simutme.simulation.sample_diversity import run_sct_sample_diversity_analysis
+from simutme.simulation.sample_diversity import _get_distance_axis_label, run_sct_sample_diversity_analysis
 
 
 def test_run_sct_sample_diversity_analysis_writes_expected_outputs(tmp_path: Path):
@@ -103,3 +103,8 @@ def test_run_sct_sample_diversity_analysis_hvg_uses_reference_gene_variance(tmp_
     assert distance_df["n_genes"].nunique() == 1
     assert int(distance_df["n_genes"].iloc[0]) == 2
     assert (ref_path.with_name(f"{ref_path.stem}.gene_variance.csv")).exists()
+
+
+def test_get_distance_axis_label():
+    assert _get_distance_axis_label("cosine") == "1-cosine distance to mGEP_log"
+    assert _get_distance_axis_label("l2") == "l2 distance to mGEP_log"
