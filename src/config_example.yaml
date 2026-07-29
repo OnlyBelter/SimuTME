@@ -134,3 +134,32 @@ datasets:
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset
+  Mixed_N100_dirichlet:  # Dataset name
+    dataset_type: "Mixed"  # Type of dataset: "SCT" or "Mixed"
+    sct_dataset_version: "sorted_bulk_imputed"  # Mixed only: use "original" for paths.sct_dataset_file_path, or "sorted_bulk_imputed" to infer the imputed SCT path from paths.sct_dataset_file_path plus sorted_bulk_imputation_output_suffix
+    n_samples: 100  # Number of bulk samples to simulate for each cell type
+    sampling_method_prop: "dirichlet"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
+    dirichlet_alpha:  # Mixed + dirichlet only: default symmetric prior over the 16 configured output cell types
+      Non-plasma B cells: 1.0
+      Plasma B cells: 1.0
+      CD4 T: 1.0
+      CD8 T (GZMK high): 1.0
+      CD8 T effector: 1.0
+      DC: 1.0
+      Endothelial Cells: 1.0
+      Cancer Cells: 1.0
+      CAFs: 1.0
+      Myofibroblasts: 1.0
+      Macrophages: 1.0
+      Mast Cells: 1.0
+      NK: 1.0
+      Neutrophils: 1.0
+      Double-neg-like T: 1.0
+      Monocytes: 1.0
+    pred_cell_prop_file_path: null  # Mixed + dirichlet only: optional CSV of predicted cell proportions; when provided, estimate dirichlet_alpha from this file and override the manual dictionary
+    filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
+    filtering_ref_types: null
+    cell_prop_prior: null
+    zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
+    cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
+    cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

@@ -14,6 +14,7 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
+from .simulation.sampling import get_default_dirichlet_alpha
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 
@@ -276,6 +277,7 @@ def run_bulk_simulation(dataset_name: str,
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
     dataset_type = params.get('dataset_type', 'mixed').lower()
+    dirichlet_only_keys = {"dirichlet_alpha", "pred_cell_prop_file_path"}
     if dataset_type != 'sct':
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
@@ -285,6 +287,15 @@ def run_bulk_simulation(dataset_name: str,
         if 'sct_dataset_version' in params:
             raise ValueError(
                 '"sct_dataset_version" is only supported for Mixed datasets.'
+            )
+        invalid_keys = [
+            key for key in dirichlet_only_keys
+            if params.get(key, None) not in (None, "")
+        ]
+        if invalid_keys:
+            raise ValueError(
+                f'{invalid_keys} are only supported for Mixed datasets with '
+                '"sampling_method_prop: dirichlet".'
             )
 
     # 1. Initialize generator
@@ -360,6 +371,24 @@ def run_bulk_simulation(dataset_name: str,
             sampling_method_prop = 'segment'
         else:
             sampling_method_prop = params.get('sampling_method_prop')
+        if sampling_method_prop != 'dirichlet':
+            invalid_keys = [
+                key for key in dirichlet_only_keys
+                if params.get(key, None) not in (None, "")
+            ]
+            if invalid_keys:
+                raise ValueError(
+                    f'{invalid_keys} are only supported when "sampling_method_prop" is "dirichlet" '
+                    f'for Mixed dataset "{dataset_name}".'
+                )
+            resolved_dirichlet_alpha = None
+            pred_cell_prop_file_path = None
+        else:
+            resolved_dirichlet_alpha = params.get(
+                'dirichlet_alpha',
+                get_default_dirichlet_alpha(params.get('cell_type2subtypes', config.cell_type2subtypes)),
+            )
+            pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
         if not 'sampling_method_gep' in params:
             inferred = _infer_sampling_method_gep_from_sct_path(resolved_sct_dataset_file_path)
             if inferred:
@@ -412,6 +441,8 @@ def run_bulk_simulation(dataset_name: str,
                 show_filtering_info=False,
                 filtering_method='median_gep',
                 cell_prop_prior=params.get('cell_prop_prior', None),
+                dirichlet_alpha=resolved_dirichlet_alpha,
+                pred_cell_prop_file_path=pred_cell_prop_file_path,
                 filtering_in_pca_space=params.get('filtering_in_pca_space', True),
                 norm_ord=1,
                 pca_n_components=config.pca_n_components

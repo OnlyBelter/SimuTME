@@ -6,6 +6,27 @@ that changed on a given date.
 
 ## July 29, 2026
 
+### Mixed Dirichlet alpha estimation from predicted proportions
+
+This update adds two Mixed-only dataset parameters for
+`sampling_method_prop: "dirichlet"`:
+
+- `dirichlet_alpha`
+- `pred_cell_prop_file_path`
+
+When `pred_cell_prop_file_path` is provided, SimuTME now estimates the
+Dirichlet concentration parameters from the matched predicted cell-proportion
+columns and uses the estimated values during mixed bulk simulation.
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `src/simutme/simulation/sampling.py`
+- `src/simutme/simulation/simulator.py`
+- `src/config_example.yaml`
+- `docs/workflow_mixed.md`
+- `docs/configuration_io.md`
+
 ### Mixed Cancer Cells fraction distribution output
 
 This update adds a Mixed-only post-processing output that plots the

@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 from ..utility import get_gene_list_filtered_by_quantile_range, get_quantile, check_dir
 from ..utility import ReadExp, ReadH5AD, ExpObj, QueryNeighbors, read_single_cell_type_dataset
 from ..utility import get_available_threads, non_log2cpm, log2_transform, get_cell_num, create_h5ad_dataset, print_msg
-from .sampling import generate_cell_fraction
+from .sampling import (
+    estimate_dirichlet_alpha_from_pred_cell_props,
+    flatten_cell_type2subtype,
+    generate_cell_fraction,
+)
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType)
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
@@ -65,6 +69,8 @@ class GEPGenerationConfig:
     filtering_in_pca_space: bool = False
     pca_n_components: Union[int, float] = 0.9
     norm_ord: int = 1
+    dirichlet_alpha: Optional[Dict[str, float]] = None
+    pred_cell_prop_file_path: Optional[Union[str, Path]] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -72,6 +78,14 @@ class GEPGenerationConfig:
             raise ValueError("n_samples must be positive")
         if self.simu_method not in ('ave', 'mul'):
             raise ValueError(f"Invalid simu_method: {self.simu_method}")
+        if self.pred_cell_prop_file_path not in (None, ""):
+            self.pred_cell_prop_file_path = Path(self.pred_cell_prop_file_path)
+            if not self.pred_cell_prop_file_path.exists():
+                raise FileNotFoundError(
+                    f'"pred_cell_prop_file_path" does not exist: {self.pred_cell_prop_file_path}'
+                )
+        else:
+            self.pred_cell_prop_file_path = None
 
 
 class BulkGEPGenerator:
@@ -245,6 +259,19 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             logger.info(f'{len(sample_id_for_filtering)} samples used for filtering.')
 
         # Main Generation Loop
+        dirichlet_alpha = config.dirichlet_alpha
+        if config.sampling_method_prop == 'dirichlet' and config.pred_cell_prop_file_path is not None:
+            cell_type_with_subtype = flatten_cell_type2subtype(self.cell_type2subtype)
+            logger.info(
+                'Estimating Dirichlet alpha from predicted cell proportions: %s',
+                config.pred_cell_prop_file_path,
+            )
+            dirichlet_alpha = estimate_dirichlet_alpha_from_pred_cell_props(
+                pred_cell_prop_file_path=config.pred_cell_prop_file_path,
+                cell_types=cell_type_with_subtype,
+            )
+            logger.info('Estimated Dirichlet alpha for %d cell types.', len(dirichlet_alpha))
+
         with tqdm(total=self.n_samples) as pbar:
             if self.generated_bulk_gep_counter != 0:
                 pbar.update(self.generated_bulk_gep_counter)
@@ -256,7 +283,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     n_cell_frac=min_n_cell_frac,
                     sample_prefix=f's_{config.sampling_method_prop}_{self.n_round}',
                     cell_prop_prior=config.cell_prop_prior if config.filtering else None,
-                    cell_type2subtype=self.cell_type2subtype
+                    cell_type2subtype=self.cell_type2subtype,
+                    dirichlet_alpha=dirichlet_alpha,
                 )
 
                 # 2. Sample Cells (Multiprocessing)

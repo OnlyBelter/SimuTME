@@ -1,6 +1,81 @@
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from typing import List, Dict, Optional, Union
+
+
+def flatten_cell_type2subtype(cell_type2subtype: Dict[str, List[str]]) -> List[str]:
+    """Flatten the output cell-type list while preserving subtype names."""
+    cell_type_with_subtype = []
+    for k, v in cell_type2subtype.items():
+        if len(v) == 1 and v[0] == k:
+            cell_type_with_subtype.append(k)
+        else:
+            cell_type_with_subtype.extend(v)
+    return cell_type_with_subtype
+
+
+def get_default_dirichlet_alpha(cell_type2subtype: Dict[str, List[str]]) -> Dict[str, float]:
+    """Build the default symmetric Dirichlet prior (all ones)."""
+    return {cell_type: 1.0 for cell_type in flatten_cell_type2subtype(cell_type2subtype)}
+
+
+def estimate_dirichlet_alpha_from_pred_cell_props(
+    pred_cell_prop_file_path: str | Path,
+    cell_types: List[str],
+    eps: float = 1e-6,
+) -> Dict[str, float]:
+    """
+    Estimate Dirichlet concentration parameters from predicted cell proportions.
+
+    The input CSV can contain extra metadata columns, but it must contain one
+    numeric column for every requested cell type.
+    """
+    try:
+        import dirichlet
+    except ImportError as exc:
+        raise ImportError(
+            'Estimating "dirichlet_alpha" from "pred_cell_prop_file_path" requires the '
+            '`dirichlet` package. Please install it before using Mixed datasets with '
+            '"sampling_method_prop: dirichlet" and "pred_cell_prop_file_path".'
+        ) from exc
+
+    pred_cell_prop_file_path = Path(pred_cell_prop_file_path)
+    if not pred_cell_prop_file_path.exists():
+        raise FileNotFoundError(
+            f'"pred_cell_prop_file_path" does not exist: {pred_cell_prop_file_path}'
+        )
+
+    pred_cell_prop = pd.read_csv(pred_cell_prop_file_path)
+    missing_cell_types = [cell_type for cell_type in cell_types if cell_type not in pred_cell_prop.columns]
+    if missing_cell_types:
+        raise ValueError(
+            f'"pred_cell_prop_file_path" is missing required cell-type columns: {missing_cell_types}. '
+            f'Expected columns for all output cell types: {cell_types}.'
+        )
+
+    pred_cell_prop = pred_cell_prop.loc[:, cell_types].apply(pd.to_numeric, errors='coerce')
+    if pred_cell_prop.isnull().any().any():
+        raise ValueError(
+            f'"pred_cell_prop_file_path" contains non-numeric values in the requested cell-type columns: '
+            f'{pred_cell_prop_file_path}'
+        )
+    if (pred_cell_prop < 0).any().any():
+        raise ValueError(
+            f'"pred_cell_prop_file_path" contains negative cell proportions: {pred_cell_prop_file_path}'
+        )
+
+    pred_cell_prop = pred_cell_prop + eps
+    row_sums = pred_cell_prop.sum(axis=1)
+    if (row_sums <= 0).any():
+        raise ValueError(
+            f'"pred_cell_prop_file_path" contains rows with non-positive total proportion after smoothing: '
+            f'{pred_cell_prop_file_path}'
+        )
+    pred_cell_prop = pred_cell_prop.div(row_sums, axis=0)
+
+    alpha_hat = dirichlet.mle(pred_cell_prop.to_numpy(), method="meanversion")
+    return {cell_type: float(alpha_value) for cell_type, alpha_value in zip(cell_types, alpha_hat)}
 
 
 def segment_sampling(n_samples: int,
@@ -249,7 +324,8 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
                            n_cell_frac: int,
                            cell_type2subtype: Dict[str, List[str]],
                            sample_prefix: str = 'sample',
-                           cell_prop_prior: Optional[Dict] = None) -> pd.DataFrame:
+                           cell_prop_prior: Optional[Dict] = None,
+                           dirichlet_alpha: Optional[Union[float, Dict[str, float]]] = None) -> pd.DataFrame:
     """
     Generate cell proportions for simulated bulk GEPs using various sampling strategies.
 
@@ -274,12 +350,7 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
     """
 
     # 1. Flatten cell types (handle subtypes)
-    cell_type_with_subtype = []
-    for k, v in cell_type2subtype.items():
-        if len(v) == 1 and v[0] == k:
-            cell_type_with_subtype.append(k)
-        else:
-            cell_type_with_subtype.extend(v)
+    cell_type_with_subtype = flatten_cell_type2subtype(cell_type2subtype)
 
     # 2. Determine which methods to use
     valid_methods = ['segment', 'seg_random', 'sparse', 'random', 'dirichlet']
@@ -347,6 +418,7 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
         elif method == 'dirichlet':
             df = dirichlet_sampling(n_samples=n_count,
                                     cell_types=cell_type_with_subtype,
+                                    alpha=1.0 if dirichlet_alpha is None else dirichlet_alpha,
                                     sample_prefix=current_prefix)
 
         if df is not None:

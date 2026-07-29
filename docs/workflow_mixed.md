@@ -52,6 +52,8 @@ The visual summary is shown below.
 - `filtering_ref_types`
 - `cell_prop_prior`
 - `filtering_in_pca_space`
+- `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
+- `pred_cell_prop_file_path` for `sampling_method_prop: "dirichlet"`
 
 ## Reference Source Used By Mixed Simulation
 
@@ -79,6 +81,16 @@ Supported values for `sampling_method_prop`:
 
 These control how cell-type proportions are generated before composing the mixed
 bulk samples.
+
+For `sampling_method_prop: "dirichlet"`, the workflow also supports:
+
+- `dirichlet_alpha`
+  A dictionary of concentration parameters keyed by output cell type. Missing
+  keys default to `1.0` at the sampling layer.
+- `pred_cell_prop_file_path`
+  An optional CSV containing predicted cell proportions across samples. When
+  provided, SimuTME estimates `dirichlet_alpha` from the matched cell-type
+  columns and uses the estimated values instead of the manual dictionary.
 
 ## Main Outputs
 

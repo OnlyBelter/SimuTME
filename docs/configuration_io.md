@@ -142,6 +142,8 @@ Each entry under `datasets:` defines one simulation task.
 - `sampling_method_prop`
 - `sampling_method_gep` (optional but recommended)
 - `filtering_in_pca_space`
+- `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
+- `pred_cell_prop_file_path` (only when `sampling_method_prop: "dirichlet"`)
 
 ## Input Files By Workflow
 
@@ -171,6 +173,8 @@ Optional but commonly used:
 - TCGA TPM matrix
 - TCGA sample annotation
 - high-correlation gene list
+- predicted cell-proportion CSV for Dirichlet alpha estimation when using
+  `sampling_method_prop: "dirichlet"`
 
 ## Output Files By Workflow
 
