@@ -4,6 +4,42 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## July 28, 2026
+
+### SCT sample-diversity analysis
+
+This update adds an optional final post-simulation analysis step for each SCT
+dataset to measure within-cell-type sample diversity directly from the saved
+`log2(TPM+1)` profiles.
+
+- Added optional SCT post-step controls:
+  - `run_sample_diversity_analysis`
+  - `sample_diversity_gene_mode`
+  - `sample_diversity_n_top_genes`
+  - `sample_diversity_gene_list_path`
+  - `sample_diversity_distance_metric`
+  - `sample_diversity_min_samples_per_cell_type`
+- Defaulted the analysis to use all genes and cosine distance on the saved
+  `log2(TPM+1)` SCT profiles.
+- Computed one log-space median centroid (`mGEP_log`) per cell type and saved
+  sample-to-centroid distances, summaries, and the centroid table.
+- Saved per-dataset figures and tables under:
+  - `<output_parent>/<dataset_name>/sample_diversity/`
+- Kept the scope limited to SCT datasets only.
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `src/simutme/simulation/sample_diversity.py`
+- `src/config_example.yaml`
+- `docs/workflow_sct.md`
+- `docs/configuration_io.md`
+
+### Related spec
+
+- `docs/superpowers/specs/2026-07-28-sct-sample-diversity-analysis-design.md`
+
+
 ## July 27, 2026
 
 This release adds an explicit weight parameter for the sorted-bulk contribution

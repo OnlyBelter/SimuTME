@@ -182,6 +182,12 @@ Typical outputs:
 - sampled single-cell ID table
 - simulated SCT CSV in `log2(TPM+1)` format
 - simulated SCT `.h5ad`
+- optional `sample_diversity/` result folder with:
+  - `config_used.yaml`
+  - `per_cell_type_distance.csv`
+  - `per_cell_type_summary.csv`
+  - `per_cell_type_mGEP_log.csv`
+  - cell-type boxplots and distance-distribution figures
 
 If sorted-bulk-guided post-imputation is enabled:
 
@@ -195,6 +201,12 @@ If sorted-bulk-guided post-imputation is enabled:
 Rows processed through the `included == 1` averaging branch still appear in the
 same output files, but their `y` values are recorded as zero because no
 zero-guided addition or cap step is applied there.
+
+Sample-diversity outputs are saved under:
+
+- `paths.sorted_bulk_imputation_out_dir/<dataset_name>/sample_diversity/` when
+  `paths.sorted_bulk_imputation_out_dir` is configured
+- otherwise `paths.simu_bulk_dir/<dataset_name>/sample_diversity/`
 
 ### Mixed simulation outputs
 

@@ -1,2 +1,3 @@
 from .simulator import BulkGEPGenerator, GEPGenerationConfig
 from .simulator_sct import SingleCellTypeGEPGenerator
+from .sample_diversity import run_sct_sample_diversity_analysis

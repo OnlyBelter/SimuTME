@@ -94,6 +94,12 @@ parameters:
   sorted_bulk_imputation_bulk_weight: 0.5  # Optional: sorted-bulk contribution for the included==1 averaging branch; 0.5 keeps the previous 50/50 blend
   sorted_bulk_imputation_y_frac_threshold: 0.15  # Optional: cap for the newly added expression fraction in each SCT sample
   sorted_bulk_imputation_output_suffix: "_sorted_bulk_imputed"  # Optional: suffix appended to the imputed SCT h5ad
+  run_sample_diversity_analysis: true  # Optional: run sample-diversity analysis after each SCT dataset is generated
+  sample_diversity_gene_mode: "all"  # Optional: "all", "hvg", or "provided_gene_list"
+  sample_diversity_n_top_genes: 2000  # Optional: only used when sample_diversity_gene_mode is "hvg"
+  sample_diversity_gene_list_path: null  # Optional: path to a gene list file when sample_diversity_gene_mode is "provided_gene_list"
+  sample_diversity_distance_metric: "cosine"  # Optional: "cosine" or "l2"
+  sample_diversity_min_samples_per_cell_type: 5  # Optional: skip cell types with fewer samples than this threshold
 
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here.
@@ -109,6 +115,7 @@ datasets:
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
     apply_sorted_bulk_imputation: false  # Optional post-step; if true, an imputed SCT file is generated and later Mixed datasets can select it with `sct_dataset_version: "sorted_bulk_imputed"`
+    run_sample_diversity_analysis: true  # Optional SCT-only post-step; saves sample-diversity outputs under <output_parent>/<dataset_name>/sample_diversity/
     filtering: false  # Whether to apply gene filtering and TCGA-guided filtering
     filtering_ref_types: null
     cell_prop_prior: null

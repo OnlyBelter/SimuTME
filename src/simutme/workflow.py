@@ -6,7 +6,7 @@ import pandas as pd
 from pathlib import Path
 from joblib import load
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Literal
 
 from .utility import do_pca_analysis, plot_pca
 from .utility import cal_corr_gene_exp_with_cell_frac
@@ -15,6 +15,7 @@ from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
+from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 
 
 def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str | None:
@@ -130,6 +131,28 @@ def _resolve_sorted_bulk_imputation_bulk_weight(
     return bulk_weight
 
 
+def _resolve_sample_diversity_gene_mode(gene_mode_value: Any, context: str) -> str:
+    gene_mode = str(gene_mode_value).strip().lower()
+    allowed = {"all", "hvg", "provided_gene_list"}
+    if gene_mode not in allowed:
+        raise ValueError(
+            f'Invalid "sample_diversity_gene_mode" for {context}: '
+            f"{gene_mode_value!r}. Expected one of {sorted(allowed)}."
+        )
+    return gene_mode
+
+
+def _resolve_sample_diversity_distance_metric(metric_value: Any, context: str) -> str:
+    metric = str(metric_value).strip().lower()
+    allowed = {"cosine", "l2"}
+    if metric not in allowed:
+        raise ValueError(
+            f'Invalid "sample_diversity_distance_metric" for {context}: '
+            f"{metric_value!r}. Expected one of {sorted(allowed)}."
+        )
+    return metric
+
+
 # --- 1. Configuration Management ---
 @dataclass
 class SimuConfig:
@@ -166,6 +189,12 @@ class SimuConfig:
     sorted_bulk_imputation_bulk_weight: float = 0.5
     sorted_bulk_imputation_output_suffix: str = "_sorted_bulk_imputed"
     sorted_bulk_imputation_out_dir: Path | None = None
+    run_sample_diversity_analysis: bool = True
+    sample_diversity_gene_mode: Literal["all", "hvg", "provided_gene_list"] = "all"
+    sample_diversity_n_top_genes: int = 2000
+    sample_diversity_gene_list_path: Path | None = None
+    sample_diversity_distance_metric: Literal["cosine", "l2"] = "cosine"
+    sample_diversity_min_samples_per_cell_type: int = 5
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -195,6 +224,28 @@ class SimuConfig:
             self.sorted_bulk_imputation_bulk_weight,
             "global parameters",
         )
+        self.sample_diversity_gene_mode = _resolve_sample_diversity_gene_mode(
+            self.sample_diversity_gene_mode,
+            "global parameters",
+        )
+        self.sample_diversity_distance_metric = _resolve_sample_diversity_distance_metric(
+            self.sample_diversity_distance_metric,
+            "global parameters",
+        )
+        self.sample_diversity_n_top_genes = int(self.sample_diversity_n_top_genes)
+        if self.sample_diversity_n_top_genes <= 0:
+            raise ValueError('"sample_diversity_n_top_genes" must be positive.')
+        self.sample_diversity_min_samples_per_cell_type = int(self.sample_diversity_min_samples_per_cell_type)
+        if self.sample_diversity_min_samples_per_cell_type < 2:
+            raise ValueError('"sample_diversity_min_samples_per_cell_type" must be at least 2.')
+        if self.sample_diversity_gene_list_path not in (None, ""):
+            self.sample_diversity_gene_list_path = Path(self.sample_diversity_gene_list_path)
+            if not self.sample_diversity_gene_list_path.exists():
+                raise FileNotFoundError(
+                    f'"sample_diversity_gene_list_path" does not exist: {self.sample_diversity_gene_list_path}'
+                )
+        else:
+            self.sample_diversity_gene_list_path = None
 
     @property
     def high_corr_genes(self) -> List[str]:
@@ -286,8 +337,13 @@ def run_bulk_simulation(dataset_name: str,
             )
             config.sct_dataset_file_path = imputed_sct_fp
             logging.info("   > Updated config.sct_dataset_file_path to imputed SCT dataset: %s", imputed_sct_fp)
-            return str(imputed_sct_fp)
-        return str(generated_sct_fp)
+        _run_sample_diversity_for_sct_dataset(
+            dataset_name=dataset_name,
+            params=params,
+            config=config,
+            sct_dataset_file_path=config.sct_dataset_file_path,
+        )
+        return str(config.sct_dataset_file_path)
     else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
         resolved_sct_dataset_file_path = _resolve_mixed_sct_dataset_path(
@@ -442,6 +498,71 @@ def _run_post_processing(dataset_name: str,
         h5ad_file_path=filtered_file_path,
         cell_frac_file=bulk_exp_cell_frac,
         figsize=(5, 5)
+    )
+
+
+def _run_sample_diversity_for_sct_dataset(
+    dataset_name: str,
+    params: Dict[str, Any],
+    config: SimuConfig,
+    sct_dataset_file_path: str | Path,
+) -> None:
+    run_analysis = params.get("run_sample_diversity_analysis", config.run_sample_diversity_analysis)
+    if not run_analysis:
+        logging.info("   > Sample diversity analysis disabled for SCT dataset %s.", dataset_name)
+        return
+
+    gene_mode = _resolve_sample_diversity_gene_mode(
+        params.get("sample_diversity_gene_mode", config.sample_diversity_gene_mode),
+        f'SCT dataset "{dataset_name}"',
+    )
+    distance_metric = _resolve_sample_diversity_distance_metric(
+        params.get("sample_diversity_distance_metric", config.sample_diversity_distance_metric),
+        f'SCT dataset "{dataset_name}"',
+    )
+    n_top_genes = int(params.get("sample_diversity_n_top_genes", config.sample_diversity_n_top_genes))
+    if n_top_genes <= 0:
+        raise ValueError(
+            f'"sample_diversity_n_top_genes" must be positive for SCT dataset "{dataset_name}".'
+        )
+    min_samples = int(
+        params.get(
+            "sample_diversity_min_samples_per_cell_type",
+            config.sample_diversity_min_samples_per_cell_type,
+        )
+    )
+    if min_samples < 2:
+        raise ValueError(
+            f'"sample_diversity_min_samples_per_cell_type" must be at least 2 for SCT dataset "{dataset_name}".'
+        )
+
+    gene_list_path_value = params.get("sample_diversity_gene_list_path", config.sample_diversity_gene_list_path)
+    gene_list_path = None
+    if gene_list_path_value not in (None, ""):
+        gene_list_path = Path(gene_list_path_value)
+        if not gene_list_path.exists():
+            raise FileNotFoundError(
+                f'"sample_diversity_gene_list_path" does not exist for SCT dataset "{dataset_name}": '
+                f"{gene_list_path}"
+            )
+
+    dataset_result_root_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
+    if dataset_result_root_value in (None, ""):
+        dataset_result_root = Path(config.simu_bulk_dir)
+    else:
+        dataset_result_root = Path(dataset_result_root_value)
+    dataset_result_dir = dataset_result_root / dataset_name
+
+    logging.info("   > Running sample diversity analysis for SCT dataset %s...", dataset_name)
+    run_sct_sample_diversity_analysis(
+        sct_dataset_file_path=sct_dataset_file_path,
+        dataset_name=dataset_name,
+        output_dir=dataset_result_dir / "sample_diversity",
+        gene_mode=gene_mode,
+        n_top_genes=n_top_genes,
+        gene_list_path=gene_list_path,
+        distance_metric=distance_metric,
+        min_samples_per_cell_type=min_samples,
     )
 
 

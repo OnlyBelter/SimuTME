@@ -11,6 +11,8 @@ This workflow is used to:
 - create SCT reference datasets
 - provide reference profiles for later Mixed bulk simulation
 - optionally produce an imputed SCT reference using a sorted bulk dataset
+- optionally measure within-cell-type sample diversity from the generated SCT
+  profiles
 
 ## High-Level Steps
 
@@ -21,6 +23,7 @@ This workflow is used to:
 5. Average the sampled cells into SCT profiles.
 6. Save CSV and `.h5ad` outputs.
 7. Optionally apply sorted-bulk-guided SCT post-imputation.
+8. Optionally run sample-diversity analysis on the saved SCT profiles.
 
 The visual summary is shown below.
 
@@ -49,6 +52,12 @@ The visual summary is shown below.
 - `cell_type_col`
 - `cell_subtype_col`
 - `max_cells_per_cell_type`
+- `run_sample_diversity_analysis`
+- `sample_diversity_gene_mode`
+- `sample_diversity_n_top_genes`
+- `sample_diversity_gene_list_path`
+- `sample_diversity_distance_metric`
+- `sample_diversity_min_samples_per_cell_type`
 
 ## Sampling Behavior
 
@@ -75,6 +84,68 @@ Main files:
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_sampled_sc_cell_id.csv`
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.csv`
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.h5ad`
+
+## Optional Sample-Diversity Analysis
+
+This workflow is enabled globally or per SCT dataset with:
+
+```yaml
+run_sample_diversity_analysis: true
+```
+
+It only applies to datasets with:
+
+```yaml
+dataset_type: "SCT"
+```
+
+### Additional Optional Parameters
+
+- `sample_diversity_gene_mode`
+- `sample_diversity_n_top_genes`
+- `sample_diversity_gene_list_path`
+- `sample_diversity_distance_metric`
+- `sample_diversity_min_samples_per_cell_type`
+
+### What The Sample-Diversity Step Does
+
+1. Load the generated SCT `.h5ad`.
+2. Read the saved sample-level `log2(TPM+1)` profiles directly.
+3. Infer each sample's cell type from the one-hot SCT fraction table in
+   `adata.obs`.
+4. Analyze each cell type separately.
+5. Select genes according to `sample_diversity_gene_mode`:
+   - `all`
+   - `hvg`
+   - `provided_gene_list`
+6. Compute the log-space median centroid `mGEP_log` for each cell type.
+7. Compute sample-to-centroid distances using:
+   - `cosine` (default)
+   - `l2`
+8. Save per-sample distances, per-cell-type summaries, the `mGEP_log` table,
+   and figures.
+
+### Outputs From The Sample-Diversity Step
+
+Outputs are saved under:
+
+`<output_parent>/<dataset_name>/sample_diversity/`
+
+where `<output_parent>` is:
+
+- `paths.sorted_bulk_imputation_out_dir` when it is configured
+- otherwise `paths.simu_bulk_dir`
+
+Main files:
+
+- `config_used.yaml`
+- `per_cell_type_distance.csv`
+- `per_cell_type_summary.csv`
+- `per_cell_type_mGEP_log.csv`
+- `figures/distance_boxplot_by_cell_type.png`
+- `figures/distance_boxplot_by_cell_type.pdf`
+- `figures/<cell_type>_distance_distribution.png`
+- `figures/<cell_type>_distance_distribution.pdf`
 
 ## Optional Sorted-Bulk-Guided SCT Post-Imputation
 
