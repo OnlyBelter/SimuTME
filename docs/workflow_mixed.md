@@ -18,7 +18,8 @@ ground-truth cell fractions.
 5. Sample expression profiles from the reference source.
 6. Compose mixed bulk GEPs.
 7. Save cell-fraction, CSV, and `.h5ad` outputs.
-8. Optionally apply filtering and PCA-based validation.
+8. Save the `Cancer Cells` proportion distribution outputs for the dataset.
+9. Optionally apply filtering and PCA-based validation.
 
 The visual summary is shown below.
 
@@ -93,6 +94,14 @@ Main files:
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_sampled_sc_cell_id.csv`
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.csv`
 - `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.h5ad`
+
+Dataset-local diagnostic outputs under:
+
+`paths.simu_bulk_dir/<dataset_name>/`
+
+- `cancer_cell_fraction_distribution.png`
+- `cancer_cell_fraction_distribution.pdf`
+- `cancer_cell_fraction_summary.csv`
 
 ## Optional Filtering And PCA Outputs
 

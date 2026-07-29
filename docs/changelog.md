@@ -4,6 +4,30 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## July 29, 2026
+
+### Mixed Cancer Cells fraction distribution output
+
+This update adds a Mixed-only post-processing output that plots the
+distribution of `Cancer Cells` proportions across all simulated samples.
+
+- Reused the existing Mixed cell-fraction CSV rather than generating new data.
+- Added a histogram with KDE for the `Cancer Cells` proportion distribution.
+- Saved the figure in both `png` and `pdf` formats.
+- Added a summary CSV with sample count and basic distribution statistics.
+- Wrote all outputs under:
+  - `paths.simu_bulk_dir/<dataset_name>/`
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `docs/workflow_mixed.md`
+- `docs/configuration_io.md`
+
+### Related spec
+
+- `docs/superpowers/specs/2026-07-29-mixed-cancer-cell-fraction-distribution-design.md`
+
 ## July 28, 2026
 
 ### SCT sample-diversity analysis

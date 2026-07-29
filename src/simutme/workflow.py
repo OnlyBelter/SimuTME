@@ -420,6 +420,12 @@ def run_bulk_simulation(dataset_name: str,
         else:
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
 
+        _save_cancer_cell_fraction_distribution(
+            dataset_name=dataset_name,
+            cell_fraction_file_path=bulk_generator.generated_cell_fraction_fp,
+            output_dir=Path(config.simu_bulk_dir) / dataset_name,
+        )
+
         # 3. Post-processing: Gene-level filtering and PCA (if needed)
         if params.get('filtering', False):
             _run_post_processing(dataset_name, generated_bulk_gep_fp, config)
@@ -428,6 +434,59 @@ def run_bulk_simulation(dataset_name: str,
 
 
 # --- 3. Internal Helper Functions ---
+def _save_cancer_cell_fraction_distribution(
+    dataset_name: str,
+    cell_fraction_file_path: str | Path,
+    output_dir: str | Path,
+) -> None:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    cell_fraction_file_path = Path(cell_fraction_file_path)
+    if not cell_fraction_file_path.exists():
+        raise FileNotFoundError(f"Cell fraction file not found: {cell_fraction_file_path}")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cell_frac = pd.read_csv(cell_fraction_file_path, index_col=0)
+    if "Cancer Cells" not in cell_frac.columns:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" is missing the "Cancer Cells" column in '
+            f"{cell_fraction_file_path}."
+        )
+
+    cancer_frac = cell_frac.loc[:, "Cancer Cells"].astype(float).copy()
+    summary_df = pd.DataFrame(
+        [
+            {
+                "dataset_id": dataset_name,
+                "cell_type": "Cancer Cells",
+                "n_samples": int(cancer_frac.shape[0]),
+                "mean": float(cancer_frac.mean()),
+                "median": float(cancer_frac.median()),
+                "std": float(cancer_frac.std(ddof=1)) if cancer_frac.shape[0] > 1 else 0.0,
+                "min": float(cancer_frac.min()),
+                "max": float(cancer_frac.max()),
+                "p25": float(cancer_frac.quantile(0.25)),
+                "p75": float(cancer_frac.quantile(0.75)),
+                "p90": float(cancer_frac.quantile(0.90)),
+            }
+        ]
+    )
+    summary_df.to_csv(output_dir / "cancer_cell_fraction_summary.csv", index=False, float_format="%.6f")
+
+    plt.figure(figsize=(6, 4))
+    sns.histplot(cancer_frac, bins=min(40, max(10, cancer_frac.shape[0] // 20 or 10)), kde=True, color="#c44e52")
+    plt.xlabel("Cancer Cells proportion")
+    plt.ylabel("Sample count")
+    plt.title(f"{dataset_name}: Cancer Cells proportion")
+    plt.tight_layout()
+    for suffix in ("png", "pdf"):
+        plt.savefig(output_dir / f"cancer_cell_fraction_distribution.{suffix}", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
 def _run_post_processing(dataset_name: str,
                          generated_bulk_gep_fp: str,
                          config: SimuConfig):

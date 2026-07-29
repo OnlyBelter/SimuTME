@@ -217,6 +217,11 @@ Typical outputs:
 - neighbor usage table
 - simulated mixed bulk CSV in `log2(TPM+1)` format
 - simulated mixed bulk `.h5ad`
+- dataset-local `Cancer Cells` fraction diagnostics under
+  `paths.simu_bulk_dir/<dataset_name>/`:
+  - `cancer_cell_fraction_distribution.png`
+  - `cancer_cell_fraction_distribution.pdf`
+  - `cancer_cell_fraction_summary.csv`
 
 Optional post-processing outputs:
 
