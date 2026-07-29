@@ -40,6 +40,74 @@ def _read_gene_list(gene_list_path: Path) -> list[str]:
     return gene_list
 
 
+def _default_reference_gene_variance_path(merged_sc_dataset_file_path: Path) -> Path:
+    return merged_sc_dataset_file_path.with_name(f"{merged_sc_dataset_file_path.stem}.gene_variance.csv")
+
+
+def _compute_gene_variance_table(
+    merged_sc_dataset_file_path: Path,
+    chunk_size: int = 5000,
+) -> pd.DataFrame:
+    import scipy.sparse as sp
+
+    adata = ad.read_h5ad(merged_sc_dataset_file_path, backed="r")
+    n_obs = int(adata.n_obs)
+    n_vars = int(adata.n_vars)
+    if n_obs <= 1:
+        raise ValueError(f"Reference scRNA-seq dataset has too few cells: {merged_sc_dataset_file_path}")
+
+    col_sum = np.zeros(n_vars, dtype=np.float64)
+    col_sumsq = np.zeros(n_vars, dtype=np.float64)
+
+    x = adata.X
+    for start in range(0, n_obs, int(chunk_size)):
+        end = min(n_obs, start + int(chunk_size))
+        x_chunk = x[start:end, :]
+        if sp.issparse(x_chunk):
+            col_sum += np.asarray(x_chunk.sum(axis=0)).ravel()
+            col_sumsq += np.asarray(x_chunk.multiply(x_chunk).sum(axis=0)).ravel()
+        else:
+            x_arr = np.asarray(x_chunk, dtype=np.float64)
+            col_sum += x_arr.sum(axis=0)
+            col_sumsq += np.square(x_arr).sum(axis=0)
+
+    mean = col_sum / float(n_obs)
+    var = (col_sumsq / float(n_obs)) - np.square(mean)
+    var = np.clip(var, a_min=0.0, a_max=None)
+
+    gene_names = pd.Index(adata.var_names.astype(str))
+    var_series = pd.Series(var.astype(float), index=gene_names, name="variance")
+    var_series = var_series.sort_values(ascending=False)
+
+    out_df = var_series.reset_index()
+    out_df.columns = ["gene_name", "variance"]
+    out_df["rank"] = np.arange(1, out_df.shape[0] + 1, dtype=int)
+    return out_df
+
+
+def _load_or_compute_reference_gene_variance(
+    merged_sc_dataset_file_path: Path,
+    cache_file_path: Path | None = None,
+) -> tuple[pd.DataFrame, Path]:
+    cache_path = _default_reference_gene_variance_path(merged_sc_dataset_file_path) if cache_file_path is None else cache_file_path
+    if cache_path.exists():
+        gene_var_df = pd.read_csv(cache_path)
+        if gene_var_df.empty or "gene_name" not in gene_var_df.columns:
+            raise ValueError(f"Invalid cached gene-variance table: {cache_path}")
+        gene_var_df["gene_name"] = gene_var_df["gene_name"].astype(str)
+        if "variance" in gene_var_df.columns:
+            gene_var_df["variance"] = pd.to_numeric(gene_var_df["variance"], errors="coerce").fillna(0.0)
+            gene_var_df = gene_var_df.sort_values("variance", ascending=False)
+        if "rank" not in gene_var_df.columns:
+            gene_var_df = gene_var_df.reset_index(drop=True)
+            gene_var_df["rank"] = np.arange(1, gene_var_df.shape[0] + 1, dtype=int)
+        return gene_var_df.reset_index(drop=True), cache_path
+
+    gene_var_df = _compute_gene_variance_table(merged_sc_dataset_file_path=merged_sc_dataset_file_path)
+    gene_var_df.to_csv(cache_path, index=False, float_format="%.8f")
+    return gene_var_df, cache_path
+
+
 def _select_genes_for_cell_type(
     cell_type_df: pd.DataFrame,
     gene_mode: str,
@@ -55,10 +123,6 @@ def _select_genes_for_cell_type(
         if provided_gene_list is None:
             raise ValueError('"provided_gene_list" mode requires a gene list file.')
         selected = [gene for gene in provided_gene_list if gene in cell_type_df.columns]
-    elif gene_mode == "hvg":
-        gene_var = cell_type_df.var(axis=0, ddof=1).fillna(0.0)
-        gene_var = gene_var.sort_values(ascending=False)
-        selected = gene_var.head(n_top_genes).index.astype(str).tolist()
     else:
         raise ValueError(f"Unsupported sample diversity gene mode: {gene_mode}")
 
@@ -105,6 +169,8 @@ def _save_config_used(
     gene_list_path: Path | None,
     distance_metric: str,
     min_samples_per_cell_type: int,
+    merged_sc_dataset_file_path: Path | None = None,
+    reference_gene_variance_table_path: Path | None = None,
 ) -> None:
     config_used = {
         "dataset_name": dataset_name,
@@ -114,6 +180,10 @@ def _save_config_used(
         "sample_diversity_gene_list_path": None if gene_list_path is None else str(gene_list_path),
         "sample_diversity_distance_metric": distance_metric,
         "sample_diversity_min_samples_per_cell_type": int(min_samples_per_cell_type),
+        "merged_sc_dataset_file_path": None if merged_sc_dataset_file_path is None else str(merged_sc_dataset_file_path),
+        "reference_gene_variance_table_path": None
+        if reference_gene_variance_table_path is None
+        else str(reference_gene_variance_table_path),
     }
     with open(output_dir / "config_used.yaml", "w", encoding="utf-8") as fh:
         yaml.safe_dump(config_used, fh, sort_keys=False, allow_unicode=False)
@@ -160,6 +230,7 @@ def run_sct_sample_diversity_analysis(
     gene_mode: str = "all",
     n_top_genes: int = 2000,
     gene_list_path: str | Path | None = None,
+    merged_sc_dataset_file_path: str | Path | None = None,
     distance_metric: str = "cosine",
     min_samples_per_cell_type: int = 5,
 ) -> Path:
@@ -170,6 +241,23 @@ def run_sct_sample_diversity_analysis(
 
     gene_list_file = None if gene_list_path in (None, "") else Path(gene_list_path)
     provided_gene_list = None if gene_list_file is None else _read_gene_list(gene_list_file)
+
+    reference_gene_variance_table_path = None
+    shared_hvg_genes: list[str] | None = None
+    merged_sc_path = None if merged_sc_dataset_file_path in (None, "") else Path(merged_sc_dataset_file_path)
+    if gene_mode == "hvg":
+        if merged_sc_path is None:
+            raise ValueError('"hvg" gene mode requires "merged_sc_dataset_file_path".')
+        if not merged_sc_path.exists():
+            raise FileNotFoundError(f"merged_sc_dataset_file_path does not exist: {merged_sc_path}")
+        gene_var_df, reference_gene_variance_table_path = _load_or_compute_reference_gene_variance(
+            merged_sc_dataset_file_path=merged_sc_path
+        )
+        shared_hvg_genes = (
+            gene_var_df.loc[:, "gene_name"].astype(str).drop_duplicates().head(int(n_top_genes)).tolist()
+        )
+        if not shared_hvg_genes:
+            raise ValueError(f"No HVGs were derived from reference dataset: {merged_sc_path}")
 
     adata = ad.read_h5ad(sct_dataset_file_path)
     sample_x = _ensure_dense_float32(adata.X)
@@ -192,12 +280,22 @@ def run_sct_sample_diversity_analysis(
             )
             continue
 
-        selected_genes = _select_genes_for_cell_type(
-            cell_type_df=cell_type_df,
-            gene_mode=gene_mode,
-            n_top_genes=n_top_genes,
-            provided_gene_list=provided_gene_list,
-        )
+        if gene_mode == "hvg":
+            selected_genes = [gene for gene in (shared_hvg_genes or []) if gene in cell_type_df.columns]
+            if not selected_genes:
+                logger.warning(
+                    "Skipping sample diversity analysis for cell type %s in dataset %s: no HVGs are present.",
+                    cell_type,
+                    dataset_name,
+                )
+                continue
+        else:
+            selected_genes = _select_genes_for_cell_type(
+                cell_type_df=cell_type_df,
+                gene_mode=gene_mode,
+                n_top_genes=n_top_genes,
+                provided_gene_list=provided_gene_list,
+            )
         current_df = cell_type_df.loc[:, selected_genes].copy()
         if current_df.columns.has_duplicates:
             current_df = current_df.loc[:, ~current_df.columns.duplicated()].copy()
@@ -266,6 +364,8 @@ def run_sct_sample_diversity_analysis(
         gene_list_path=gene_list_file,
         distance_metric=distance_metric,
         min_samples_per_cell_type=min_samples_per_cell_type,
+        merged_sc_dataset_file_path=merged_sc_path,
+        reference_gene_variance_table_path=reference_gene_variance_table_path,
     )
     _plot_distance_boxplot(distance_df=distance_df, figure_dir=figure_dir)
     _plot_per_cell_type_distributions(distance_df=distance_df, figure_dir=figure_dir)

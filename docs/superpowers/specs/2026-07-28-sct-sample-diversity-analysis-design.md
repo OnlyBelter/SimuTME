@@ -98,7 +98,7 @@ first diversity analysis pass.
 Support at least:
 
 - `all`
-- `hvg`
+- `hvg` (derive one shared HVG ranking from the merged scRNA-seq reference in `paths.merged_sc_dataset_file_path` so different SCT datasets use the same feature space)
 - `provided_gene_list`
 
 If a provided gene list is used, only genes present in the simulated dataset

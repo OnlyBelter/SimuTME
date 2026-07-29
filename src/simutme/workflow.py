@@ -636,6 +636,12 @@ def _run_sample_diversity_for_sct_dataset(
                 f"{gene_list_path}"
             )
 
+    merged_sc_dataset_file_path = None
+    if gene_mode == "hvg":
+        merged_sc_dataset_file_path = Path(config.merged_sc_dataset_file_path)
+        if not merged_sc_dataset_file_path.exists():
+            raise FileNotFoundError(f"merged_sc_dataset_file_path does not exist: {merged_sc_dataset_file_path}")
+
     dataset_result_root_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
     if dataset_result_root_value in (None, ""):
         dataset_result_root = Path(config.simu_bulk_dir)
@@ -651,6 +657,7 @@ def _run_sample_diversity_for_sct_dataset(
         gene_mode=gene_mode,
         n_top_genes=n_top_genes,
         gene_list_path=gene_list_path,
+        merged_sc_dataset_file_path=merged_sc_dataset_file_path,
         distance_metric=distance_metric,
         min_samples_per_cell_type=min_samples,
     )

@@ -116,7 +116,7 @@ dataset_type: "SCT"
 4. Analyze each cell type separately.
 5. Select genes according to `sample_diversity_gene_mode`:
    - `all`
-   - `hvg`
+   - `hvg` (uses a shared HVG ranking derived from `paths.merged_sc_dataset_file_path` and caches the full gene-variance table next to that `.h5ad`)
    - `provided_gene_list`
 6. Compute the log-space median centroid `mGEP_log` for each cell type.
 7. Compute sample-to-centroid distances using:
