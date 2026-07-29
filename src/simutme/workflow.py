@@ -423,7 +423,7 @@ def run_bulk_simulation(dataset_name: str,
         _save_cancer_cell_fraction_distribution(
             dataset_name=dataset_name,
             cell_fraction_file_path=bulk_generator.generated_cell_fraction_fp,
-            output_dir=Path(config.simu_bulk_dir) / dataset_name,
+            output_dir=Path(simu_bulk_dir) / dataset_name,
         )
 
         # 3. Post-processing: Gene-level filtering and PCA (if needed)
