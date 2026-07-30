@@ -18,7 +18,7 @@ ground-truth cell fractions.
 5. Sample expression profiles from the reference source.
 6. Compose mixed bulk GEPs.
 7. Save cell-fraction, CSV, and `.h5ad` outputs.
-8. Save the `Cancer Cells` proportion distribution outputs for the dataset.
+8. Save cell-fraction distribution outputs for the dataset.
 9. Optionally apply filtering and PCA-based validation.
 
 The visual summary is shown below.
@@ -114,6 +114,10 @@ Dataset-local diagnostic outputs under:
 - `cancer_cell_fraction_distribution.png`
 - `cancer_cell_fraction_distribution.pdf`
 - `cancer_cell_fraction_summary.csv`
+- `cell_fraction_summary_all_cell_types.csv` when `sampling_method_prop: "dirichlet"`
+- `<cell_type>_fraction_distribution.png` when `sampling_method_prop: "dirichlet"`
+- `<cell_type>_fraction_distribution.pdf` when `sampling_method_prop: "dirichlet"`
+- `dirichlet_alpha_estimated_from_pred_cell_props.csv` when `sampling_method_prop: "dirichlet"` and `pred_cell_prop_file_path` is provided
 
 ## Optional Filtering And PCA Outputs
 

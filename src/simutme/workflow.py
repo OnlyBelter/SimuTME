@@ -14,7 +14,7 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
-from .simulation.sampling import get_default_dirichlet_alpha
+from .simulation.sampling import estimate_dirichlet_alpha_from_pred_cell_props, get_default_dirichlet_alpha
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 
@@ -463,7 +463,14 @@ def run_bulk_simulation(dataset_name: str,
             dataset_name=dataset_name,
             cell_fraction_file_path=bulk_generator.generated_cell_fraction_fp,
             output_dir=Path(simu_bulk_dir) / dataset_name,
+            plot_all_cell_types=sampling_method_prop == "dirichlet",
         )
+        if sampling_method_prop == "dirichlet" and pred_cell_prop_file_path not in (None, ""):
+            _save_estimated_dirichlet_alpha_from_pred_cell_props(
+                pred_cell_prop_file_path=pred_cell_prop_file_path,
+                cell_types=list(config.output_types),
+                output_dir=Path(simu_bulk_dir) / dataset_name,
+            )
 
         # 3. Post-processing: Gene-level filtering and PCA (if needed)
         if params.get('filtering', False):
@@ -473,10 +480,38 @@ def run_bulk_simulation(dataset_name: str,
 
 
 # --- 3. Internal Helper Functions ---
+def _safe_filename(text: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(text))
+    while "__" in sanitized:
+        sanitized = sanitized.replace("__", "_")
+    return sanitized.strip("_") or "unknown"
+
+
+def _save_estimated_dirichlet_alpha_from_pred_cell_props(
+    pred_cell_prop_file_path: str | Path,
+    cell_types: List[str],
+    output_dir: str | Path,
+) -> Path:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    alpha_hat = estimate_dirichlet_alpha_from_pred_cell_props(
+        pred_cell_prop_file_path=pred_cell_prop_file_path,
+        cell_types=cell_types,
+    )
+    alpha_df = pd.DataFrame(
+        [{"cell_type": cell_type, "alpha": float(alpha_value)} for cell_type, alpha_value in alpha_hat.items()]
+    )
+    output_path = output_dir / "dirichlet_alpha_estimated_from_pred_cell_props.csv"
+    alpha_df.to_csv(output_path, index=False, float_format="%.6f")
+    return output_path
+
+
 def _save_cancer_cell_fraction_distribution(
     dataset_name: str,
     cell_fraction_file_path: str | Path,
     output_dir: str | Path,
+    plot_all_cell_types: bool = False,
 ) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -524,6 +559,52 @@ def _save_cancer_cell_fraction_distribution(
     for suffix in ("png", "pdf"):
         plt.savefig(output_dir / f"cancer_cell_fraction_distribution.{suffix}", dpi=300, bbox_inches="tight")
     plt.close()
+
+    if not plot_all_cell_types:
+        return
+
+    summary_rows: list[dict[str, Any]] = []
+    for cell_type in cell_frac.columns.astype(str):
+        if cell_type == "Cancer Cells":
+            continue
+        frac = cell_frac.loc[:, cell_type].astype(float).copy()
+        summary_rows.append(
+            {
+                "dataset_id": dataset_name,
+                "cell_type": cell_type,
+                "n_samples": int(frac.shape[0]),
+                "mean": float(frac.mean()),
+                "median": float(frac.median()),
+                "std": float(frac.std(ddof=1)) if frac.shape[0] > 1 else 0.0,
+                "min": float(frac.min()),
+                "max": float(frac.max()),
+                "p25": float(frac.quantile(0.25)),
+                "p75": float(frac.quantile(0.75)),
+                "p90": float(frac.quantile(0.90)),
+            }
+        )
+
+        plt.figure(figsize=(6, 4))
+        sns.histplot(frac, bins=min(40, max(10, frac.shape[0] // 20 or 10)), kde=True, color="#4c78a8")
+        plt.xlabel(f"{cell_type} proportion")
+        plt.ylabel("Sample count")
+        plt.title(f"{dataset_name}: {cell_type} proportion")
+        plt.tight_layout()
+        safe_cell_type = _safe_filename(cell_type)
+        for suffix in ("png", "pdf"):
+            plt.savefig(
+                output_dir / f"{safe_cell_type}_fraction_distribution.{suffix}",
+                dpi=300,
+                bbox_inches="tight",
+            )
+        plt.close()
+
+    if summary_rows:
+        pd.DataFrame(summary_rows).to_csv(
+            output_dir / "cell_fraction_summary_all_cell_types.csv",
+            index=False,
+            float_format="%.6f",
+        )
 
 
 def _run_post_processing(dataset_name: str,

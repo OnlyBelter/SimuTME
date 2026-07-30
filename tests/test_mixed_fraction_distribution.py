@@ -29,3 +29,28 @@ def test_save_cancer_cell_fraction_distribution_writes_outputs(tmp_path: Path):
     assert int(summary_df.loc[0, "n_samples"]) == 4
     assert (output_dir / "cancer_cell_fraction_distribution.png").exists()
     assert (output_dir / "cancer_cell_fraction_distribution.pdf").exists()
+
+
+def test_save_cancer_cell_fraction_distribution_writes_all_cell_types_when_enabled(tmp_path: Path):
+    cell_frac = pd.DataFrame(
+        {
+            "Cancer Cells": [0.1, 0.2, 0.4, 0.6],
+            "B Cells": [0.9, 0.8, 0.6, 0.4],
+            "CD4 T": [0.0, 0.0, 0.0, 0.1],
+        },
+        index=["s1", "s2", "s3", "s4"],
+    )
+    cell_frac_path = tmp_path / "cell_fractions_mixed.csv"
+    cell_frac.to_csv(cell_frac_path)
+
+    output_dir = tmp_path / "Mixed_Test"
+    _save_cancer_cell_fraction_distribution(
+        dataset_name="Mixed_Test",
+        cell_fraction_file_path=cell_frac_path,
+        output_dir=output_dir,
+        plot_all_cell_types=True,
+    )
+
+    assert (output_dir / "cell_fraction_summary_all_cell_types.csv").exists()
+    assert (output_dir / "B_Cells_fraction_distribution.png").exists()
+    assert (output_dir / "B_Cells_fraction_distribution.pdf").exists()
