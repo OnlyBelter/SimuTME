@@ -95,6 +95,14 @@ def _resolve_mixed_sct_dataset_path(
             original_sct_path,
             output_suffix,
         )
+        if current_sct_path == original_sct_path and not resolved_sct_path.exists():
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed", '
+                f'but the current SCT dataset path points to the original SCT file: {current_sct_path}. '
+                f'If the preceding SCT dataset used "apply_sorted_bulk_imputation: false", '
+                f'please set "sct_dataset_version" to "original". '
+                f'Otherwise, enable the SCT post-imputation step or provide an existing imputed SCT file.'
+            )
 
     if not resolved_sct_path.exists():
         raise FileNotFoundError(
