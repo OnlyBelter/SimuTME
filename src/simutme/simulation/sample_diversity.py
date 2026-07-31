@@ -111,7 +111,6 @@ def _load_or_compute_reference_gene_variance(
 def _select_genes_for_cell_type(
     cell_type_df: pd.DataFrame,
     gene_mode: str,
-    n_top_genes: int,
     provided_gene_list: list[str] | None,
 ) -> list[str]:
     if cell_type_df.columns.has_duplicates:
@@ -233,6 +232,212 @@ def _plot_per_cell_type_distributions(distance_df: pd.DataFrame, figure_dir: Pat
         plt.close()
 
 
+def _validate_multi_dataset_distance_df(distance_df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
+    required_columns = {"cell_type", "sample_id", "distance", "distance_metric", "n_genes"}
+    missing_columns = sorted(required_columns - set(distance_df.columns))
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns in multi-dataset sample-diversity input {file_path}: {missing_columns}"
+        )
+    if "dataset_id" not in distance_df.columns:
+        distance_df = distance_df.copy()
+        distance_df["dataset_id"] = file_path.parent.parent.name
+    distance_df["distance"] = pd.to_numeric(distance_df["distance"], errors="coerce")
+    if distance_df["distance"].isnull().any():
+        raise ValueError(f'Column "distance" contains non-numeric values in {file_path}')
+    distance_df["dataset_id"] = distance_df["dataset_id"].astype(str)
+    distance_df["cell_type"] = distance_df["cell_type"].astype(str)
+    distance_df["sample_id"] = distance_df["sample_id"].astype(str)
+    distance_df["distance_metric"] = distance_df["distance_metric"].astype(str)
+    return distance_df
+
+
+def _get_multi_dataset_cell_type_order(distance_df: pd.DataFrame) -> list[str]:
+    cell_type_order: list[str] = []
+    for cell_type in distance_df["cell_type"].astype(str):
+        if cell_type not in cell_type_order:
+            cell_type_order.append(cell_type)
+    return cell_type_order
+
+
+def _plot_multi_dataset_distance_boxplot(
+    distance_df: pd.DataFrame,
+    figure_dir: Path,
+    distance_metric: str,
+    cell_type_order: list[str],
+) -> None:
+    if distance_df.empty:
+        return
+    plt.figure(figsize=(max(8, len(cell_type_order) * 0.9), 5.5))
+    ax = sns.boxplot(
+        data=distance_df,
+        x="cell_type",
+        y="distance",
+        hue="dataset_id",
+        order=cell_type_order,
+    )
+    ax.yaxis.grid(True, linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.set_axisbelow(True)
+    plt.xticks(rotation=45, ha="right")
+    plt.xlabel("Cell type")
+    plt.ylabel(_get_distance_axis_label(distance_metric))
+    plt.legend(title="Dataset", bbox_to_anchor=(1.02, 1), loc="upper left")
+    plt.tight_layout()
+    for suffix in ("png", "pdf"):
+        plt.savefig(figure_dir / f"distance_boxplot_by_cell_type.{suffix}", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_multi_dataset_per_cell_type_distributions(
+    distance_df: pd.DataFrame,
+    figure_dir: Path,
+    cell_type_order: list[str],
+    distance_metric: str,
+) -> None:
+    if distance_df.empty:
+        return
+    for cell_type in cell_type_order:
+        current_df = distance_df.loc[distance_df["cell_type"] == cell_type].copy()
+        if current_df.empty:
+            continue
+        plt.figure(figsize=(5.5, 4))
+        for dataset_id, dataset_df in current_df.groupby("dataset_id", sort=False):
+            distances = dataset_df["distance"].astype(float).to_numpy()
+            if distances.size >= 2 and np.ptp(distances) > 0:
+                sns.kdeplot(x=distances, label=str(dataset_id), fill=False)
+            else:
+                plt.axvline(
+                    float(distances[0]),
+                    label=str(dataset_id),
+                    linestyle="--",
+                    linewidth=1.5,
+                )
+        plt.xlabel(_get_distance_axis_label(distance_metric))
+        plt.ylabel("Density")
+        plt.title(cell_type)
+        plt.legend(title="Dataset")
+        plt.tight_layout()
+        safe_cell_type = _safe_filename(cell_type)
+        for suffix in ("png", "pdf"):
+            plt.savefig(
+                figure_dir / f"{safe_cell_type}_distance_distribution.{suffix}",
+                dpi=300,
+                bbox_inches="tight",
+            )
+        plt.close()
+
+
+def compare_sct_sample_diversity_across_datasets(
+    distance_csv_paths: list[str | Path],
+    output_dir: str | Path,
+    dataset_name_map: dict[str, str] | None = None,
+) -> Path:
+    if len(distance_csv_paths) < 2:
+        raise ValueError("At least two per_cell_type_distance.csv files are required for comparison.")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure_dir = output_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+
+    merged_frames: list[pd.DataFrame] = []
+    input_paths: list[str] = []
+    shared_distance_metric: str | None = None
+
+    for distance_csv_path in distance_csv_paths:
+        current_path = Path(distance_csv_path)
+        if not current_path.exists():
+            raise FileNotFoundError(f"Multi-dataset sample-diversity input does not exist: {current_path}")
+        current_df = pd.read_csv(current_path)
+        current_df = _validate_multi_dataset_distance_df(distance_df=current_df, file_path=current_path)
+        current_metric_values = current_df["distance_metric"].dropna().astype(str).unique().tolist()
+        if len(current_metric_values) != 1:
+            raise ValueError(f"Expected exactly one distance metric in {current_path}, got: {current_metric_values}")
+        current_metric = current_metric_values[0]
+        if shared_distance_metric is None:
+            shared_distance_metric = current_metric
+        elif current_metric != shared_distance_metric:
+            raise ValueError(
+                "All multi-dataset sample-diversity inputs must use the same distance metric. "
+                f"Got {shared_distance_metric!r} and {current_metric!r}."
+            )
+
+        if dataset_name_map:
+            current_df = current_df.copy()
+            current_df["dataset_id"] = current_df["dataset_id"].map(
+                lambda x: dataset_name_map.get(str(x), str(x))
+            )
+        merged_frames.append(current_df)
+        input_paths.append(str(current_path))
+
+    merged_distance_df = pd.concat(merged_frames, axis=0, ignore_index=True)
+    cell_type_order = _get_multi_dataset_cell_type_order(merged_distance_df)
+    summary_df = (
+        merged_distance_df.groupby(["dataset_id", "cell_type"], sort=False)
+        .agg(
+            n_samples=("sample_id", "size"),
+            n_genes=("n_genes", "median"),
+            median_distance=("distance", "median"),
+            mean_distance=("distance", "mean"),
+            q75_distance=("distance", lambda x: float(np.percentile(x, 75))),
+            q25_distance=("distance", lambda x: float(np.percentile(x, 25))),
+            p90_distance=("distance", lambda x: float(np.percentile(x, 90))),
+        )
+        .reset_index()
+    )
+    summary_df["iqr_distance"] = summary_df["q75_distance"] - summary_df["q25_distance"]
+    summary_df["n_samples"] = summary_df["n_samples"].astype(int)
+    summary_df["n_genes"] = summary_df["n_genes"].round().astype(int)
+    summary_df = summary_df.loc[
+        :,
+        [
+            "dataset_id",
+            "cell_type",
+            "n_samples",
+            "n_genes",
+            "median_distance",
+            "mean_distance",
+            "iqr_distance",
+            "p90_distance",
+        ],
+    ].copy()
+
+    merged_distance_df.to_csv(
+        output_dir / "per_cell_type_distance_all_datasets.csv",
+        index=False,
+        float_format="%.6f",
+    )
+    summary_df.to_csv(
+        output_dir / "per_dataset_per_cell_type_summary.csv",
+        index=False,
+        float_format="%.6f",
+    )
+    config_used = {
+        "input_distance_csv_paths": input_paths,
+        "resolved_dataset_labels": sorted(merged_distance_df["dataset_id"].astype(str).unique().tolist()),
+        "distance_metric": shared_distance_metric,
+        "output_dir": str(output_dir),
+    }
+    with open(output_dir / "config_used.yaml", "w", encoding="utf-8") as fh:
+        yaml.safe_dump(config_used, fh, sort_keys=False, allow_unicode=False)
+
+    _plot_multi_dataset_distance_boxplot(
+        distance_df=merged_distance_df,
+        figure_dir=figure_dir,
+        distance_metric=str(shared_distance_metric),
+        cell_type_order=cell_type_order,
+    )
+    _plot_multi_dataset_per_cell_type_distributions(
+        distance_df=merged_distance_df,
+        figure_dir=figure_dir,
+        cell_type_order=cell_type_order,
+        distance_metric=str(shared_distance_metric),
+    )
+
+    logger.info("Multi-dataset sample diversity comparison outputs saved under: %s", output_dir)
+    return output_dir
+
+
 def run_sct_sample_diversity_analysis(
     sct_dataset_file_path: str | Path,
     dataset_name: str,
@@ -303,7 +508,6 @@ def run_sct_sample_diversity_analysis(
             selected_genes = _select_genes_for_cell_type(
                 cell_type_df=cell_type_df,
                 gene_mode=gene_mode,
-                n_top_genes=n_top_genes,
                 provided_gene_list=provided_gene_list,
             )
         current_df = cell_type_df.loc[:, selected_genes].copy()
