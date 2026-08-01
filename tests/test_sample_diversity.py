@@ -158,13 +158,16 @@ def test_compare_sct_sample_diversity_across_datasets_writes_expected_outputs(tm
     compare_sct_sample_diversity_across_datasets(
         distance_csv_paths=[csv_a, csv_b, csv_c],
         output_dir=output_dir,
+        y_max=0.1,
     )
 
     merged_df = pd.read_csv(output_dir / "per_cell_type_distance_all_datasets.csv")
     summary_df = pd.read_csv(output_dir / "per_dataset_per_cell_type_summary.csv")
+    config_used = (output_dir / "config_used.yaml").read_text(encoding="utf-8")
     assert set(merged_df["dataset_id"]) == {"A", "B", "C"}
     assert set(summary_df["dataset_id"]) == {"A", "B", "C"}
     assert (output_dir / "config_used.yaml").exists()
+    assert "y_max: 0.1" in config_used
     assert (output_dir / "figures" / "distance_boxplot_by_cell_type.png").exists()
     assert (output_dir / "figures" / "B_Cells_distance_distribution.png").exists()
 

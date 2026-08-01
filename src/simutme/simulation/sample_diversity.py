@@ -265,6 +265,7 @@ def _plot_multi_dataset_distance_boxplot(
     figure_dir: Path,
     distance_metric: str,
     cell_type_order: list[str],
+    y_max: float | None = 0.1,
 ) -> None:
     if distance_df.empty:
         return
@@ -275,9 +276,20 @@ def _plot_multi_dataset_distance_boxplot(
         y="distance",
         hue="dataset_id",
         order=cell_type_order,
+        flierprops={
+            "marker": "o",
+            "markerfacecolor": "#808080",
+            "markeredgecolor": "#808080",
+            "markersize": 4,
+            "alpha": 0.8,
+        },
     )
     ax.yaxis.grid(True, linestyle="--", linewidth=0.8, alpha=0.6)
     ax.set_axisbelow(True)
+    for boundary_x in np.arange(len(cell_type_order) - 1, dtype=float) + 0.5:
+        ax.axvline(boundary_x, color="#b0b0b0", linestyle=":", linewidth=0.8, alpha=0.8, zorder=0)
+    if y_max is not None:
+        ax.set_ylim(0, float(y_max))
     plt.xticks(rotation=45, ha="right")
     plt.xlabel("Cell type")
     plt.ylabel(_get_distance_axis_label(distance_metric))
@@ -331,6 +343,7 @@ def compare_sct_sample_diversity_across_datasets(
     distance_csv_paths: list[str | Path],
     output_dir: str | Path,
     dataset_name_map: dict[str, str] | None = None,
+    y_max: float | None = 0.1,
 ) -> Path:
     if len(distance_csv_paths) < 2:
         raise ValueError("At least two per_cell_type_distance.csv files are required for comparison.")
@@ -416,6 +429,7 @@ def compare_sct_sample_diversity_across_datasets(
         "input_distance_csv_paths": input_paths,
         "resolved_dataset_labels": sorted(merged_distance_df["dataset_id"].astype(str).unique().tolist()),
         "distance_metric": shared_distance_metric,
+        "y_max": y_max,
         "output_dir": str(output_dir),
     }
     with open(output_dir / "config_used.yaml", "w", encoding="utf-8") as fh:
@@ -426,6 +440,7 @@ def compare_sct_sample_diversity_across_datasets(
         figure_dir=figure_dir,
         distance_metric=str(shared_distance_metric),
         cell_type_order=cell_type_order,
+        y_max=y_max,
     )
     _plot_multi_dataset_per_cell_type_distributions(
         distance_df=merged_distance_df,
