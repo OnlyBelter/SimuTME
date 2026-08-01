@@ -19,11 +19,6 @@ then reads `datasets` separately when executing the workflow.
 - `simu_bulk_dir`
   Root output directory for generated datasets.
 
-- `sct_dataset_file_path`
-  Path to an SCT `.h5ad` reference file. This is used directly by Mixed
-  simulations unless it is replaced in memory by an earlier SCT run in the same
-  workflow.
-
 - `merged_sc_dataset_file_path`
   Merged single-cell input `.h5ad`.
 
@@ -139,11 +134,31 @@ Each entry under `datasets:` defines one simulation task.
 
 ### Mixed-only fields
 
+- `sct_reference`
 - `sampling_method_prop`
 - `sampling_method_gep` (optional but recommended)
 - `filtering_in_pca_space`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
 - `pred_cell_prop_file_path` (only when `sampling_method_prop: "dirichlet"`)
+
+### Mixed `sct_reference` schema
+
+Each Mixed dataset must define:
+
+```yaml
+sct_reference:
+  source_type: "path" | "generated_dataset"
+  version: "original" | "sorted_bulk_imputed"
+  file_path: "..."      # required when source_type == "path"
+  dataset_name: "..."   # required when source_type == "generated_dataset"
+```
+
+Notes:
+
+- `source_type: "path"` uses an external SCT `.h5ad` file.
+- `source_type: "generated_dataset"` references an SCT dataset defined earlier
+  in the same YAML file.
+- `version: "sorted_bulk_imputed"` requires an imputed SCT output to exist.
 
 ## Input Files By Workflow
 
@@ -166,7 +181,7 @@ Required:
 
 - YAML configuration file
 - merged scRNA-seq `.h5ad`
-- SCT reference `.h5ad` via `sct_dataset_file_path`
+- SCT reference `.h5ad` resolved from each Mixed dataset's `sct_reference`
 
 Optional but commonly used:
 
@@ -255,6 +270,12 @@ for dataset_name, params in datasets_to_run.items():
 
 ## Ordering Recommendation
 
-If a Mixed dataset should consume an SCT dataset generated and optionally
-imputed in the same run, define the SCT dataset before the Mixed dataset in the
+If a Mixed dataset uses:
+
+```yaml
+sct_reference:
+  source_type: "generated_dataset"
+```
+
+then define the referenced SCT dataset earlier than the Mixed dataset in the
 YAML file.

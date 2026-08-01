@@ -4,6 +4,34 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## August 1, 2026
+
+### Explicit Mixed SCT reference selection
+
+This update removes the old public YAML dependency on
+`paths.sct_dataset_file_path` for Mixed bulk simulation and replaces it with an
+explicit per-dataset `sct_reference` block.
+
+- Mixed datasets must now declare their SCT source explicitly:
+  - external path via `sct_reference.source_type: "path"`
+  - earlier SCT dataset via `sct_reference.source_type: "generated_dataset"`
+- Removed the previous implicit behavior where an SCT run mutated the in-memory
+  Mixed reference path for later datasets.
+- Added validation for forward references, non-SCT references, and unavailable
+  `_sorted_bulk_imputed` outputs.
+- Updated the example config and workflow/configuration docs to describe the
+  new schema.
+
+Relevant files:
+
+- `src/simutme/workflow.py`
+- `src/config_example.yaml`
+- `tests/test_workflow_sct_version.py`
+- `docs/configuration_io.md`
+- `docs/workflow_mixed.md`
+- `docs/workflow_sct.md`
+- `docs/superpowers/specs/2026-08-01-explicit-mixed-sct-reference-design.md`
+
 ## July 29, 2026
 
 ### Mixed Dirichlet alpha estimation from predicted proportions

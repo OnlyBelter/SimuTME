@@ -43,15 +43,15 @@ def _build_sorted_bulk_imputed_sct_path(
     )
 
 
-def _infer_original_sct_path(
-    sct_dataset_file_path: str | Path,
-    output_suffix: str,
-) -> Path:
-    sct_dataset_file_path = Path(sct_dataset_file_path)
-    if output_suffix and sct_dataset_file_path.stem.endswith(output_suffix):
-        original_stem = sct_dataset_file_path.stem[:-len(output_suffix)]
-        return sct_dataset_file_path.with_name(f"{original_stem}{sct_dataset_file_path.suffix}")
-    return sct_dataset_file_path
+def _resolve_mixed_sct_reference_version(version_value: Any, context: str) -> str:
+    version = str(version_value).strip()
+    allowed_versions = {"original", "sorted_bulk_imputed"}
+    if version not in allowed_versions:
+        raise ValueError(
+            f'Invalid "sct_reference.version" for {context}: '
+            f'{version_value!r}. Expected one of {sorted(allowed_versions)}.'
+        )
+    return version
 
 
 def _resolve_mixed_sct_dataset_path(
@@ -59,21 +59,15 @@ def _resolve_mixed_sct_dataset_path(
     params: Dict[str, Any],
     config: "SimuConfig",
 ) -> Path:
-    requested_version = str(
-        params.get("sct_dataset_version", "sorted_bulk_imputed")
-    ).strip()
-    allowed_versions = {"original", "sorted_bulk_imputed"}
-    if requested_version not in allowed_versions:
+    if "sct_dataset_version" in params:
         raise ValueError(
-            f'Invalid "sct_dataset_version" for Mixed dataset "{dataset_name}": '
-            f'{requested_version!r}. Expected one of {sorted(allowed_versions)}.'
+            f'Mixed dataset "{dataset_name}" uses deprecated "sct_dataset_version". '
+            f'Please replace it with the explicit "sct_reference" block.'
         )
-
-    current_sct_path = config.sct_dataset_file_path
-    if current_sct_path in (None, ""):
+    sct_reference = params.get("sct_reference")
+    if not isinstance(sct_reference, dict):
         raise ValueError(
-            f'Mixed dataset "{dataset_name}" requires "paths.sct_dataset_file_path" '
-            f"or a preceding SCT generation step."
+            f'Mixed dataset "{dataset_name}" must define an "sct_reference" mapping.'
         )
 
     output_suffix = str(
@@ -82,39 +76,107 @@ def _resolve_mixed_sct_dataset_path(
             config.sorted_bulk_imputation_output_suffix,
         )
     ).strip()
-    original_sct_path = _infer_original_sct_path(current_sct_path, output_suffix)
-    if requested_version == "original":
-        resolved_sct_path = original_sct_path
+    source_type = str(sct_reference.get("source_type", "")).strip()
+    requested_version = _resolve_mixed_sct_reference_version(
+        sct_reference.get("version", None),
+        f'Mixed dataset "{dataset_name}"',
+    )
+
+    if source_type == "path":
+        file_path_value = sct_reference.get("file_path", None)
+        if file_path_value in (None, ""):
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "path"` '
+                f'must provide "sct_reference.file_path".'
+            )
+        if sct_reference.get("dataset_name", None) not in (None, ""):
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "path"` '
+                f'must not provide "sct_reference.dataset_name".'
+            )
+        original_sct_path = Path(file_path_value)
+        if requested_version == "original":
+            resolved_sct_path = original_sct_path
+        else:
+            if output_suffix == "":
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed" '
+                    f'but "sorted_bulk_imputation_output_suffix" is empty.'
+                )
+            resolved_sct_path = _build_sorted_bulk_imputed_sct_path(
+                original_sct_path,
+                output_suffix,
+            )
+    elif source_type == "generated_dataset":
+        referenced_dataset_name = str(sct_reference.get("dataset_name", "")).strip()
+        if referenced_dataset_name == "":
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "generated_dataset"` '
+                f'must provide "sct_reference.dataset_name".'
+            )
+        if sct_reference.get("file_path", None) not in (None, ""):
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "generated_dataset"` '
+                f'must not provide "sct_reference.file_path".'
+            )
+        referenced_params = config._dataset_definitions.get(referenced_dataset_name)
+        if referenced_params is None:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" references unknown SCT dataset '
+                f'"{referenced_dataset_name}" in "sct_reference.dataset_name".'
+            )
+        if str(referenced_params.get("dataset_type", "mixed")).lower() != "sct":
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" must reference an SCT dataset, but '
+                f'"{referenced_dataset_name}" has dataset_type='
+                f'{referenced_params.get("dataset_type")!r}.'
+            )
+        if dataset_name not in config._dataset_order or referenced_dataset_name not in config._dataset_order:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" cannot resolve `sct_reference.dataset_name` '
+                f'without dataset-order metadata. Load the workflow via `SimuConfig.from_yaml(...)`.'
+            )
+        current_dataset_index = config._dataset_order.index(dataset_name)
+        referenced_dataset_index = config._dataset_order.index(referenced_dataset_name)
+        if referenced_dataset_index >= current_dataset_index:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" references SCT dataset "{referenced_dataset_name}" '
+                f'that appears later in the YAML order. Please place the SCT dataset earlier.'
+            )
+        generated_outputs = config._generated_sct_outputs.get(referenced_dataset_name)
+        if generated_outputs is None:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" references SCT dataset "{referenced_dataset_name}" '
+                f'but no recorded outputs are available. Run the referenced SCT dataset first.'
+            )
+        if requested_version == "original":
+            resolved_sct_path = generated_outputs["original"]
+        else:
+            resolved_sct_path = generated_outputs["sorted_bulk_imputed"]
+            if resolved_sct_path in (None, ""):
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" requested the "sorted_bulk_imputed" version '
+                    f'of SCT dataset "{referenced_dataset_name}", but that SCT dataset does not '
+                    f'have an imputed output. Set `apply_sorted_bulk_imputation: true` for the '
+                    f'referenced SCT dataset or use `version: "original"`.'
+                )
     else:
-        if output_suffix == "":
-            raise ValueError(
-                f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed" '
-                f'but "sorted_bulk_imputation_output_suffix" is empty.'
-            )
-        resolved_sct_path = _build_sorted_bulk_imputed_sct_path(
-            original_sct_path,
-            output_suffix,
+        raise ValueError(
+            f'Invalid "sct_reference.source_type" for Mixed dataset "{dataset_name}": '
+            f'{source_type!r}. Expected "path" or "generated_dataset".'
         )
-        if current_sct_path == original_sct_path and not resolved_sct_path.exists():
-            raise ValueError(
-                f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed", '
-                f'but the current SCT dataset path points to the original SCT file: {current_sct_path}. '
-                f'If the preceding SCT dataset used "apply_sorted_bulk_imputation: false", '
-                f'please set "sct_dataset_version" to "original". '
-                f'Otherwise, enable the SCT post-imputation step or provide an existing imputed SCT file.'
-            )
 
     if not resolved_sct_path.exists():
         raise FileNotFoundError(
-            f'Mixed dataset "{dataset_name}" requested SCT dataset version '
+            f'Mixed dataset "{dataset_name}" requested SCT reference version '
             f'"{requested_version}", but the resolved file does not exist: '
-            f"{resolved_sct_path}. Run the corresponding SCT generation first, "
-            f'or switch "sct_dataset_version" to "original".'
+            f"{resolved_sct_path}."
         )
 
     logging.info(
-        "   > Mixed dataset %s will use SCT dataset version '%s': %s",
+        "   > Mixed dataset %s will use sct_reference(source_type=%s, version=%s): %s",
         dataset_name,
+        source_type,
         requested_version,
         resolved_sct_path,
     )
@@ -168,7 +230,6 @@ class SimuConfig:
     """Stores all simulation-related paths and global parameters."""
     # Path configuration
     simu_bulk_dir: Path
-    sct_dataset_file_path: Path
     tcga2cancer_type_file_path: Path
     tcga_merged_tpm_file_path: Path
     high_corr_gene_file_path: Path
@@ -207,12 +268,20 @@ class SimuConfig:
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
+    _dataset_definitions: Dict[str, Dict[str, Any]] = field(init=False, default_factory=dict)
+    _dataset_order: List[str] = field(init=False, default_factory=list)
+    _generated_sct_outputs: Dict[str, Dict[str, Path | None]] = field(init=False, default_factory=dict)
 
     @classmethod
     def from_yaml(cls, yaml_path: str):
         """Load configuration from a YAML file."""
         with open(yaml_path, 'r') as f:
             data = yaml.safe_load(f)
+        if "sct_dataset_file_path" in data.get("paths", {}):
+            raise ValueError(
+                'Top-level "paths.sct_dataset_file_path" is no longer supported. '
+                'Please define Mixed dataset inputs with the explicit "sct_reference" block.'
+            )
 
         # Flatten the YAML structure to match the Dataclass fields
         # Combining paths, constants, and parameters into one dictionary
@@ -226,7 +295,10 @@ class SimuConfig:
         if 'gep_filtering_quantile' in config_data:
             config_data['gep_filtering_quantile'] = tuple(config_data['gep_filtering_quantile'])
 
-        return cls(**config_data)
+        config = cls(**config_data)
+        config._dataset_definitions = data.get("datasets", {})
+        config._dataset_order = list(config._dataset_definitions.keys())
+        return config
 
     def __post_init__(self):
         self.sorted_bulk_imputation_bulk_weight = _resolve_sorted_bulk_imputation_bulk_weight(
@@ -294,7 +366,11 @@ def run_bulk_simulation(dataset_name: str,
     else:
         if 'sct_dataset_version' in params:
             raise ValueError(
-                '"sct_dataset_version" is only supported for Mixed datasets.'
+                '"sct_dataset_version" is no longer supported. Use "sct_reference" for Mixed datasets.'
+            )
+        if 'sct_reference' in params:
+            raise ValueError(
+                '"sct_reference" is only supported for Mixed datasets.'
             )
         invalid_keys = [
             key for key in dirichlet_only_keys
@@ -346,7 +422,8 @@ def run_bulk_simulation(dataset_name: str,
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
         else:
             logging.info(f"   > Single-Cell-Type GEP file exists: {generated_sct_fp}")
-        config.sct_dataset_file_path = generated_sct_fp
+        current_sct_output_path = generated_sct_fp
+        imputed_sct_fp = None
         if params.get('apply_sorted_bulk_imputation', False):
             imputed_sct_fp = _run_sorted_bulk_imputation_for_sct_dataset(
                 dataset_name=dataset_name,
@@ -354,15 +431,19 @@ def run_bulk_simulation(dataset_name: str,
                 params=params,
                 config=config,
             )
-            config.sct_dataset_file_path = imputed_sct_fp
-            logging.info("   > Updated config.sct_dataset_file_path to imputed SCT dataset: %s", imputed_sct_fp)
+            current_sct_output_path = imputed_sct_fp
+            logging.info("   > Recorded imputed SCT dataset for %s: %s", dataset_name, imputed_sct_fp)
+        config._generated_sct_outputs[dataset_name] = {
+            "original": generated_sct_fp,
+            "sorted_bulk_imputed": imputed_sct_fp,
+        }
         _run_sample_diversity_for_sct_dataset(
             dataset_name=dataset_name,
             params=params,
             config=config,
-            sct_dataset_file_path=config.sct_dataset_file_path,
+            sct_dataset_file_path=current_sct_output_path,
         )
-        return str(config.sct_dataset_file_path)
+        return str(current_sct_output_path)
     else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
         resolved_sct_dataset_file_path = _resolve_mixed_sct_dataset_path(
@@ -409,7 +490,7 @@ def run_bulk_simulation(dataset_name: str,
                 raise ValueError(
                     f'Missing "sampling_method_gep" for Mixed dataset "{dataset_name}". '
                     f'Provide params["sampling_method_gep"] explicitly, or include a marker in '
-                    f'paths.sct_dataset_file_path (e.g., "random" or "n_neighbors"). '
+                    f'the resolved SCT reference filename (e.g., "random" or "n_neighbors"). '
                     f"Current sct_dataset_file_path: {resolved_sct_dataset_file_path}"
                 )
         else:

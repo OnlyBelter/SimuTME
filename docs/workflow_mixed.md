@@ -31,7 +31,6 @@ The visual summary is shown below.
 
 - `paths.simu_bulk_dir`
 - `paths.merged_sc_dataset_file_path`
-- `paths.sct_dataset_file_path`
 - `paths.tcga2cancer_type_file_path` for some filtering workflows
 - `paths.tcga_merged_tpm_file_path` for filtering and PCA reference
 - `constants.sc_dataset_ids`
@@ -48,6 +47,7 @@ The visual summary is shown below.
 
 ### Common optional dataset-level fields
 
+- `sct_reference`
 - `sampling_method_gep`
 - `filtering_ref_types`
 - `cell_prop_prior`
@@ -57,16 +57,36 @@ The visual summary is shown below.
 
 ## Reference Source Used By Mixed Simulation
 
-Mixed simulation uses `config.sct_dataset_file_path` as the SCT reference input.
+Mixed simulation now requires an explicit `sct_reference` block in each Mixed
+dataset entry.
 
-This path can come from two cases:
+Supported modes:
 
-1. a static path from `paths.sct_dataset_file_path` in the YAML file
-2. an SCT dataset generated earlier in the same run
+1. external path
 
-If a preceding SCT dataset also enables sorted-bulk-guided post-imputation, then
-Mixed simulation will use the **imputed SCT dataset**, because SimuTME updates
-`config.sct_dataset_file_path` in memory after the SCT post-step finishes.
+```yaml
+sct_reference:
+  source_type: "path"
+  file_path: "./datasets/.../toy_sct.h5ad"
+  version: "original"
+```
+
+2. earlier SCT dataset in the same YAML file
+
+```yaml
+sct_reference:
+  source_type: "generated_dataset"
+  dataset_name: "SCT_N6K_31Jul_07"
+  version: "sorted_bulk_imputed"
+```
+
+`version` must be one of:
+
+- `"original"`
+- `"sorted_bulk_imputed"`
+
+This removes the previous implicit behavior where Mixed simulation depended on
+the last in-memory SCT path update.
 
 ## Proportion Sampling Modes
 
@@ -138,5 +158,5 @@ Use Mixed simulation when you need:
 - training data with known cell fractions
 - benchmarking data for deconvolution methods
 - mixed bulk data with different composition priors
-- optional reference refinement using an SCT dataset generated or updated in the
-  same workflow run
+- explicit reuse of either an external SCT reference or an SCT dataset
+  generated earlier in the same workflow run

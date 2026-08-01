@@ -227,10 +227,22 @@ contribute zero in the `y` output tables.
 
 ## Handoff To Mixed Simulation
 
-If the sorted-bulk-guided post-imputation step is enabled, SimuTME updates the
-in-memory `config.sct_dataset_file_path` to the imputed SCT `.h5ad`. That means
-later Mixed simulations in the same run will use the imputed SCT dataset as
-their reference input.
+SCT generation no longer changes a global Mixed reference path implicitly.
+Instead, SimuTME records the generated SCT outputs for each SCT dataset:
 
-Because datasets are executed in YAML order, the SCT dataset should appear
-earlier than any Mixed dataset that should consume its imputed output.
+- the original SCT `.h5ad`
+- the `_sorted_bulk_imputed` SCT `.h5ad`, when post-imputation is enabled
+
+Later Mixed datasets must opt into one of these outputs explicitly through
+their `sct_reference` block.
+
+If a Mixed dataset references:
+
+```yaml
+sct_reference:
+  source_type: "generated_dataset"
+  dataset_name: "<sct_dataset_name>"
+```
+
+then the SCT dataset should appear earlier than that Mixed dataset in the YAML
+order.
