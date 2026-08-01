@@ -77,10 +77,7 @@ def _resolve_mixed_sct_dataset_path(
         )
     ).strip()
     source_type = str(sct_reference.get("source_type", "")).strip()
-    requested_version = _resolve_mixed_sct_reference_version(
-        sct_reference.get("version", None),
-        f'Mixed dataset "{dataset_name}"',
-    )
+    requested_version: str | None = None
 
     if source_type == "path":
         file_path_value = sct_reference.get("file_path", None)
@@ -94,20 +91,17 @@ def _resolve_mixed_sct_dataset_path(
                 f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "path"` '
                 f'must not provide "sct_reference.dataset_name".'
             )
-        original_sct_path = Path(file_path_value)
-        if requested_version == "original":
-            resolved_sct_path = original_sct_path
-        else:
-            if output_suffix == "":
-                raise ValueError(
-                    f'Mixed dataset "{dataset_name}" requested "sorted_bulk_imputed" '
-                    f'but "sorted_bulk_imputation_output_suffix" is empty.'
-                )
-            resolved_sct_path = _build_sorted_bulk_imputed_sct_path(
-                original_sct_path,
-                output_suffix,
+        if sct_reference.get("version", None) not in (None, ""):
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" with `sct_reference.source_type: "path"` '
+                f'must not provide "sct_reference.version". The given "file_path" is used directly.'
             )
+        resolved_sct_path = Path(file_path_value)
     elif source_type == "generated_dataset":
+        requested_version = _resolve_mixed_sct_reference_version(
+            sct_reference.get("version", None),
+            f'Mixed dataset "{dataset_name}"',
+        )
         referenced_dataset_name = str(sct_reference.get("dataset_name", "")).strip()
         if referenced_dataset_name == "":
             raise ValueError(
@@ -167,19 +161,32 @@ def _resolve_mixed_sct_dataset_path(
         )
 
     if not resolved_sct_path.exists():
+        if requested_version is None:
+            raise FileNotFoundError(
+                f'Mixed dataset "{dataset_name}" requested SCT reference file '
+                f"{resolved_sct_path}, but it does not exist."
+            )
         raise FileNotFoundError(
             f'Mixed dataset "{dataset_name}" requested SCT reference version '
             f'"{requested_version}", but the resolved file does not exist: '
             f"{resolved_sct_path}."
         )
 
-    logging.info(
-        "   > Mixed dataset %s will use sct_reference(source_type=%s, version=%s): %s",
-        dataset_name,
-        source_type,
-        requested_version,
-        resolved_sct_path,
-    )
+    if requested_version is None:
+        logging.info(
+            "   > Mixed dataset %s will use sct_reference(source_type=%s): %s",
+            dataset_name,
+            source_type,
+            resolved_sct_path,
+        )
+    else:
+        logging.info(
+            "   > Mixed dataset %s will use sct_reference(source_type=%s, version=%s): %s",
+            dataset_name,
+            source_type,
+            requested_version,
+            resolved_sct_path,
+        )
     return resolved_sct_path
 
 

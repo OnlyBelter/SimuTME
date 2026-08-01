@@ -126,7 +126,6 @@ datasets:
     sct_reference:
       source_type: "path"  # Mixed only: use an external SCT `.h5ad` directly
       file_path: "path/to/sct_dataset_gepsamp-random.h5ad"
-      version: "original"
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "segment"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     filtering: true  # Whether to apply gene filtering and TCGA-guided filtering

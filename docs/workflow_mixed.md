@@ -68,7 +68,6 @@ Supported modes:
 sct_reference:
   source_type: "path"
   file_path: "./datasets/.../toy_sct.h5ad"
-  version: "original"
 ```
 
 2. earlier SCT dataset in the same YAML file
@@ -80,10 +79,13 @@ sct_reference:
   version: "sorted_bulk_imputed"
 ```
 
-`version` must be one of:
+For `source_type: "generated_dataset"`, `version` must be one of:
 
 - `"original"`
 - `"sorted_bulk_imputed"`
+
+For `source_type: "path"`, SimuTME uses `file_path` directly and does not infer
+another SCT path from it.
 
 This removes the previous implicit behavior where Mixed simulation depended on
 the last in-memory SCT path update.

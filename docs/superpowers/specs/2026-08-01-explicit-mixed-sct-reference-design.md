@@ -44,9 +44,9 @@ Each Mixed dataset must contain a new block:
 ```yaml
 sct_reference:
   source_type: "path" | "generated_dataset"
-  version: "original" | "sorted_bulk_imputed"
   file_path: "..."        # required when source_type == "path"
   dataset_name: "..."     # required when source_type == "generated_dataset"
+  version: "original" | "sorted_bulk_imputed"  # required only when source_type == "generated_dataset"
 ```
 
 ### Semantics
@@ -57,9 +57,8 @@ Use a user-provided SCT `.h5ad` file directly.
 
 - `file_path` is required
 - `dataset_name` must not be provided
-- `version: "original"` means use `file_path` as-is
-- `version: "sorted_bulk_imputed"` means infer the sibling path using
-  `sorted_bulk_imputation_output_suffix`
+- `version` must not be provided
+- SimuTME uses `file_path` exactly as given, with no path inference
 
 #### `source_type: "generated_dataset"`
 
@@ -95,7 +94,6 @@ datasets:
     sct_reference:
       source_type: "path"
       file_path: "./datasets/simulated_bulk_cell_dataset/generated_sct_dataset_12ds_n_base30_all_subtypes/simu_gep_SCT_N10K_31Jul_01_gepsamp-random_log2cpm1p.h5ad"
-      version: "original"
 
   Mixed_B:
     dataset_type: "Mixed"
@@ -120,22 +118,9 @@ For:
 sct_reference:
   source_type: "path"
   file_path: "/path/to/toy_sct.h5ad"
-  version: "original"
 ```
 
-Resolve to `/path/to/toy_sct.h5ad`.
-
-For:
-
-```yaml
-sct_reference:
-  source_type: "path"
-  file_path: "/path/to/toy_sct.h5ad"
-  version: "sorted_bulk_imputed"
-```
-
-Resolve by appending `sorted_bulk_imputation_output_suffix` before the file
-extension.
+Resolve to `/path/to/toy_sct.h5ad` exactly as written.
 
 ### Generated-dataset source
 
@@ -182,12 +167,12 @@ Every Mixed dataset must:
 
 - provide `sct_reference`
 - provide `sct_reference.source_type`
-- provide `sct_reference.version`
 
 #### For `source_type: "path"`
 
 - require `file_path`
 - reject `dataset_name`
+- reject `version`
 - require the resolved file to exist
 
 #### For `source_type: "generated_dataset"`
@@ -202,7 +187,6 @@ Every Mixed dataset must:
 
 - when referencing a generated SCT dataset, require that the target SCT dataset
   has `apply_sorted_bulk_imputation: true`
-- when referencing an external path, require the inferred imputed file to exist
 
 ### Deprecated field handling
 
@@ -259,10 +243,9 @@ The examples should show both supported Mixed reference modes:
 
 Add tests for:
 
-1. Mixed dataset resolves `sct_reference.source_type: "path"` with
-   `version: "original"`
-2. Mixed dataset resolves `sct_reference.source_type: "path"` with
-   `version: "sorted_bulk_imputed"`
+1. Mixed dataset resolves `sct_reference.source_type: "path"` directly from
+   `file_path`
+2. Mixed dataset rejects `version` when `sct_reference.source_type: "path"`
 3. Mixed dataset resolves `sct_reference.source_type: "generated_dataset"` to
    an earlier SCT task
 4. Mixed dataset rejects forward references to a later SCT task
@@ -295,7 +278,6 @@ datasets:
     sct_reference:
       source_type: "path"
       file_path: "./datasets/.../toy_sct.h5ad"
-      version: "original"
 ```
 
 ## Why this design is better

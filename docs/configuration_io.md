@@ -148,17 +148,19 @@ Each Mixed dataset must define:
 ```yaml
 sct_reference:
   source_type: "path" | "generated_dataset"
-  version: "original" | "sorted_bulk_imputed"
   file_path: "..."      # required when source_type == "path"
   dataset_name: "..."   # required when source_type == "generated_dataset"
+  version: "original" | "sorted_bulk_imputed"  # required only when source_type == "generated_dataset"
 ```
 
 Notes:
 
-- `source_type: "path"` uses an external SCT `.h5ad` file.
+- `source_type: "path"` uses the exact external SCT `.h5ad` file in `file_path`.
+  No path inference is applied, and `version` must not be provided.
 - `source_type: "generated_dataset"` references an SCT dataset defined earlier
   in the same YAML file.
-- `version: "sorted_bulk_imputed"` requires an imputed SCT output to exist.
+- `version: "sorted_bulk_imputed"` applies only to `source_type: "generated_dataset"`
+  and requires an imputed SCT output to exist.
 
 ## Input Files By Workflow
 

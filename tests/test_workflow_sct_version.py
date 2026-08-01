@@ -42,27 +42,25 @@ def test_resolve_mixed_sct_dataset_path_supports_explicit_path_reference(tmp_pat
     assert resolved_path == original_sct_path
 
 
-def test_resolve_mixed_sct_dataset_path_supports_imputed_path_reference(tmp_path: Path):
-    original_sct_path = tmp_path / "toy_sct.h5ad"
-    imputed_sct_path = tmp_path / "toy_sct_sorted_bulk_imputed.h5ad"
-    imputed_sct_path.write_text("placeholder", encoding="utf-8")
+def test_resolve_mixed_sct_dataset_path_rejects_version_for_explicit_path_reference(tmp_path: Path):
+    sct_path = tmp_path / "toy_sct_sorted_bulk_imputed.h5ad"
+    sct_path.write_text("placeholder", encoding="utf-8")
     config = _make_config(
         dataset_definitions={"Mixed_Test": {"dataset_type": "Mixed"}},
     )
 
-    resolved_path = _resolve_mixed_sct_dataset_path(
-        dataset_name="Mixed_Test",
-        params={
-            "sct_reference": {
-                "source_type": "path",
-                "file_path": str(original_sct_path),
-                "version": "sorted_bulk_imputed",
-            }
-        },
-        config=config,
-    )
-
-    assert resolved_path == imputed_sct_path
+    with pytest.raises(ValueError, match='must not provide "sct_reference.version"'):
+        _resolve_mixed_sct_dataset_path(
+            dataset_name="Mixed_Test",
+            params={
+                "sct_reference": {
+                    "source_type": "path",
+                    "file_path": str(sct_path),
+                    "version": "sorted_bulk_imputed",
+                }
+            },
+            config=config,
+        )
 
 
 def test_resolve_mixed_sct_dataset_path_supports_generated_dataset_reference(tmp_path: Path):
