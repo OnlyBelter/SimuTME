@@ -97,5 +97,5 @@ Set `stratify_by_dataset: "balanced_quota"` in `config_example.yaml` and user's 
 - `SimuTME/src/simutme/simulation/simulator.py`: add _stratify_obs_by_dataset_balanced_quota() to BulkGEPGenerator and wire into get_info_in_merged_single_cell_dataset; also accept stratify_by_dataset as __init__ parameter.
 - `SimuTME/src/simutme/workflow.py run_dataset`: pass stratify_by_dataset parameter from (config or SCT override) into SingleCellTypeGEPGenerator and BulkGEPGenerator constructors; add SCT-only ValueError guard for override on Mixed datasets.
 - `SimuTME/src/config_example.yaml`: add example key and comment.
-- `SimuTME_example/config_n_neighborGEP_nbase_30_eps1e-3_pdac_imputation_1%.yaml`: add key (commented or active as user prefers.
+- `SimuTME_example/config_n_neighborGEP_nbase_30_eps1e-3_pdac_imputation_1%.yaml`: add the new `stratify_by_dataset` key, either commented or active depending on the user's preferred default.
 - `SimuTME/tests/`: add tests.
