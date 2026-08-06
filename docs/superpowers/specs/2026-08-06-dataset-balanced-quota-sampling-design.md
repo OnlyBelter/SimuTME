@@ -50,29 +50,31 @@ The override is only supported for SCT datasets. For Mixed datasets it is forbid
 
 Add private method `BulkGEPGenerator._stratify_obs_by_dataset_balanced_quota(obs_df) -> df`:
 
-1. Iterate `obs_df already filtered by cancer/non cancer masks.
-2. For each distinct cell_type c in obs[`self.cell_type_col_name`]:
-   a. Subset obs_df to cell_type == c → per_ds_counts = groupby dataset_id → counts n_d(c)
-   b. K(c) = min(per_ds_counts.values) if per_ds_counts not empty else skip.
-   c. If K(c) < 10 logger warning: logger.warning(f"Balanced quota for {c}: K(c) = K(c), bottleneck dataset = {bottleneck}. Consider adding more datasets.")
-   d. per dataset d in per_ds_counts.index:
-      n_keep = min(K(c), per_ds_counts[d])
-      rng = np.random.default_rng(seed = derived_seed(self.sorted_bulk_imputation_seed ^ hash(c) % 2**32)
-      take first rng.choice(rows, size=n_keep, replace=False) → rows_kept.append(idx)
-3. Concat all kept indices, return obs_df.loc[rows_kept].
+1. Iterate over `obs_df` (already filtered by cancer / non-cancer dataset masks).
+2. For each distinct cell_type `c` present in `obs_df[self.cell_type_col_name]`:
+   a. Subset `obs_df` to rows with `cell_type == c` → `per_ds_counts = ct_df.groupby("dataset_id").size()` → `n_d(c)` rows per dataset.
+   b. Let `K(c) = min(per_ds_counts.values)`. If `per_ds_counts` is empty, skip this cell type.
+   c. Record `bottleneck_ds = per_ds_counts.idxmin()`. If `K(c) < 10`, emit `logger.warning(f"Balanced quota for {c}: K={K(c)}, bottleneck dataset: {bottleneck_ds}. Consider widening the source dataset pool for this cell type.")`.
+   d. Construct a per-(seed, cell_type) RNG: `seed_offset = (int(self.stratify_seed) ^ hash(str(c))) & 0x7FFFFFFF`; `rng = np.random.default_rng(seed_offset)`. One RNG per cell type for deterministic per-cell-type draws.
+   e. For each dataset `d` in `per_ds_counts.index`:
+      - Take the slice of rows `ds_df = ct_df.loc[ct_df["dataset_id"] == d]`
+      - `n_keep = min(K(c), len(ds_df))`
+      - Draw `choice_idx = rng.choice(len(ds_df), size=n_keep, replace=False)`
+      - Append `ds_df.index.take(choice_idx).tolist()` to `rows_kept`.
+3. Concatenate all kept row indices and return `obs_df.loc[rows_kept]` (order non-deterministic per cell type, but downstream sampling re-shuffles anyway).
 
 Apply right after building `merged_sc_dataset_obs = ...copy()` in `get_info_in_merged_single_cell_dataset`, i.e. after applying cancer/non-cancer dataset filtering.
 
-Reproducibility: seed derived from existing user-configurable `sorted_bulk_imputation_seed` XORed a hash of the cell_type name, so same config + same seed = same stratified rows across runs, and different cell types get independent draws.
+Reproducibility: per-cell-type RNG seed is `(self.stratify_seed ^ hash(cell_type)) & 0x7FFFFFFF`, where `self.stratify_seed` is passed through from the workflow using the existing user-configurable `parameters.sorted_bulk_imputation_seed`. Same config + same seed → identical stratified rows across runs; different cell types get independent draws.
 
-Per-cell-type INFO log print quota info including before/after per cell type:
-"Stratified CD4 T: K=2370 (bottleneck dataset: lu total: 11 ds x 2370 = 26070 kept (was 45000)
+Per-cell-type INFO log prints quota info including before/after row counts, the bottleneck dataset name, and the number of datasets contributing:
+> `Stratified CD4 T: K=2370 (bottleneck dataset: luad_kim_05, 11 datasets total), kept 11 ds x 2370 = 26070 rows (was: 45000 rows before)`
 
 ### 3. Interaction with filters
 
-Zero-ratio filtering (threshold 97) is applied after sampling, so it operates on the already-stratified pool; this correct because zero-ratio filtering can still filter out already-balanced rows independently.
+Zero-ratio filtering (threshold ~0.97) is applied after stratification, so it removes rows uniformly from the already-balanced pool. This is correct: the pool is balanced first by (dataset, cell_type), then per-gene zero-ratio eligibility is applied independently to each row.
 
-Cancer/non-cancer dataset filtering applies BEFORE stratification. Example: in current user config Cancer Cells come from pdac_peng_02), so Cancer Cells balanced quota trivially single dataset → rows unchanged (correct: intentional), and 11-dataset non-cancer cells get balanced per non-cancer cell type.
+Cancer / non-cancer dataset filtering applies **before** stratification. So in the current user's config where Cancer Cells are restricted to `pdac_peng_02` only, the Cancer Cells group has a single dataset after the mask, trivially `K(c) = n_rows(pdac_peng_02)` → no rows dropped (as intended); the 11-dataset non-cancer cell-type pool still gets balanced per non-cancer cell type.
 
 ### 4. Mixed datasets: inherit, no explicit config
 
