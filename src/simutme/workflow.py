@@ -272,6 +272,7 @@ class SimuConfig:
     sample_diversity_gene_list_path: Path | None = None
     sample_diversity_distance_metric: Literal["cosine", "l2"] = "cosine"
     sample_diversity_min_samples_per_cell_type: int = 5
+    stratify_by_dataset: Literal["none", "balanced_quota"] = "none"
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -348,6 +349,29 @@ class SimuConfig:
         return self._high_corr_gene_list
 
 
+def _resolve_stratify_by_dataset(
+    params: Dict[str, Any],
+    config: SimuConfig,
+) -> str:
+    allowed = {"none", "balanced_quota"}
+    override = params.get("stratify_by_dataset", None)
+    if override is not None:
+        value = str(override).strip()
+        if value not in allowed:
+            raise ValueError(
+                f'Invalid params.stratify_by_dataset override: {override!r}. '
+                f'Expected one of {sorted(allowed)}.'
+            )
+        return value
+    value = str(getattr(config, "stratify_by_dataset", "none")).strip()
+    if value not in allowed:
+        raise ValueError(
+            f'Invalid parameters.stratify_by_dataset: {value!r}. '
+            f'Expected one of {sorted(allowed)}.'
+        )
+    return value
+
+
 # --- 2. Main Workflow Function ---
 def run_bulk_simulation(dataset_name: str,
                         params: Dict[str, Any],
@@ -369,6 +393,10 @@ def run_bulk_simulation(dataset_name: str,
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
                 '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
+            )
+        if 'stratify_by_dataset' in params:
+            raise ValueError(
+                '"stratify_by_dataset" override is only supported for SCT datasets. Use the global parameters.stratify_by_dataset for default behavior; Mixed datasets inherit their pool from an upstream SCT dataset via sct_reference.'
             )
     else:
         if 'sct_dataset_version' in params:
@@ -393,6 +421,9 @@ def run_bulk_simulation(dataset_name: str,
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
     n_base = config.n_base
+    resolved_stratify = _resolve_stratify_by_dataset(params=params, config=config)
+    if dataset_type == 'sct':
+        logging.info(f"   > stratify_by_dataset: {resolved_stratify}")
     if dataset_type == 'sct':  # single-cell-type dataset
         logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
         if 'sampling_method_gep' not in params:
@@ -408,6 +439,8 @@ def run_bulk_simulation(dataset_name: str,
             sc_dataset_ids=config.sc_dataset_ids,
             cancer_cell_dataset_ids=params.get('cancer_cell_dataset_ids', None),
             non_cancer_cell_dataset_ids=params.get('non_cancer_cell_dataset_ids', None),
+            stratify_by_dataset=resolved_stratify,
+            stratify_seed=config.sorted_bulk_imputation_seed,
             bulk_dataset_name=dataset_name,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
             zero_ratio_threshold=params.get('zero_ratio_threshold', 0.97),
@@ -509,6 +542,8 @@ def run_bulk_simulation(dataset_name: str,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
             cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
             sc_dataset_ids=config.sc_dataset_ids,
+            stratify_by_dataset=resolved_stratify,
+            stratify_seed=config.sorted_bulk_imputation_seed,
             bulk_dataset_name=dataset_name,
             sct_dataset_file_path=resolved_sct_dataset_file_path,
             check_basic_info=False,

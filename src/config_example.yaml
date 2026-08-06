@@ -99,6 +99,7 @@ parameters:
   sample_diversity_gene_list_path: null  # Optional: path to a gene list file when sample_diversity_gene_mode is "provided_gene_list"
   sample_diversity_distance_metric: "cosine"  # Optional: "cosine" or "l2"
   sample_diversity_min_samples_per_cell_type: 5  # Optional: skip cell types with fewer samples than this threshold
+  stratify_by_dataset: "none"   # Optional: "none" (default) or "balanced_quota". "balanced_quota" downsamples each (cell_type, dataset_id) group to the size of the smallest dataset still containing that cell type, preventing large datasets from dominating the candidate pool. Can also be overridden per-SCT dataset below.
 
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here.
@@ -110,6 +111,7 @@ datasets:
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
     n_samples: 10  # Number of bulk samples to simulate for each cell type
     sampling_method_gep: "n_neighbors"  # Sampling method for finding single cells: 'random', 'n_neighbors'
+    stratify_by_dataset: "balanced_quota"   # Optional SCT-only override: "none" (default) or "balanced_quota". Balances the candidate-cell pool across scRNA-seq datasets per cell type.
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
     apply_sorted_bulk_imputation: true  # Optional post-step; if true, SimuTME records both the original and `_sorted_bulk_imputed` SCT outputs for later explicit Mixed references

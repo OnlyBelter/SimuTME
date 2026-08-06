@@ -30,7 +30,10 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                  subtype_col_name: Optional[str] = None,
                  cell_type_col_name: str = 'cell_type',
                  output_types: Optional[List[str]] = None,
-                 sampling_method_gep: str = 'random'):
+                 sampling_method_gep: str = 'random',
+                 stratify_by_dataset: str = "none",
+                 stratify_seed: int = 123,
+                 check_basic_info: bool = True):
 
         super().__init__(
             merged_sc_dataset_file_path=merged_sc_dataset_file_path,
@@ -39,6 +42,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             sc_dataset_ids=sc_dataset_ids,
             cancer_cell_dataset_ids=cancer_cell_dataset_ids,
             non_cancer_cell_dataset_ids=non_cancer_cell_dataset_ids,
+            stratify_by_dataset=stratify_by_dataset,
+            stratify_seed=stratify_seed,
             bulk_dataset_name=bulk_dataset_name,
             zero_ratio_threshold=zero_ratio_threshold,
             sct_dataset_file_path=None,
@@ -47,6 +52,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             cell_type_col_name=cell_type_col_name,
             output_types=output_types,
             sampling_method_gep=sampling_method_gep,
+            check_basic_info=check_basic_info,
         )
 
         # Cell distance matrix

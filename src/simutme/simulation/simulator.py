@@ -144,6 +144,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         sc_dataset_ids: List[str],
         cancer_cell_dataset_ids: Optional[List[str]] = None,
         non_cancer_cell_dataset_ids: Optional[List[str]] = None,
+        stratify_by_dataset: str = "none",
+        stratify_seed: int = 123,
         bulk_dataset_name: str = "simulated_bulk",
         check_basic_info: bool = True,
         zero_ratio_threshold: float = 0.97,
@@ -155,6 +157,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         output_types: Optional[List[str]] = None,
         sampling_method_gep: str = 'random',
     ):
+        allowed_stratify = {"none", "balanced_quota"}
+        if stratify_by_dataset not in allowed_stratify:
+            raise ValueError(
+                f"Invalid stratify_by_dataset={stratify_by_dataset!r}; expected one of {sorted(allowed_stratify)}"
+            )
 
         self.simu_bulk_dir = Path(simu_bulk_dir)
         self.simu_bulk_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +173,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.sc_dataset_used = sc_dataset_ids
         self.cancer_cell_dataset_ids = cancer_cell_dataset_ids
         self.non_cancer_cell_dataset_ids = non_cancer_cell_dataset_ids
+        self.stratify_by_dataset = stratify_by_dataset
+        self.stratify_seed = int(stratify_seed)
         self.bulk_dataset_name = bulk_dataset_name
         self.zero_ratio_threshold = zero_ratio_threshold
         self.sc_dataset_gep_type = sc_dataset_gep_type
@@ -773,6 +782,83 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if missing_ds:
             raise ValueError(f"Invalid datasets in {label}: {missing_ds}. Available: {self.dataset_in_sc}")
 
+    def _stratify_obs_by_dataset_balanced_quota(self, obs_df: pd.DataFrame) -> pd.DataFrame:
+        """Down-sample obs so each (cell_type, dataset_id) group has equal quota per cell type.
+
+        For each cell_type c present in obs_df:
+          - group rows by dataset_id -> n_d(c) rows per dataset
+          - K(c) = min_d n_d(c) over datasets with cell_type c
+          - from each dataset, sample min(n_d(c), K(c)) rows without replacement.
+
+        Preserves existing DataFrame columns. Rows within each group are sampled with an
+        RNG seeded from self.stratify_seed XOR a stable hash of the cell_type name, so
+        results are reproducible across runs with identical inputs / stratify_seed.
+
+        If obs_df is empty, returns unchanged. If stratify_by_dataset is not
+        "balanced_quota", returns obs_df unchanged.
+        """
+        if self.stratify_by_dataset != "balanced_quota":
+            return obs_df
+        if obs_df is None or len(obs_df) == 0:
+            return obs_df
+
+        cell_type_col = self.cell_type_col_name
+        if cell_type_col not in obs_df.columns:
+            logger.warning(
+                "stratify_by_dataset=balanced_quota skipped: obs_df has no column %r",
+                cell_type_col,
+            )
+            return obs_df
+
+        per_cell_type_parts = []
+        for cell_type, ct_df in obs_df.groupby(cell_type_col, sort=False, observed=True):
+            if len(ct_df) == 0:
+                continue
+            per_ds = ct_df.groupby("dataset_id", sort=False, observed=True)
+            counts = per_ds.size()
+            if counts.min() <= 0:
+                # No-op if any dataset contributes zero rows for this type (groupby already handled).
+                per_cell_type_parts.append(ct_df.iloc[0:0])
+                continue
+            K = int(counts.min())
+            bottleneck_ds = str(counts.idxmin())
+            before_rows = len(ct_df)
+
+            if K < 10:
+                logger.warning(
+                    "Balanced quota for cell_type %s is only K=%s rows per dataset "
+                    "(bottleneck dataset: %s). Consider widening the source dataset pool.",
+                    cell_type, K, bottleneck_ds,
+                )
+
+            ct_rows_kept_indices: list = []
+            # Stable per-(cell_type, seed) RNG so repeated runs produce identical draws.
+            seed_offset = (int(self.stratify_seed) ^ hash(str(cell_type)) & 0x7FFFFFFF)
+            rng = np.random.default_rng(seed_offset)
+            for ds_id, ds_df in per_ds:
+                ds_df = ds_df.copy()
+                n_ds = len(ds_df)
+                n_keep = min(K, n_ds)
+                if n_keep <= 0:
+                    continue
+                choice_idx = rng.choice(n_ds, size=n_keep, replace=False)
+                ct_rows_kept_indices.extend(ds_df.index.take(choice_idx).tolist())
+
+            stratified_ct = ct_df.loc[ct_rows_kept_indices]
+            after_rows = len(stratified_ct)
+            n_datasets = int(counts.shape[0])
+            logger.info(
+                "Stratified %s: K=%d (bottleneck dataset: %s, %d datasets total), "
+                "kept %d rows per dataset × %d datasets = %d rows (was: %d rows before)",
+                cell_type, K, bottleneck_ds, n_datasets,
+                K, n_datasets, after_rows, before_rows,
+            )
+            per_cell_type_parts.append(stratified_ct)
+
+        if not per_cell_type_parts:
+            return obs_df.iloc[0:0]
+        return pd.concat(per_cell_type_parts, axis=0)
+
     def get_info_in_merged_single_cell_dataset(self, check_zero_ratio: bool = True, zero_ratio_threshold: float = 0.95):
         """Reads metadata from the merged single-cell dataset."""
         reader = ReadH5AD(self.merged_sc_fp)
@@ -798,6 +884,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             self.merged_sc_dataset_obs = self.merged_sc_dataset.obs.loc[
                 self.merged_sc_dataset.obs['dataset_id'].isin(self.sc_dataset_used)
             ].copy()
+
+        # Dataset-balanced stratified down-sampling (applied after cancer/non-cancer +
+        # dataset_id filters but before zero_ratio filtering, which further reduces the pool
+        # uniformly across rows).
+        self.merged_sc_dataset_obs = self._stratify_obs_by_dataset_balanced_quota(self.merged_sc_dataset_obs)
 
         # Zero ratio check
         if check_zero_ratio:
