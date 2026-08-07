@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from .simulator import BulkGEPGenerator
 from ..utility import ReadExp, log2_transform, create_h5ad_dataset, get_distance_matrices_by_class
-from .simu_helper import validate_generation_params_sct, SimuMethod, SamplingMethodGEP, SampleType
+from .simu_helper import (
+    validate_generation_params_sct,
+    SimuMethod,
+    SamplingMethodGEP,
+    SampleType,
+    NeighborSamplingScheme,
+)
 import logging
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                          minimum_n_base: int = 1,
                          ref_gene_list_file_path: Optional[str] = None,
                          sampling_method: str = 'random',
+                         neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
                          max_cells_per_cell_type: int = 15000,
                          ) -> None:
         """
@@ -92,6 +99,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             simu_method=simu_method,
             sampling_method=sampling_method,
             minimum_n_base=minimum_n_base,
+            neighbor_sampling_scheme=neighbor_sampling_scheme,
         )
 
         if self.generated_bulk_gep_fp.exists():
@@ -146,6 +154,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                         sep_by_patient=sep_by_patient,
                         simu_method=simu_method,
                         sampling_method_gep=sampling_method,
+                        neighbor_sampling_scheme=neighbor_sampling_scheme,
                     )
                     processed_samples += chunk_rows.shape[0]
                     pbar.set_postfix({'processed': processed_samples, 'total': self.n_samples})
@@ -198,7 +207,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             min_n_base: int,
             sep_by_patient: bool,
             simu_method: str = 'ave',
-            sampling_method_gep: str = 'random'
+            sampling_method_gep: str = 'random',
+            neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
     ) -> None:
         """Process a single chunk of samples: select cells -> aggregate -> save."""
         # Determine total cells to aggregate
@@ -221,6 +231,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             sc_dataset=sc_dataset_key,
             cell_distance_dict=self.cell_distance_dict,
             sampling_method_gep=sampling_method_gep,
+            neighbor_sampling_scheme=neighbor_sampling_scheme,
         )
 
         # Aggregation

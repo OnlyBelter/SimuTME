@@ -38,6 +38,7 @@ class SampleTaskArgs:
     sc_dataset: str = 'merged_sc_dataset'
     minimum_n_base: int = 1
     glioma_epi_ratio: float = 0.1
+    neighbor_sampling_scheme: str = 'single_anchor'
 
     def to_tuple(self) -> tuple:
         """Convert to tuple for multiprocessing."""
@@ -50,6 +51,7 @@ class SampleTaskArgs:
             self.sc_dataset,
             self.minimum_n_base,
             self.glioma_epi_ratio,
+            self.neighbor_sampling_scheme,
         )
 
     @classmethod
@@ -64,6 +66,7 @@ class SampleTaskArgs:
             sc_dataset=args[5],
             minimum_n_base=args[6],
             glioma_epi_ratio=args[7],
+            neighbor_sampling_scheme=args[8],
         )
 
     @classmethod
@@ -78,6 +81,7 @@ class SampleTaskArgs:
             sc_dataset=d.get('sc_dataset', 'merged_sc_dataset'),
             minimum_n_base=d.get('minimum_n_base', 1),
             glioma_epi_ratio=d.get('glioma_epi_ratio', 0.1),
+            neighbor_sampling_scheme=d.get('neighbor_sampling_scheme', 'single_anchor'),
         )
 
 
@@ -415,6 +419,7 @@ def worker_sample(args: tuple) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], 
             sc_dataset=task.sc_dataset,
             minimum_n_base=task.minimum_n_base,
             glioma_epi_ratio=task.glioma_epi_ratio,
+            neighbor_sampling_scheme=task.neighbor_sampling_scheme,
         )
     except Exception as e:
         logger.error(f"Error processing cell_type={task.cell_type}: {e}")
@@ -509,6 +514,7 @@ def get_sample_id_with_neighbors(
         sc_dataset: str = 'merged_sc_dataset',
         minimum_n_base: int = 1,
         glioma_epi_ratio: float = 0.1,
+        neighbor_sampling_scheme: str = 'single_anchor',
 ) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
     """
     Select sample IDs by nearest-neighbor sampling using pre-computed per-class distance matrices.
@@ -552,13 +558,80 @@ def get_sample_id_with_neighbors(
     if n_base == 0:
         return tuple()
 
-    # Optional splitting of cancer cells into glioma vs epithelial
+    cell_type = _resolve_neighbor_sampling_cell_type(
+        obs_df=obs_df,
+        cell_type=cell_type,
+        class_by=class_by,
+        sc_dataset=sc_dataset,
+        glioma_epi_ratio=glioma_epi_ratio,
+    )
+
+    if neighbor_sampling_scheme == "two_half_anchor":
+        sampler = lambda: _sample_ids_two_half_anchor(
+            obs_df=obs_df,
+            cell_type=cell_type,
+            n_base=n_base,
+            distance_dict=distance_dict,
+            class_by=class_by,
+            sep_by_patient=sep_by_patient,
+            minimum_n_base=minimum_n_base,
+        )
+    else:
+        sampler = lambda: _sample_single_neighbor_group(
+            obs_df=obs_df,
+            cell_type=cell_type,
+            n_base=n_base,
+            distance_dict=distance_dict,
+            class_by=class_by,
+            sep_by_patient=sep_by_patient,
+            minimum_n_base=minimum_n_base,
+        )[0]
+
+    selected_samples: Dict[Tuple[str, ...], int] = {}
+    max_iterations = n_samples * 100
+    iterations = 0
+
+    while len(selected_samples) < n_samples:
+        iterations += 1
+        if iterations > max_iterations:
+            raise RuntimeError(
+                f"Could not generate {n_samples} unique samples after {max_iterations} iterations. "
+                "Consider relaxing constraints or increasing the cell pool."
+            )
+        sample_ids = sampler()
+        if sample_ids not in selected_samples:
+            selected_samples[sample_ids] = 1
+
+    if n_samples == 1:
+        return tuple(selected_samples.keys())[0]
+    return tuple(selected_samples.keys())
+
+
+def _resolve_neighbor_sampling_cell_type(
+        obs_df: pd.DataFrame,
+        cell_type: str,
+        class_by: str,
+        sc_dataset: str,
+        glioma_epi_ratio: float,
+) -> str:
     if sc_dataset == 'sct_dataset' and cell_type == 'Cancer Cells':
         available_types = obs_df[class_by].unique()
         if 'Epithelial Cells' in available_types and 'Glioma Cells' in available_types:
-            cell_type = 'Glioma Cells' if np.random.random() <= glioma_epi_ratio else 'Epithelial Cells'
+            return 'Glioma Cells' if np.random.random() <= glioma_epi_ratio else 'Epithelial Cells'
+    return cell_type
 
-    # Get pre-computed distance matrix for this cell type
+
+def _sample_single_neighbor_group(
+        obs_df: pd.DataFrame,
+        cell_type: str,
+        n_base: int,
+        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        class_by: str = 'cell_type',
+        sep_by_patient: bool = False,
+        minimum_n_base: int = 1,
+        required_dataset_id: Optional[str] = None,
+        excluded_dataset_id: Optional[str] = None,
+) -> Tuple[Tuple[str, ...], Optional[str]]:
     if cell_type not in distance_dict:
         raise ValueError(
             f"Cell type '{cell_type}' not found in distance_dict. "
@@ -567,88 +640,138 @@ def get_sample_id_with_neighbors(
 
     distance_matrix, all_samples_id = distance_dict[cell_type]
     cell_id_to_matrix_idx = {cell_id: idx for idx, cell_id in enumerate(all_samples_id)}
-
     if len(all_samples_id) < minimum_n_base:
         raise ValueError(
             f"The number of cells in '{cell_type}' ({len(all_samples_id)}) is less than "
             f"minimum_n_base ({minimum_n_base})."
         )
 
-    # Filter obs_df for this cell type
     obs_df_filtered = obs_df.loc[obs_df[class_by] == cell_type].copy()
+    if obs_df_filtered.empty:
+        raise ValueError(f"No cells found for cell type '{cell_type}'.")
 
-    # Optional patient-wise sampling
+    selected_dataset_id = None
+    if 'dataset_id' in obs_df_filtered.columns:
+        dataset_counts = obs_df_filtered.groupby('dataset_id')[class_by].count()
+        candidate_datasets = dataset_counts.index.to_list()
+        if required_dataset_id is not None:
+            if required_dataset_id not in dataset_counts.index:
+                raise ValueError(
+                    f"Requested dataset_id {required_dataset_id!r} not available for cell type {cell_type!r}."
+                )
+            selected_dataset_id = required_dataset_id
+        elif excluded_dataset_id is not None:
+            preferred = [ds_id for ds_id in candidate_datasets if ds_id != excluded_dataset_id]
+            feasible = [ds_id for ds_id in preferred if dataset_counts.loc[ds_id] >= minimum_n_base]
+            if feasible:
+                selected_dataset_id = str(np.random.choice(feasible))
+        if selected_dataset_id is not None:
+            obs_df_filtered = obs_df_filtered.loc[obs_df_filtered['dataset_id'] == selected_dataset_id].copy()
+
     groupby_patient_count = None
     if sep_by_patient:
         if 'sample_id' not in obs_df_filtered.columns:
             raise KeyError('Column "sample_id" required when sep_by_patient=True.')
-
         groupby_patient_count = obs_df_filtered.groupby('sample_id')[class_by].count()
         groupby_patient_count = groupby_patient_count[groupby_patient_count > n_base + 10]
-
         if groupby_patient_count.empty:
             raise ValueError(
                 f"No patient has enough cells (> {n_base + 10}) in '{cell_type}'."
             )
 
-    selected_samples: Dict[Tuple[str, ...], int] = {}
-    max_iterations = n_samples * 100
-    iterations = 0
+    if groupby_patient_count is not None and len(groupby_patient_count) > 0:
+        selected_patient_id = np.random.choice(groupby_patient_count.index)
+        patient_mask = obs_df_filtered['sample_id'] == selected_patient_id
+        id_pool = obs_df_filtered.loc[patient_mask].index.to_list()
+    else:
+        id_pool = obs_df_filtered.index.to_list()
 
-    # Main sampling loop
-    while len(selected_samples) < n_samples:
-        iterations += 1
-        if iterations > max_iterations:
-            raise RuntimeError(
-                f"Could not generate {n_samples} unique samples after {max_iterations} iterations. "
-                "Consider relaxing constraints or increasing the cell pool."
-            )
+    indices_pool = [cell_id_to_matrix_idx[cid] for cid in id_pool if cid in cell_id_to_matrix_idx]
+    id_pool = [cid for cid in id_pool if cid in cell_id_to_matrix_idx]
 
-        # Optionally restrict to one patient per simulated sample
-        if groupby_patient_count is not None and len(groupby_patient_count) > 0:
-            selected_patient_id = np.random.choice(groupby_patient_count.index)
-            patient_mask = obs_df_filtered['sample_id'] == selected_patient_id
-            patient_cell_ids = obs_df_filtered.loc[patient_mask].index.to_list()
-            # Map to indices in the distance matrix
-            patient_indices = [cell_id_to_matrix_idx[cid] for cid in patient_cell_ids]
-            id_pool = patient_cell_ids
-            indices_pool = patient_indices
-        else:
-            id_pool = all_samples_id
-            indices_pool = list(range(len(all_samples_id)))
+    if len(id_pool) < minimum_n_base:
+        raise ValueError(
+            f"The restricted pool for '{cell_type}' has only {len(id_pool)} cells, which is less than "
+            f"minimum_n_base ({minimum_n_base})."
+        )
 
-        # Check if enough cells available
-        if len(id_pool) < minimum_n_base:
-            continue
+    if selected_dataset_id is None and 'dataset_id' in obs_df_filtered.columns and id_pool:
+        selected_dataset_id = str(obs_df_filtered.loc[id_pool[0], 'dataset_id'])
 
-        # Special case: use all available cells if between minimum_n_base and n_base
-        if minimum_n_base <= len(id_pool) <= n_base:
-            sample_ids = tuple(sorted(id_pool))
-        else:
-            # Step 1: Randomly select 1 anchor cell
-            anchor_local_idx = np.random.randint(0, len(id_pool))
-            anchor_matrix_idx = indices_pool[anchor_local_idx]
-            anchor_id = id_pool[anchor_local_idx]
+    if minimum_n_base <= len(id_pool) <= n_base:
+        return tuple(sorted(id_pool)), selected_dataset_id
 
-            if n_base == 1:
-                sample_ids = (anchor_id,)
-            else:
-                # Step 2: Find (n_base - 1) nearest neighbors
-                # Get distances from anchor to all cells in the pool
-                distances = distance_matrix[anchor_matrix_idx, indices_pool]
+    anchor_local_idx = np.random.randint(0, len(id_pool))
+    anchor_id = id_pool[anchor_local_idx]
+    anchor_matrix_idx = indices_pool[anchor_local_idx]
+    if 'dataset_id' in obs_df_filtered.columns:
+        selected_dataset_id = str(obs_df_filtered.loc[anchor_id, 'dataset_id'])
 
-                # Get top n_base nearest cells (including anchor itself)
-                nearest_local_indices = np.argpartition(distances, n_base - 1)[:n_base]
-                nearest_local_indices = nearest_local_indices[np.argsort(distances[nearest_local_indices])]
+    if n_base == 1:
+        return (anchor_id,), selected_dataset_id
 
-                # Get cell IDs
-                neighbor_ids = [id_pool[i] for i in nearest_local_indices]
-                sample_ids = tuple(sorted(neighbor_ids))
+    distances = distance_matrix[anchor_matrix_idx, indices_pool]
+    nearest_local_indices = np.argpartition(distances, n_base - 1)[:n_base]
+    nearest_local_indices = nearest_local_indices[np.argsort(distances[nearest_local_indices])]
+    neighbor_ids = [id_pool[i] for i in nearest_local_indices]
+    return tuple(sorted(neighbor_ids)), selected_dataset_id
 
-        # Store unique samples
-        if sample_ids not in selected_samples:
-            selected_samples[sample_ids] = 1
 
-    if n_samples == 1:
-        return tuple(selected_samples.keys())[0]
-    return tuple(selected_samples.keys())
+def _sample_ids_two_half_anchor(
+        obs_df: pd.DataFrame,
+        cell_type: str,
+        n_base: int,
+        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        class_by: str = 'cell_type',
+        sep_by_patient: bool = False,
+        minimum_n_base: int = 1,
+) -> Tuple[str, ...]:
+    half_1_size = int(np.ceil(n_base / 2.0))
+    half_2_size = int(n_base - half_1_size)
+
+    first_ids, first_dataset_id = _sample_single_neighbor_group(
+        obs_df=obs_df,
+        cell_type=cell_type,
+        n_base=half_1_size,
+        distance_dict=distance_dict,
+        class_by=class_by,
+        sep_by_patient=sep_by_patient,
+        minimum_n_base=minimum_n_base,
+    )
+
+    if half_2_size == 0:
+        return tuple(sorted(first_ids))
+
+    second_ids: Tuple[str, ...]
+    used_different_dataset = False
+    try:
+        second_ids, second_dataset_id = _sample_single_neighbor_group(
+            obs_df=obs_df,
+            cell_type=cell_type,
+            n_base=half_2_size,
+            distance_dict=distance_dict,
+            class_by=class_by,
+            sep_by_patient=sep_by_patient,
+            minimum_n_base=minimum_n_base,
+            excluded_dataset_id=first_dataset_id,
+        )
+        used_different_dataset = (
+            first_dataset_id is not None and second_dataset_id is not None and first_dataset_id != second_dataset_id
+        )
+    except ValueError:
+        second_ids, _ = _sample_single_neighbor_group(
+            obs_df=obs_df,
+            cell_type=cell_type,
+            n_base=half_2_size,
+            distance_dict=distance_dict,
+            class_by=class_by,
+            sep_by_patient=sep_by_patient,
+            minimum_n_base=minimum_n_base,
+        )
+
+    if used_different_dataset:
+        logger.info("two_half_anchor used different datasets for cell type %s", cell_type)
+    elif first_dataset_id is not None:
+        logger.info("two_half_anchor fell back to same-dataset half groups for cell type %s", cell_type)
+
+    return tuple(sorted(first_ids + second_ids))

@@ -25,6 +25,11 @@ class SamplingMethodGEP:
     N_NEIGHBORS = 'n_neighbors'
 
 
+class NeighborSamplingScheme:
+    SINGLE_ANCHOR = 'single_anchor'
+    TWO_HALF_ANCHOR = 'two_half_anchor'
+
+
 def should_use_neighbor_sampling(
         sc_dataset: Optional[str],
         sampling_method: str
@@ -36,7 +41,10 @@ def sample_with_neighbors(
         sampled_cell_ids: pd.DataFrame,
         obs_df: pd.DataFrame,
         cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
-        n_threads: int
+        n_threads: int,
+        minimum_n_base: int = 1,
+        sc_dataset: str = 'merged_sc_dataset',
+        neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
 ) -> List[Tuple[str, ...]]:
     """Sample cells using nearest neighbor method."""
     sampling_tasks = [
@@ -44,7 +52,10 @@ def sample_with_neighbors(
             'cell_type': row['cell_type'],
             'n_samples': 1,
             'n_base': row['n_cell'],
-            'class_by': row['class_by']
+            'class_by': row['class_by'],
+            'minimum_n_base': minimum_n_base,
+            'sc_dataset': sc_dataset,
+            'neighbor_sampling_scheme': neighbor_sampling_scheme,
         }
         for _, row in sampled_cell_ids.iterrows()
     ]
@@ -224,6 +235,7 @@ def validate_generation_params_sct(
         simu_method: str,
         sampling_method: str,
         minimum_n_base: int,
+        neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
 ) -> None:
     """Validate generation parameters."""
     if n_sample_each_cell_type <= 0:
@@ -240,6 +252,20 @@ def validate_generation_params_sct(
 
     if sampling_method not in ('random', 'n_neighbors'):
         raise ValueError(f"sampling_method must be 'random' or 'n_neighbors', got '{sampling_method}'")
+
+    if neighbor_sampling_scheme not in (
+        NeighborSamplingScheme.SINGLE_ANCHOR,
+        NeighborSamplingScheme.TWO_HALF_ANCHOR,
+    ):
+        raise ValueError(
+            f"neighbor_sampling_scheme must be 'single_anchor' or 'two_half_anchor', got '{neighbor_sampling_scheme}'"
+        )
+
+    if sampling_method != 'n_neighbors' and neighbor_sampling_scheme != NeighborSamplingScheme.SINGLE_ANCHOR:
+        raise ValueError(
+            'neighbor_sampling_scheme is only meaningful when sampling_method is "n_neighbors". '
+            'Please use "single_anchor" with other sampling methods.'
+        )
 
     if minimum_n_base <= 0:
         raise ValueError(f"minimum_n_base must be positive, got {minimum_n_base}")

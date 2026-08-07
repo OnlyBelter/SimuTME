@@ -23,7 +23,8 @@ from .sampling import (
     generate_cell_fraction,
 )
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
-                          should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType)
+                          should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
+                          NeighborSamplingScheme)
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
 
 
@@ -594,6 +595,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             minimum_n_base: int = 1,
             cell_distance_dict: Optional[Dict[str, Tuple[np.ndarray, List[str]]]] = None,
             sampling_method_gep: str = 'random',
+            neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
     ) -> pd.DataFrame:
         """Select single cells to construct bulk samples."""
         if total_cell_number is not None:
@@ -608,7 +610,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Execute sampling based on method
         if should_use_neighbor_sampling(sc_dataset, sampling_method_gep):
             results = sample_with_neighbors(
-                sampled_cell_ids, obs_df, cell_distance_dict, n_threads
+                sampled_cell_ids,
+                obs_df,
+                cell_distance_dict,
+                n_threads,
+                minimum_n_base=minimum_n_base,
+                sc_dataset=sc_dataset or DatasetType.MERGED_SC,
+                neighbor_sampling_scheme=neighbor_sampling_scheme,
             )
         else:
             results = sample_random(

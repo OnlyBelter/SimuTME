@@ -111,6 +111,7 @@ datasets:
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
     n_samples: 10  # Number of bulk samples to simulate for each cell type
     sampling_method_gep: "n_neighbors"  # Sampling method for finding single cells: 'random', 'n_neighbors'
+    neighbor_sampling_scheme: "single_anchor"  # Optional SCT-only: "single_anchor" (default) keeps the existing one-anchor neighbor sampling; "two_half_anchor" builds one SCT sample from two half-sized neighbor groups and softly prefers different datasets for the two halves when feasible.
     stratify_by_dataset: "balanced_quota"   # Optional SCT-only override: "none" (default) or "balanced_quota". Balances the candidate-cell pool across scRNA-seq datasets per cell type.
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset

@@ -372,6 +372,17 @@ def _resolve_stratify_by_dataset(
     return value
 
 
+def _resolve_neighbor_sampling_scheme(params: Dict[str, Any]) -> str:
+    allowed = {"single_anchor", "two_half_anchor"}
+    value = str(params.get("neighbor_sampling_scheme", "single_anchor")).strip()
+    if value not in allowed:
+        raise ValueError(
+            f'Invalid SCT "neighbor_sampling_scheme": {value!r}. '
+            f'Expected one of {sorted(allowed)}.'
+        )
+    return value
+
+
 # --- 2. Main Workflow Function ---
 def run_bulk_simulation(dataset_name: str,
                         params: Dict[str, Any],
@@ -397,6 +408,10 @@ def run_bulk_simulation(dataset_name: str,
         if 'stratify_by_dataset' in params:
             raise ValueError(
                 '"stratify_by_dataset" override is only supported for SCT datasets. Use the global parameters.stratify_by_dataset for default behavior; Mixed datasets inherit their pool from an upstream SCT dataset via sct_reference.'
+            )
+        if 'neighbor_sampling_scheme' in params:
+            raise ValueError(
+                '"neighbor_sampling_scheme" is only supported for SCT datasets.'
             )
     else:
         if 'sct_dataset_version' in params:
@@ -431,6 +446,8 @@ def run_bulk_simulation(dataset_name: str,
             sampling_method_gep = 'random'
         else:
             sampling_method_gep = params.get('sampling_method_gep')
+        neighbor_sampling_scheme = _resolve_neighbor_sampling_scheme(params)
+        logging.info(f"   > neighbor_sampling_scheme: {neighbor_sampling_scheme}")
 
         sc_dataset_dir = simu_bulk_dir / f'generated_sct_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
         sct_generator = SingleCellTypeGEPGenerator(
@@ -457,6 +474,7 @@ def run_bulk_simulation(dataset_name: str,
                                            sep_by_patient=False,
                                            n_base_for_positive_samples=n_base,
                                            sampling_method=sampling_method_gep, # sampling method for finding single cells
+                                           neighbor_sampling_scheme=neighbor_sampling_scheme,
                                            max_cells_per_cell_type=params.get('max_cells_per_cell_type', 15000)
                                            )
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
