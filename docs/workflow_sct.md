@@ -131,10 +131,8 @@ Outputs are saved under:
 
 `<output_parent>/<dataset_name>/sample_diversity/`
 
-where `<output_parent>` is:
-
-- `paths.sorted_bulk_imputation_out_dir` when it is configured
-- otherwise `paths.simu_bulk_dir`
+where `<output_parent>` is the parent directory of the SCT `.h5ad` used for the
+analysis.
 
 Main files:
 
@@ -177,7 +175,6 @@ dataset_type: "SCT"
 - `parameters.sorted_bulk_imputation_bulk_weight`
 - `parameters.sorted_bulk_imputation_y_frac_threshold`
 - `parameters.sorted_bulk_imputation_output_suffix`
-- `paths.sorted_bulk_imputation_out_dir`
 
 ### What The Post-Imputation Step Does
 
@@ -206,7 +203,7 @@ The imputed SCT `.h5ad` is saved beside the original SCT `.h5ad` using:
 
 Diagnostic outputs are saved under:
 
-`paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
+`<generated_sct_parent>/<dataset_name>/`
 
 Examples of diagnostic files:
 

@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from simutme.workflow import SimuConfig, _resolve_mixed_sct_dataset_path
+from simutme.workflow import (
+    SimuConfig,
+    _resolve_mixed_sct_dataset_path,
+    _resolve_output_dir_naming_metadata,
+    _resolve_sct_aux_output_dir,
+)
 
 
 def _make_config(
@@ -205,3 +210,121 @@ def test_simu_config_from_yaml_rejects_legacy_top_level_sct_dataset_path(tmp_pat
 
     with pytest.raises(ValueError, match='paths.sct_dataset_file_path'):
         SimuConfig.from_yaml(str(config_path))
+
+
+def test_output_dir_naming_metadata_uses_unique_union_of_sct_subset_lists():
+    config = SimpleNamespace(
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2", "ds3", "ds4"],
+        _dataset_definitions={},
+    )
+
+    n_datasets, n_base = _resolve_output_dir_naming_metadata(
+        params={
+            "dataset_type": "SCT",
+            "cancer_cell_dataset_ids": ["ds2"],
+            "non_cancer_cell_dataset_ids": ["ds1", "ds2", "ds3"],
+        },
+        config=config,
+        dataset_type="sct",
+    )
+
+    assert n_datasets == 3
+    assert n_base == 30
+
+
+def test_output_dir_naming_metadata_falls_back_to_sc_dataset_ids_when_sct_subset_lists_incomplete():
+    config = SimpleNamespace(
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2", "ds3", "ds4"],
+        _dataset_definitions={},
+    )
+
+    n_datasets, n_base = _resolve_output_dir_naming_metadata(
+        params={
+            "dataset_type": "SCT",
+            "cancer_cell_dataset_ids": ["ds2"],
+        },
+        config=config,
+        dataset_type="sct",
+    )
+
+    assert n_datasets == 4
+    assert n_base == 30
+
+
+def test_output_dir_naming_metadata_for_mixed_generated_dataset_uses_referenced_sct_subset_lists():
+    config = SimpleNamespace(
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2", "ds3", "ds4", "ds5"],
+        _dataset_definitions={
+            "SCT_A": {
+                "dataset_type": "SCT",
+                "cancer_cell_dataset_ids": ["ds2"],
+                "non_cancer_cell_dataset_ids": ["ds1", "ds2", "ds3"],
+            }
+        },
+    )
+
+    n_datasets, n_base = _resolve_output_dir_naming_metadata(
+        params={
+            "dataset_type": "Mixed",
+            "sct_reference": {
+                "source_type": "generated_dataset",
+                "dataset_name": "SCT_A",
+                "version": "original",
+            }
+        },
+        config=config,
+        dataset_type="mixed",
+    )
+
+    assert n_datasets == 3
+    assert n_base == 30
+
+
+def test_resolve_sct_aux_output_dir_places_outputs_beside_sct_dataset(tmp_path: Path):
+    sct_path = tmp_path / "generated_sct_dataset_11ds_n_base30_all_subtypes" / "toy.h5ad"
+    resolved = _resolve_sct_aux_output_dir(
+        sct_dataset_file_path=sct_path,
+        dataset_name="SCT_N10_hnscc_07Jan_01",
+    )
+
+    assert resolved == sct_path.parent / "SCT_N10_hnscc_07Jan_01"
+
+
+def test_simu_config_from_yaml_ignores_deprecated_sorted_bulk_imputation_out_dir(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {
+                    "simu_bulk_dir": "./datasets",
+                    "sorted_bulk_imputation_out_dir": "./datasets/generated_sct_dataset_outputs",
+                    "tcga2cancer_type_file_path": "./datasets/tcga_id.csv",
+                    "tcga_merged_tpm_file_path": "./datasets/merged_tpm.csv",
+                    "high_corr_gene_file_path": "./datasets/high_corr.csv",
+                    "merged_sc_dataset_file_path": "./datasets/merged_sc.h5ad",
+                },
+                "constants": {
+                    "sc_dataset_ids": ["ds1"],
+                    "cell_type2subtypes": {"B Cells": ["B Cells"]},
+                    "total_rna_coefficient": {"B Cells": 1.0},
+                    "output_types": ["B Cells"],
+                },
+                "parameters": {
+                    "gene_quantile_range": [0.005, 0.5, 0.995],
+                    "gep_filtering_quantile": [0.0, 0.95],
+                    "pca_n_components": 0.9,
+                    "gene_list_type": "all_genes",
+                    "n_base": 30,
+                },
+                "datasets": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = SimuConfig.from_yaml(str(config_path))
+
+    assert config.simu_bulk_dir == Path("./datasets")

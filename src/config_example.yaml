@@ -8,7 +8,6 @@ paths:
   sorted_bulk_expr_file_path: "path/to/sorted_bulk_expr.tsv"  # Optional: sorted bulk reference expression matrix for SCT post-imputation
   sorted_bulk_annot_file_path: "path/to/sorted_bulk_annot.tsv"  # Optional: annotation table for the sorted bulk reference
   sorted_bulk_cell_type_mapping_file_path: "path/to/cell_type_mapping.csv"  # Optional: mapping between SCT and sorted-bulk cell types
-  sorted_bulk_imputation_out_dir: "./datasets/simulated_bulk_cell_dataset/generated_sct_dataset_outputs"  # Optional parent dir; results are saved under <this_dir>/<dataset_name>/
 
 # --- Biological Constants ---
 constants:

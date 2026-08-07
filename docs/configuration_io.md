@@ -46,12 +46,6 @@ then reads `datasets` separately when executing the workflow.
     matched sorted-bulk TPM profile using `0.5 / 0.5`
   - `included == 0`: keep the zero-guided replacement workflow
 
-- `sorted_bulk_imputation_out_dir`
-  Parent directory for SCT post-imputation diagnostics. The actual outputs are
-  written under:
-
-  `sorted_bulk_imputation_out_dir/<dataset_name>/`
-
 ## Constants
 
 ### `sc_dataset_ids`
@@ -225,9 +219,7 @@ zero-guided addition or cap step is applied there.
 
 Sample-diversity outputs are saved under:
 
-- `paths.sorted_bulk_imputation_out_dir/<dataset_name>/sample_diversity/` when
-  `paths.sorted_bulk_imputation_out_dir` is configured
-- otherwise `paths.simu_bulk_dir/<dataset_name>/sample_diversity/`
+- `<generated_sct_parent>/<dataset_name>/sample_diversity/`
 
 ### Mixed simulation outputs
 

@@ -78,7 +78,6 @@ For the optional sorted-bulk-guided SCT imputation workflow, also provide:
 - `paths.sorted_bulk_expr_file_path`: sorted bulk reference expression matrix
 - `paths.sorted_bulk_annot_file_path`: annotation table for the sorted bulk samples
 - `paths.sorted_bulk_cell_type_mapping_file_path`: mapping from SCT cell types to sorted bulk reference cell types, including an `included` column that controls post-imputation behavior
-- `paths.sorted_bulk_imputation_out_dir`: parent output directory for the imputation diagnostics; SimuTME will save results under `<this_dir>/<dataset_name>/`
 
 ### Dataset Types
 
@@ -132,7 +131,7 @@ If `apply_sorted_bulk_imputation: true`, SimuTME will:
 1. generate the SCT `.h5ad` dataset
 2. run the sorted-bulk-guided imputation workflow on that SCT dataset
 3. save the imputed SCT dataset beside the original SCT output using `parameters.sorted_bulk_imputation_output_suffix`
-4. write diagnostics such as pre/post SCT sparsity plots and `y_fraction_of_total` summaries under `paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
+4. write diagnostics such as pre/post SCT sparsity plots and `y_fraction_of_total` summaries under `<generated_sct_parent>/<dataset_name>/`
 5. update `config.sct_dataset_file_path` to the imputed SCT dataset so later Mixed simulations in the same run use the imputed SCT file
 
 Within the mapping file:
@@ -208,7 +207,7 @@ Valid values:
   - SCT sparsity summaries before and after imputation
   - `y_fraction_of_total` summaries before and after threshold adjustment
   - sorted bulk reference sparsity summaries used by the workflow
-  - all diagnostic CSVs and figures under `paths.sorted_bulk_imputation_out_dir/<dataset_name>/`
+  - all diagnostic CSVs and figures under `<generated_sct_parent>/<dataset_name>/`
 
 Note for mixed bulk runs: if `sampling_method_gep` is omitted in a Mixed dataset config, it is inferred from `paths.sct_dataset_file_path` when the filename includes `gepsamp-random` or `gepsamp-n_neighbors`.
 If a preceding SCT dataset enabled sorted-bulk-guided imputation, then `paths.sct_dataset_file_path` is updated in memory to the imputed SCT dataset and that file is used by later Mixed runs in the same workflow execution.

@@ -6,7 +6,7 @@ import pandas as pd
 from pathlib import Path
 from joblib import load
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Any, Literal
+from typing import List, Dict, Tuple, Any, Literal, Optional
 
 from .utility import do_pca_analysis, plot_pca
 from .utility import cal_corr_gene_exp_with_cell_frac
@@ -43,6 +43,15 @@ def _build_sorted_bulk_imputed_sct_path(
     )
 
 
+def _resolve_sct_aux_output_dir(
+    sct_dataset_file_path: str | Path,
+    dataset_name: str,
+) -> Path:
+    """Store SCT auxiliary outputs beside the SCT dataset under `<parent>/<dataset_name>/`."""
+    sct_dataset_file_path = Path(sct_dataset_file_path)
+    return sct_dataset_file_path.parent / dataset_name
+
+
 def _resolve_mixed_sct_reference_version(version_value: Any, context: str) -> str:
     version = str(version_value).strip()
     allowed_versions = {"original", "sorted_bulk_imputed"}
@@ -70,12 +79,6 @@ def _resolve_mixed_sct_dataset_path(
             f'Mixed dataset "{dataset_name}" must define an "sct_reference" mapping.'
         )
 
-    output_suffix = str(
-        params.get(
-            "sorted_bulk_imputation_output_suffix",
-            config.sorted_bulk_imputation_output_suffix,
-        )
-    ).strip()
     source_type = str(sct_reference.get("source_type", "")).strip()
     requested_version: str | None = None
 
@@ -190,6 +193,60 @@ def _resolve_mixed_sct_dataset_path(
     return resolved_sct_path
 
 
+def _resolve_effective_sct_dataset_ids_for_naming(
+    params: Dict[str, Any],
+    config: "SimuConfig",
+) -> List[str]:
+    """Resolve dataset IDs used in output-directory naming.
+
+    Naming follows the user's configured SCT subset lists only when both
+    `cancer_cell_dataset_ids` and `non_cancer_cell_dataset_ids` are provided.
+    In that case we use their unique union (preserving order). Otherwise we
+    fall back to `sc_dataset_ids`.
+    """
+    cancer_ids = params.get("cancer_cell_dataset_ids", None)
+    non_cancer_ids = params.get("non_cancer_cell_dataset_ids", None)
+    if cancer_ids is not None and non_cancer_ids is not None:
+        ordered_unique_ids: list[str] = []
+        seen: set[str] = set()
+        for dataset_id in list(cancer_ids) + list(non_cancer_ids):
+            cleaned_id = str(dataset_id).strip()
+            if cleaned_id == "" or cleaned_id in seen:
+                continue
+            seen.add(cleaned_id)
+            ordered_unique_ids.append(cleaned_id)
+        if ordered_unique_ids:
+            return ordered_unique_ids
+
+    return list(params.get("sc_dataset_ids", config.sc_dataset_ids))
+
+
+def _resolve_output_dir_naming_metadata(
+    params: Dict[str, Any],
+    config: "SimuConfig",
+    dataset_type: str,
+) -> tuple[int, int]:
+    """Return `(n_datasets, n_base)` for output directory naming."""
+    n_base = int(config.n_base)
+
+    if dataset_type == "sct":
+        dataset_ids = _resolve_effective_sct_dataset_ids_for_naming(params, config)
+        return len(dataset_ids), n_base
+
+    dataset_ids: Optional[List[str]] = None
+    sct_reference = params.get("sct_reference")
+    if isinstance(sct_reference, dict) and str(sct_reference.get("source_type", "")).strip() == "generated_dataset":
+        referenced_dataset_name = str(sct_reference.get("dataset_name", "")).strip()
+        referenced_params = config._dataset_definitions.get(referenced_dataset_name)
+        if isinstance(referenced_params, dict):
+            dataset_ids = _resolve_effective_sct_dataset_ids_for_naming(referenced_params, config)
+
+    if dataset_ids is None:
+        dataset_ids = list(params.get("sc_dataset_ids", config.sc_dataset_ids))
+
+    return len(dataset_ids), n_base
+
+
 def _resolve_sorted_bulk_imputation_bulk_weight(
     bulk_weight_value: Any,
     context: str,
@@ -265,7 +322,6 @@ class SimuConfig:
     sorted_bulk_imputation_y_frac_threshold: float = 0.15
     sorted_bulk_imputation_bulk_weight: float = 0.5
     sorted_bulk_imputation_output_suffix: str = "_sorted_bulk_imputed"
-    sorted_bulk_imputation_out_dir: Path | None = None
     run_sample_diversity_analysis: bool = True
     sample_diversity_gene_mode: Literal["all", "hvg", "provided_gene_list"] = "all"
     sample_diversity_n_top_genes: int = 2000
@@ -298,6 +354,12 @@ class SimuConfig:
             **data['constants'],
             **data['parameters']
         }
+        if "sorted_bulk_imputation_out_dir" in config_data:
+            logging.warning(
+                'Ignoring deprecated "sorted_bulk_imputation_out_dir"; '
+                "auxiliary SCT outputs are now stored automatically beside the SCT dataset."
+            )
+            config_data.pop("sorted_bulk_imputation_out_dir", None)
 
         # Convert list to tuple for gep_filtering_quantile if necessary
         if 'gep_filtering_quantile' in config_data:
@@ -434,8 +496,11 @@ def run_bulk_simulation(dataset_name: str,
 
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
-    n_sc_datasets = len(params.get('sc_dataset_ids', config.sc_dataset_ids))
-    n_base = config.n_base
+    n_sc_datasets, n_base = _resolve_output_dir_naming_metadata(
+        params=params,
+        config=config,
+        dataset_type=dataset_type,
+    )
     resolved_stratify = _resolve_stratify_by_dataset(params=params, config=config)
     if dataset_type == 'sct':
         logging.info(f"   > stratify_by_dataset: {resolved_stratify}")
@@ -872,12 +937,10 @@ def _run_sample_diversity_for_sct_dataset(
         if not merged_sc_dataset_file_path.exists():
             raise FileNotFoundError(f"merged_sc_dataset_file_path does not exist: {merged_sc_dataset_file_path}")
 
-    dataset_result_root_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
-    if dataset_result_root_value in (None, ""):
-        dataset_result_root = Path(config.simu_bulk_dir)
-    else:
-        dataset_result_root = Path(dataset_result_root_value)
-    dataset_result_dir = dataset_result_root / dataset_name
+    dataset_result_dir = _resolve_sct_aux_output_dir(
+        sct_dataset_file_path=sct_dataset_file_path,
+        dataset_name=dataset_name,
+    )
 
     logging.info("   > Running sample diversity analysis for SCT dataset %s...", dataset_name)
     run_sct_sample_diversity_analysis(
@@ -1074,9 +1137,10 @@ def _run_sorted_bulk_imputation_for_sct_dataset(
     generated_sct_fp = Path(generated_sct_fp)
     output_suffix = params.get("sorted_bulk_imputation_output_suffix", config.sorted_bulk_imputation_output_suffix)
     output_h5ad = _build_sorted_bulk_imputed_sct_path(generated_sct_fp, output_suffix)
-    out_dir_parent_value = params.get("sorted_bulk_imputation_out_dir", config.sorted_bulk_imputation_out_dir)
-    out_dir_parent = Path(out_dir_parent_value) if out_dir_parent_value not in (None, "") else generated_sct_fp.parent
-    out_dir = out_dir_parent / dataset_name
+    out_dir = _resolve_sct_aux_output_dir(
+        sct_dataset_file_path=generated_sct_fp,
+        dataset_name=dataset_name,
+    )
     bulk_weight = _resolve_sorted_bulk_imputation_bulk_weight(
         params.get(
             "sorted_bulk_imputation_bulk_weight",
