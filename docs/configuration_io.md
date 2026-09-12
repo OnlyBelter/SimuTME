@@ -69,11 +69,73 @@ Per-cell-type scaling coefficients used during bulk simulation.
 
 ### Core simulation parameters
 
-- `gene_quantile_range`
-- `gep_filtering_quantile`
-- `pca_n_components`
-- `gene_list_type`
+These parameters affect shared simulation behavior across workflows.
+
 - `n_base`
+  Number of cells combined into each simulated profile.
+
+- `gene_quantile_range`
+  Legacy global quantile triplet still reused by some quantile-based
+  filtering paths.
+
+- `gep_filtering_quantile`
+  Legacy global quantile pair still reused by some GEP-level filtering paths.
+
+- `pca_n_components`
+  Legacy global PCA default still reused by some filtering paths.
+
+- `gene_list_type`
+  Legacy global gene-filtering mode. It still maps to
+  `gene_filtering_type`.
+
+### Mixed filtering parameters
+
+These parameters define the global defaults for Mixed dataset filtering.
+Dataset-level Mixed fields can override them.
+
+#### GEP-level filtering defaults
+
+- `gep_filtering_enabled_default`
+- `gep_filtering_reference_file`
+- `gep_filtering_ref_exp_type`
+- `gep_filtering_method`
+- `gep_filtering_quantile`
+- `gep_n_top`
+- `gep_show_filtering_info`
+- `gep_filtering_by_gene_range`
+- `gep_min_percentage_within_gene_range`
+- `gep_gene_quantile_range`
+- `gep_filtering_in_pca_space`
+- `gep_pca_n_components`
+- `gep_norm_ord`
+- `gep_high_corr_gene_list_file`
+
+#### Gene-level filtering defaults
+
+- `gene_filtering_enabled_default`
+- `gene_filtering_reference_file`
+- `gene_filtering_type`
+- `gene_filtering_quantile_range`
+- `gene_filtering_q_col_name`
+- `gene_filtering_corr_threshold`
+- `gene_filtering_n_gene_max`
+- `gene_filtering_high_corr_gene_file`
+- `gene_filtering_save_filtered_h5ad`
+- `gene_filtering_filtered_dataset_postfix`
+- `gene_filtering_plot_pca`
+- `gene_filtering_pca_n_components`
+- `gene_filtering_pca_figsize`
+
+### SCT sample-diversity parameters
+
+These parameters control the optional SCT sample-diversity analysis step.
+
+- `run_sample_diversity_analysis`
+- `sample_diversity_gene_mode`
+- `sample_diversity_n_top_genes`
+- `sample_diversity_gene_list_path`
+- `sample_diversity_distance_metric`
+- `sample_diversity_min_samples_per_cell_type`
 
 ### Optional sorted-bulk-guided SCT imputation parameters
 
@@ -120,20 +182,58 @@ Each entry under `datasets:` defines one simulation task.
 - `cell_type_col`
 - `cell_subtype_col`
 
+`filtering` is no longer a Mixed workflow field. Mixed datasets now use
+`gep_filtering` and `gene_filtering` explicitly.
+
 ### SCT-only fields
 
 - `sampling_method_gep`
 - `max_cells_per_cell_type`
 - `apply_sorted_bulk_imputation`
+- `neighbor_sampling_scheme`
+- `run_sample_diversity_analysis`
+- `stratify_by_dataset`
+- `cancer_cell_dataset_ids`
+- `non_cancer_cell_dataset_ids`
 
 ### Mixed-only fields
 
 - `sct_reference`
+- `sampling_method_gep`
 - `sampling_method_prop`
-- `sampling_method_gep` (optional but recommended)
+- `gep_filtering`
+- `gene_filtering`
 - `filtering_in_pca_space`
+- `gep_filtering_method`
+- `gep_filtering_quantile`
+- `gep_filtering_reference_file`
+- `gep_high_corr_gene_list_file`
+- `gep_filtering_by_gene_range`
+- `gep_min_percentage_within_gene_range`
+- `gep_gene_quantile_range`
+- `gep_pca_n_components`
+- `gep_norm_ord`
+- `gep_n_top`
+- `gep_show_filtering_info`
+- `gene_filtering_type`
+- `gene_filtering_reference_file`
+- `gene_filtering_high_corr_gene_file`
+- `gene_filtering_corr_threshold`
+- `gene_filtering_n_gene_max`
+- `gene_filtering_quantile_range`
+- `gene_filtering_q_col_name`
+- `gene_filtering_plot_pca`
+- `gene_filtering_pca_n_components`
+- `gene_filtering_pca_figsize`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
 - `pred_cell_prop_file_path` (only when `sampling_method_prop: "dirichlet"`)
+
+For Mixed datasets:
+
+- `sampling_method_gep` is required and must be set explicitly
+- `gep_filtering` controls GEP-level filtering during Mixed generation
+- `gene_filtering` controls post-generation gene-level filtering
+- the old Mixed key `filtering` is no longer supported
 
 ### Mixed `sct_reference` schema
 
@@ -178,6 +278,8 @@ Required:
 - YAML configuration file
 - merged scRNA-seq `.h5ad`
 - SCT reference `.h5ad` resolved from each Mixed dataset's `sct_reference`
+- explicit `sampling_method_gep`
+- explicit `sampling_method_prop`
 
 Optional but commonly used:
 
@@ -240,9 +342,11 @@ Optional post-processing outputs:
 
 - filtered `.h5ad`
 - gene list CSVs
+- gene and cell-fraction correlation tables
 - PCA model files
 - PCA score tables
 - PCA figures
+- dataset-level summary JSON
 
 ## Usage Pattern
 

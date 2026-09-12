@@ -83,6 +83,32 @@ parameters:
   gep_filtering_quantile: [0.0, 0.95]
   pca_n_components: 0.9
   gene_list_type: "high_corr_gene_and_quantile_range"
+  gep_filtering_enabled_default: false  # Optional global default for Mixed GEP-level filtering when a dataset does not set `gep_filtering`
+  gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for Mixed GEP-level filtering; defaults to paths.tcga_merged_tpm_file_path
+  gep_filtering_ref_exp_type: "TPM"  # Optional reference expression type for GEP-level filtering
+  gep_filtering_method: "median_gep"  # Optional GEP-level filtering metric: "median_gep", "mean_gep", "linear_mmd", or "marker_ratio"
+  gep_n_top: 20  # Optional neighbor count for marker-ratio filtering
+  gep_show_filtering_info: false  # Optional verbose logging for GEP-level filtering
+  gep_filtering_by_gene_range: false  # Optional extra per-sample gene-range filtering during Mixed generation
+  gep_min_percentage_within_gene_range: 0.95  # Optional minimum gene fraction required to pass gene-range filtering
+  gep_gene_quantile_range: [0.005, 0.5, 0.995]  # Optional TCGA quantile triplet used by GEP-level gene-range filtering
+  gep_filtering_in_pca_space: true  # Optional PCA-space distance filtering during Mixed generation
+  gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
+  gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
+  gep_high_corr_gene_list_file: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional gene list reused during GEP-level filtering
+  gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
+  gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for post-generation gene filtering; defaults to paths.tcga_merged_tpm_file_path
+  gene_filtering_type: "high_corr_gene_and_quantile_range"  # Optional post-generation gene filtering mode; defaults to the legacy `gene_list_type`
+  gene_filtering_quantile_range: [0.005, 0.5, 0.995]  # Optional TCGA quantile triplet for quantile-based gene filtering
+  gene_filtering_q_col_name: ["q_0.5", "q_50", "q_99.5"]  # Optional column names paired with the quantile triplet
+  gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
+  gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
+  gene_filtering_high_corr_gene_file: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional precomputed high-correlation gene list reused during post-processing
+  gene_filtering_save_filtered_h5ad: true  # Optional switch for writing the filtered Mixed `.h5ad`
+  gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming
+  gene_filtering_plot_pca: true  # Optional PCA plotting switch for post-generation filtering
+  gene_filtering_pca_n_components: 2  # Optional PCA component count for post-generation PCA plotting; must be >= 2 when plotting is enabled
+  gene_filtering_pca_figsize: [5, 5]  # Optional figure size for post-generation PCA plots
   n_base: 100
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
@@ -128,11 +154,15 @@ datasets:
     sct_reference:
       source_type: "path"  # Mixed only: use an external SCT `.h5ad` directly
       file_path: "path/to/sct_dataset_gepsamp-random.h5ad"
+    sampling_method_gep: "random"  # Required for Mixed datasets: sampling method used to draw SCT profiles, either "random" or "n_neighbors"
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "segment"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
-    filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
-    filtering_ref_types: null
+    gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
+    filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
+    gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     cell_prop_prior: null
+    gep_filtering_method: "median_gep"  # Optional Mixed override for GEP-level filtering
+    filtering_in_pca_space: true  # Optional legacy Mixed override kept for GEP-level PCA-space filtering
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset
@@ -142,6 +172,7 @@ datasets:
       source_type: "generated_dataset"  # Mixed only: reference an SCT dataset defined earlier in this YAML
       dataset_name: "SCT_N10_hnscc_07Jan_01"
       version: "sorted_bulk_imputed"
+    sampling_method_gep: "n_neighbors"  # Required for Mixed datasets: set this explicitly rather than relying on filename inference
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "dirichlet"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     dirichlet_alpha:  # Mixed + dirichlet only: default symmetric prior over the 16 configured output cell types
@@ -162,9 +193,14 @@ datasets:
       Double-neg-like T: 1.0
       Monocytes: 1.0
     pred_cell_prop_file_path: null  # Mixed + dirichlet only: optional CSV of predicted cell proportions; when provided, estimate dirichlet_alpha from this file and override the manual dictionary
-    filtering: true  # Whether to apply gene filtering and TCGA-guided filtering
-    filtering_ref_types: null
+    gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
+    filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
+    gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     cell_prop_prior: null
+    gep_filtering_method: "mean_gep"  # Example Mixed override for GEP-level filtering
+    gep_filtering_quantile: [0.0, 0.98]  # Example Mixed override for GEP-level distance thresholds
+    gene_filtering_type: "high_corr_gene"  # Example Mixed override for post-generation filtering
+    gene_filtering_plot_pca: false  # Example Mixed override that skips PCA artifacts but still writes the filtered `.h5ad`
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

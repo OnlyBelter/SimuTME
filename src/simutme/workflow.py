@@ -1,3 +1,4 @@
+import json
 import os
 import yaml
 import logging
@@ -17,20 +18,6 @@ from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerat
 from .simulation.sampling import estimate_dirichlet_alpha_from_pred_cell_props, get_default_dirichlet_alpha
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
-
-
-def _infer_sampling_method_gep_from_sct_path(sct_dataset_file_path: Any) -> str | None:
-    if not sct_dataset_file_path:
-        return None
-    try:
-        p = Path(sct_dataset_file_path).name.lower()
-    except TypeError:
-        p = str(sct_dataset_file_path).lower()
-    if "n_neighbors" in p:
-        return "n_neighbors"
-    if "random" in p:
-        return "random"
-    return None
 
 
 def _build_sorted_bulk_imputed_sct_path(
@@ -311,6 +298,32 @@ class SimuConfig:
     gep_filtering_quantile: Tuple[float, float]
     pca_n_components: float
     gene_list_type: str
+    gep_filtering_enabled_default: bool = False
+    gep_filtering_reference_file: Path | None = None
+    gep_filtering_ref_exp_type: str | None = None
+    gep_filtering_method: str = "median_gep"
+    gep_n_top: int = 20
+    gep_show_filtering_info: bool = False
+    gep_filtering_by_gene_range: bool = False
+    gep_min_percentage_within_gene_range: float = 0.95
+    gep_gene_quantile_range: List[float] | None = None
+    gep_filtering_in_pca_space: bool = True
+    gep_pca_n_components: int | float | None = None
+    gep_norm_ord: int = 1
+    gep_high_corr_gene_list_file: Path | None = None
+    gene_filtering_enabled_default: bool = False
+    gene_filtering_reference_file: Path | None = None
+    gene_filtering_type: str | None = None
+    gene_filtering_quantile_range: List[float] | None = None
+    gene_filtering_q_col_name: List[str] | None = None
+    gene_filtering_corr_threshold: float = 0.3
+    gene_filtering_n_gene_max: int = 1000
+    gene_filtering_high_corr_gene_file: Path | None = None
+    gene_filtering_save_filtered_h5ad: bool = True
+    gene_filtering_filtered_dataset_postfix: str | None = None
+    gene_filtering_plot_pca: bool = True
+    gene_filtering_pca_n_components: int = 2
+    gene_filtering_pca_figsize: Tuple[float, float] = (5.0, 5.0)
     sorted_bulk_expr_file_path: Path | None = None
     sorted_bulk_annot_file_path: Path | None = None
     sorted_bulk_cell_type_mapping_file_path: Path | None = None
@@ -371,10 +384,20 @@ class SimuConfig:
         return config
 
     def __post_init__(self):
+        if self.gep_pca_n_components in (None, ""):
+            self.gep_pca_n_components = self.pca_n_components
+        if self.gene_filtering_type in (None, ""):
+            self.gene_filtering_type = self.gene_list_type
+        if self.gene_filtering_quantile_range in (None, []):
+            self.gene_filtering_quantile_range = self.gene_quantile_range
         self.sorted_bulk_imputation_bulk_weight = _resolve_sorted_bulk_imputation_bulk_weight(
             self.sorted_bulk_imputation_bulk_weight,
             "global parameters",
         )
+        if isinstance(self.gene_filtering_pca_figsize, list):
+            self.gene_filtering_pca_figsize = tuple(float(v) for v in self.gene_filtering_pca_figsize)
+        if len(self.gene_filtering_pca_figsize) != 2:
+            raise ValueError('"gene_filtering_pca_figsize" must contain exactly two values.')
         self.sample_diversity_gene_mode = _resolve_sample_diversity_gene_mode(
             self.sample_diversity_gene_mode,
             "global parameters",
@@ -409,6 +432,291 @@ class SimuConfig:
                 logging.warning(f"Warning: High corr gene file not found: {self.high_corr_gene_file_path}")
                 self._high_corr_gene_list = []
         return self._high_corr_gene_list
+
+
+@dataclass(frozen=True)
+class ResolvedGEPFilteringParams:
+    enabled: bool
+    reference_file: str | None
+    ref_exp_type: str | None
+    filtering_method: str
+    filtering_ref_types: List[str] | None
+    gep_filtering_quantile: Tuple[float | None, float | None]
+    n_top: int
+    show_filtering_info: bool
+    filtering_by_gene_range: bool
+    min_percentage_within_gene_range: float
+    gene_quantile_range: List[float] | None
+    filtering_in_pca_space: bool
+    pca_n_components: int | float
+    norm_ord: int
+    high_corr_gene_list_file: str | None
+    high_corr_gene_list: List[str] | None
+
+
+@dataclass(frozen=True)
+class ResolvedGeneFilteringParams:
+    enabled: bool
+    reference_file: str | None
+    filtering_type: str
+    quantile_range: List[float] | None
+    q_col_name: List[str] | None
+    corr_threshold: float
+    n_gene_max: int
+    high_corr_gene_file: str | None
+    save_filtered_h5ad: bool
+    filtered_dataset_postfix: str | None
+    plot_pca: bool
+    pca_n_components: int
+    pca_figsize: Tuple[float, float]
+
+
+def _resolve_optional_path_value(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _read_gene_list_file(file_path: str | Path) -> List[str]:
+    gene_df = pd.read_csv(file_path)
+    if "gene_name" in gene_df.columns:
+        return gene_df["gene_name"].dropna().astype(str).tolist()
+    if gene_df.shape[1] == 1:
+        return gene_df.iloc[:, 0].dropna().astype(str).tolist()
+    raise ValueError(f"Gene list file must contain a gene_name column: {file_path}")
+
+
+def _resolve_quantile_triplet(values: Any, field_name: str) -> List[float] | None:
+    if values in (None, ""):
+        return None
+    if isinstance(values, str):
+        raise ValueError(f'"{field_name}" must be a 3-value list, not a string.')
+    resolved = [float(value) for value in list(values)]
+    if len(resolved) != 3:
+        raise ValueError(f'"{field_name}" must contain exactly three values.')
+    return resolved
+
+
+def _format_quantile_label(value: float) -> str:
+    return f"{int(value * 1000) / 10:g}"
+
+
+def _resolve_quantile_col_names(q_col_name: Any, quantile_range: List[float] | None, field_name: str) -> List[str] | None:
+    if q_col_name in (None, ""):
+        if quantile_range is None:
+            return None
+        return [f"q_{_format_quantile_label(value)}" for value in quantile_range]
+    if isinstance(q_col_name, str):
+        resolved = [q_col_name]
+    else:
+        resolved = [str(value) for value in list(q_col_name)]
+    if quantile_range is not None and len(resolved) != len(quantile_range):
+        raise ValueError(f'"{field_name}" must have the same length as the quantile range.')
+    return resolved
+
+
+def _parse_pca_component_value(value: Any) -> int | float:
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    return float(text) if "." in text else int(text)
+
+
+def _resolve_filtering_ref_types(
+    ref_types_value: Any,
+    config: SimuConfig,
+    context: str,
+) -> List[str] | None:
+    if ref_types_value in (None, ""):
+        return None
+    if isinstance(ref_types_value, str):
+        resolved_input = [ref_types_value]
+    else:
+        resolved_input = list(ref_types_value)
+    resolved = [str(value).strip() for value in resolved_input if str(value).strip()]
+    if not resolved:
+        return None
+    if len(resolved) == 1 and resolved[0].lower() == "all":
+        if not config.tcga2cancer_type_file_path:
+            raise ValueError(
+                f'"filtering_ref_types" requires "tcga2cancer_type_file_path" for {context}.'
+            )
+        tcga_df = pd.read_csv(config.tcga2cancer_type_file_path, index_col=0)
+        if "cancer_type" not in tcga_df.columns:
+            raise ValueError(
+                f'"tcga2cancer_type_file_path" must contain a "cancer_type" column for {context}.'
+            )
+        return sorted(tcga_df["cancer_type"].dropna().astype(str).unique().tolist())
+    return resolved
+
+
+def _resolve_gep_filtering_params(
+    dataset_name: str,
+    params: Dict[str, Any],
+    config: SimuConfig,
+) -> ResolvedGEPFilteringParams:
+    enabled = bool(params.get("gep_filtering", config.gep_filtering_enabled_default))
+    reference_file = _resolve_optional_path_value(
+        params.get("gep_filtering_reference_file", config.gep_filtering_reference_file)
+    ) or str(config.tcga_merged_tpm_file_path)
+    ref_exp_type = params.get("gep_filtering_ref_exp_type", config.gep_filtering_ref_exp_type) or "TPM"
+    filtering_ref_types = _resolve_filtering_ref_types(
+        params.get("filtering_ref_types", None),
+        config=config,
+        context=f'Mixed dataset "{dataset_name}"',
+    )
+    quantile = params.get("gep_filtering_quantile", config.gep_filtering_quantile)
+    if quantile in (None, ""):
+        quantile = (None, 0.95)
+    quantile = tuple(
+        None if value in (None, "", "null") else float(value)
+        for value in list(quantile)
+    )
+    if len(quantile) != 2:
+        raise ValueError('"gep_filtering_quantile" must contain exactly two values.')
+    gene_quantile_range = _resolve_quantile_triplet(
+        params.get(
+            "gep_gene_quantile_range",
+            params.get(
+                "gene_quantile_range",
+                config.gep_gene_quantile_range if config.gep_gene_quantile_range is not None else config.gene_quantile_range,
+            ),
+        ),
+        "gep_gene_quantile_range",
+    )
+    high_corr_gene_list_file = _resolve_optional_path_value(
+        params.get("gep_high_corr_gene_list_file", config.gep_high_corr_gene_list_file)
+    )
+    if high_corr_gene_list_file is None and config.high_corr_gene_file_path not in (None, ""):
+        high_corr_gene_list_file = str(config.high_corr_gene_file_path)
+    high_corr_gene_list = None
+    if high_corr_gene_list_file:
+        if not os.path.exists(high_corr_gene_list_file):
+            raise FileNotFoundError(f'GEP high-correlation gene file not found: {high_corr_gene_list_file}')
+        high_corr_gene_list = _read_gene_list_file(high_corr_gene_list_file)
+    resolved = ResolvedGEPFilteringParams(
+        enabled=enabled,
+        reference_file=reference_file,
+        ref_exp_type=str(ref_exp_type) if ref_exp_type is not None else None,
+        filtering_method=str(params.get("gep_filtering_method", config.gep_filtering_method)),
+        filtering_ref_types=filtering_ref_types,
+        gep_filtering_quantile=quantile,
+        n_top=int(params.get("gep_n_top", config.gep_n_top if hasattr(config, "gep_n_top") else 20)),
+        show_filtering_info=bool(params.get("gep_show_filtering_info", config.gep_show_filtering_info)),
+        filtering_by_gene_range=bool(
+            params.get("gep_filtering_by_gene_range", config.gep_filtering_by_gene_range)
+        ),
+        min_percentage_within_gene_range=float(
+            params.get(
+                "gep_min_percentage_within_gene_range",
+                config.gep_min_percentage_within_gene_range,
+            )
+        ),
+        gene_quantile_range=gene_quantile_range,
+        filtering_in_pca_space=bool(
+            params.get(
+                "gep_filtering_in_pca_space",
+                params.get("filtering_in_pca_space", config.gep_filtering_in_pca_space),
+            )
+        ),
+        pca_n_components=_parse_pca_component_value(
+            params.get("gep_pca_n_components", config.gep_pca_n_components)
+        ),
+        norm_ord=int(params.get("gep_norm_ord", config.gep_norm_ord)),
+        high_corr_gene_list_file=high_corr_gene_list_file,
+        high_corr_gene_list=high_corr_gene_list,
+    )
+    if resolved.enabled:
+        if not resolved.reference_file:
+            raise ValueError(
+                f'"gep_filtering_reference_file" must be set when gep_filtering is enabled for Mixed dataset "{dataset_name}".'
+            )
+        if not resolved.ref_exp_type:
+            raise ValueError(
+                f'"gep_filtering_ref_exp_type" must be set when gep_filtering is enabled for Mixed dataset "{dataset_name}".'
+            )
+        if resolved.filtering_ref_types and not config.tcga2cancer_type_file_path:
+            raise ValueError(
+                f'"filtering_ref_types" requires "tcga2cancer_type_file_path" for Mixed dataset "{dataset_name}".'
+            )
+    return resolved
+
+
+def _resolve_gene_filtering_params(
+    dataset_name: str,
+    params: Dict[str, Any],
+    config: SimuConfig,
+) -> ResolvedGeneFilteringParams:
+    enabled = bool(params.get("gene_filtering", config.gene_filtering_enabled_default))
+    quantile_range = _resolve_quantile_triplet(
+        params.get("gene_filtering_quantile_range", config.gene_filtering_quantile_range),
+        "gene_filtering_quantile_range",
+    )
+    filtering_type = str(params.get("gene_filtering_type", config.gene_filtering_type or config.gene_list_type))
+    if quantile_range is None and "quantile_range" in filtering_type:
+        quantile_range = _resolve_quantile_triplet(config.gene_quantile_range, "gene_quantile_range")
+    q_col_name = _resolve_quantile_col_names(
+        params.get("gene_filtering_q_col_name", config.gene_filtering_q_col_name),
+        quantile_range,
+        "gene_filtering_q_col_name",
+    )
+    high_corr_gene_file = _resolve_optional_path_value(
+        params.get("gene_filtering_high_corr_gene_file", config.gene_filtering_high_corr_gene_file)
+    )
+    if high_corr_gene_file is None and config.high_corr_gene_file_path not in (None, ""):
+        high_corr_gene_file = str(config.high_corr_gene_file_path)
+    resolved = ResolvedGeneFilteringParams(
+        enabled=enabled,
+        reference_file=_resolve_optional_path_value(
+            params.get("gene_filtering_reference_file", config.gene_filtering_reference_file)
+        ) or str(config.tcga_merged_tpm_file_path),
+        filtering_type=filtering_type,
+        quantile_range=quantile_range,
+        q_col_name=q_col_name,
+        corr_threshold=float(params.get("gene_filtering_corr_threshold", config.gene_filtering_corr_threshold)),
+        n_gene_max=int(params.get("gene_filtering_n_gene_max", config.gene_filtering_n_gene_max)),
+        high_corr_gene_file=high_corr_gene_file,
+        save_filtered_h5ad=bool(
+            params.get("gene_filtering_save_filtered_h5ad", config.gene_filtering_save_filtered_h5ad)
+        ),
+        filtered_dataset_postfix=params.get(
+            "gene_filtering_filtered_dataset_postfix",
+            config.gene_filtering_filtered_dataset_postfix,
+        ),
+        plot_pca=bool(params.get("gene_filtering_plot_pca", config.gene_filtering_plot_pca)),
+        pca_n_components=int(
+            params.get("gene_filtering_pca_n_components", config.gene_filtering_pca_n_components)
+        ),
+        pca_figsize=tuple(
+            float(v)
+            for v in params.get("gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
+        ),
+    )
+    if len(resolved.pca_figsize) != 2:
+        raise ValueError('"gene_filtering_pca_figsize" must contain exactly two values.')
+    if resolved.enabled:
+        if not resolved.reference_file:
+            raise ValueError(
+                f'"gene_filtering_reference_file" must be set when gene filtering is enabled for Mixed dataset "{dataset_name}".'
+            )
+        if "quantile_range" in resolved.filtering_type and resolved.quantile_range is None:
+            raise ValueError(
+                f'"gene_filtering_quantile_range" must be set when the filtering type uses quantile_range for Mixed dataset "{dataset_name}".'
+            )
+        if resolved.q_col_name is not None and resolved.quantile_range is not None:
+            if len(resolved.q_col_name) != len(resolved.quantile_range):
+                raise ValueError(
+                    f'"gene_filtering_q_col_name" must match the length of the quantile range for Mixed dataset "{dataset_name}".'
+                )
+        if resolved.plot_pca and resolved.pca_n_components < 2:
+            raise ValueError(
+                f'"gene_filtering_pca_n_components" must be >= 2 when PCA plotting is enabled for Mixed dataset "{dataset_name}".'
+            )
+        if resolved.high_corr_gene_file and not os.path.exists(resolved.high_corr_gene_file):
+            raise FileNotFoundError(
+                f'Gene-filtering high-correlation gene file not found: {resolved.high_corr_gene_file}'
+            )
+    return resolved
 
 
 def _resolve_stratify_by_dataset(
@@ -466,6 +774,11 @@ def run_bulk_simulation(dataset_name: str,
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
                 '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
+            )
+        if 'filtering' in params:
+            raise ValueError(
+                '"filtering" is no longer supported for Mixed datasets. '
+                'Please rename it to "gep_filtering".'
             )
         if 'stratify_by_dataset' in params:
             raise ValueError(
@@ -574,8 +887,18 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
         )
-        if params.get('filtering', False):
-            filtering_str = f'with_filtering_{config.gep_filtering_quantile[1]}'
+        resolved_gep_filtering = _resolve_gep_filtering_params(
+            dataset_name=dataset_name,
+            params=params,
+            config=config,
+        )
+        resolved_gene_filtering = _resolve_gene_filtering_params(
+            dataset_name=dataset_name,
+            params=params,
+            config=config,
+        )
+        if resolved_gep_filtering.enabled:
+            filtering_str = f'with_filtering_{resolved_gep_filtering.gep_filtering_quantile[1]}'
         else:
             filtering_str = 'no_filtering'
         if not 'sampling_method_prop' in params:
@@ -602,22 +925,11 @@ def run_bulk_simulation(dataset_name: str,
             )
             pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
         if not 'sampling_method_gep' in params:
-            inferred = _infer_sampling_method_gep_from_sct_path(resolved_sct_dataset_file_path)
-            if inferred:
-                logging.info(
-                    "   > Warning: 'sampling_method_gep' not specified in params, inferred from sct_dataset_file_path:"
-                    f" {inferred}"
-                )
-                sampling_method_gep = inferred
-            else:
-                raise ValueError(
-                    f'Missing "sampling_method_gep" for Mixed dataset "{dataset_name}". '
-                    f'Provide params["sampling_method_gep"] explicitly, or include a marker in '
-                    f'the resolved SCT reference filename (e.g., "random" or "n_neighbors"). '
-                    f"Current sct_dataset_file_path: {resolved_sct_dataset_file_path}"
-                )
-        else:
-            sampling_method_gep = params.get('sampling_method_gep')
+            raise ValueError(
+                f'Missing "sampling_method_gep" for Mixed dataset "{dataset_name}". '
+                'Please set params["sampling_method_gep"] explicitly to "random" or "n_neighbors".'
+            )
+        sampling_method_gep = params.get('sampling_method_gep')
 
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
@@ -645,21 +957,26 @@ def run_bulk_simulation(dataset_name: str,
                 n_samples=params['n_samples'],
                 simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
                 sampling_method_prop=sampling_method_prop,
-                reference_file=config.tcga_merged_tpm_file_path,
-                ref_exp_type='TPM',
-                filtering=params.get('filtering', False),
-                filtering_ref_types=params.get('filtering_ref_types', None),
-                gep_filtering_quantile=config.gep_filtering_quantile,
+                reference_file=resolved_gep_filtering.reference_file,
+                ref_exp_type=resolved_gep_filtering.ref_exp_type,
+                filtering=resolved_gep_filtering.enabled,
+                filtering_ref_types=resolved_gep_filtering.filtering_ref_types,
+                gep_filtering_quantile=resolved_gep_filtering.gep_filtering_quantile,
                 n_threads=5,
                 log_file_path=log_file_path,
-                show_filtering_info=False,
-                filtering_method='median_gep',
+                n_top=resolved_gep_filtering.n_top,
+                show_filtering_info=resolved_gep_filtering.show_filtering_info,
+                filtering_method=resolved_gep_filtering.filtering_method,
                 cell_prop_prior=params.get('cell_prop_prior', None),
                 dirichlet_alpha=resolved_dirichlet_alpha,
                 pred_cell_prop_file_path=pred_cell_prop_file_path,
-                filtering_in_pca_space=params.get('filtering_in_pca_space', True),
-                norm_ord=1,
-                pca_n_components=config.pca_n_components
+                high_corr_gene_list=resolved_gep_filtering.high_corr_gene_list,
+                filtering_by_gene_range=resolved_gep_filtering.filtering_by_gene_range,
+                min_percentage_within_gene_range=resolved_gep_filtering.min_percentage_within_gene_range,
+                gene_quantile_range=resolved_gep_filtering.gene_quantile_range,
+                filtering_in_pca_space=resolved_gep_filtering.filtering_in_pca_space,
+                norm_ord=resolved_gep_filtering.norm_ord,
+                pca_n_components=resolved_gep_filtering.pca_n_components,
             )
             bulk_generator.generate_gep(config=gep_gen_config)
         else:
@@ -678,9 +995,21 @@ def run_bulk_simulation(dataset_name: str,
                 output_dir=Path(simu_bulk_dir) / dataset_name,
             )
 
-        # 3. Post-processing: Gene-level filtering and PCA (if needed)
-        if params.get('filtering', False):
-            _run_post_processing(dataset_name, generated_bulk_gep_fp, config)
+        postprocess_outputs = _run_gene_filtering_postprocess(
+            dataset_name=dataset_name,
+            generated_bulk_gep_fp=generated_bulk_gep_fp,
+            params=params,
+            config=config,
+            resolved_params=resolved_gene_filtering,
+        )
+        _build_mixed_dataset_summary(
+            dataset_name=dataset_name,
+            generated_bulk_gep_fp=generated_bulk_gep_fp,
+            generated_cell_fraction_fp=bulk_generator.generated_cell_fraction_fp,
+            gep_filtering=resolved_gep_filtering,
+            gene_filtering=resolved_gene_filtering,
+            postprocess_outputs=postprocess_outputs,
+        )
 
         return str(generated_bulk_gep_fp)
 
@@ -813,77 +1142,190 @@ def _save_cancer_cell_fraction_distribution(
         )
 
 
-def _run_post_processing(dataset_name: str,
-                         generated_bulk_gep_fp: str,
-                         config: SimuConfig):
-    """Handles complex gene filtering, intersection logic, and PCA plotting."""
+def _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp: str | Path, dataset_name: str) -> Path:
+    return Path(generated_bulk_gep_fp).parent / dataset_name
 
-    # Define output filenames
-    replace_by = f'_filtered_by_{config.gene_list_type}.h5ad'
-    filtered_file_path = generated_bulk_gep_fp.replace('.h5ad', replace_by)
 
-    if os.path.exists(filtered_file_path):
-        logging.info(f"   > Filtered file exists: {filtered_file_path}")
-        return
+def _build_filtered_h5ad_path(
+    generated_bulk_gep_fp: str | Path,
+    filtering_type: str,
+    filtered_dataset_postfix: str | None,
+) -> Path:
+    generated_bulk_gep_fp = Path(generated_bulk_gep_fp)
+    postfix = filtered_dataset_postfix
+    if postfix in (None, ""):
+        postfix = f"filtered_by_{filtering_type}"
+    postfix = str(postfix).strip("_")
+    return generated_bulk_gep_fp.with_name(f"{generated_bulk_gep_fp.stem}_{postfix}{generated_bulk_gep_fp.suffix}")
 
-    logging.info(f"   > Running post-processing (Gene Filtering & PCA) for {dataset_name}...")
-    current_result_dir = os.path.join(config.simu_bulk_dir, dataset_name)
+
+def _run_gene_filtering_postprocess(
+    dataset_name: str,
+    generated_bulk_gep_fp: str | Path,
+    params: Dict[str, Any],
+    config: SimuConfig,
+    resolved_params: ResolvedGeneFilteringParams,
+) -> Dict[str, str | None]:
+    outputs: Dict[str, str | None] = {
+        "filtered_bulk_gep_file": None,
+        "gene_list_file": None,
+        "corr_result_file": None,
+        "pca_model_file": None,
+        "pca_data_file": None,
+    }
+    if not resolved_params.enabled:
+        logging.info("   > Gene-level filtering disabled for %s.", dataset_name)
+        return outputs
+
+    logging.info(
+        "   > Running post-processing (gene filtering: %s) for %s...",
+        resolved_params.filtering_type,
+        dataset_name,
+    )
+    current_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(current_result_dir)
 
-    # A. Get/Generate Quantile Gene List
-    gene_list = config.high_corr_genes.copy()  # Start with high corr genes
+    gene_list_file_path = current_result_dir / f"gene_list_filtered_by_{resolved_params.filtering_type}.csv"
+    corr_result_fp = current_result_dir / "gene_corr_with_cell_fraction.csv"
+    pca_model_fp = current_result_dir / f"both_TCGA_and_simu_{dataset_name}_PCA_{resolved_params.filtering_type}.joblib"
+    pca_data_fp = current_result_dir / f"{dataset_name}_PCA_with_TCGA_{resolved_params.filtering_type}.csv"
+    filtered_h5ad_file = None
+    if resolved_params.save_filtered_h5ad:
+        filtered_h5ad_file = _build_filtered_h5ad_path(
+            generated_bulk_gep_fp=generated_bulk_gep_fp,
+            filtering_type=resolved_params.filtering_type,
+            filtered_dataset_postfix=resolved_params.filtered_dataset_postfix,
+        )
 
-    if 'quantile_range' in config.gene_list_type:
-        q_names = [str(x) for x in config.gene_quantile_range]  # Simplified naming logic
-        # Note: Filename generation logic is simplified here; you may need to adjust q_names based on original code.
-        csv_name = f'gene_list_filtered_by_{config.gene_list_type}_{q_names[0]}_{q_names[-1]}.csv'
-        gene_list_file_path = os.path.join(current_result_dir, csv_name)
-
-        if not os.path.exists(gene_list_file_path):
-            logging.info(f'      Generating gene list: {gene_list_file_path}')
+    gene_list: List[str]
+    high_corr_file = resolved_params.high_corr_gene_file
+    if high_corr_file and "high_corr_gene" in resolved_params.filtering_type:
+        high_corr_gene_list = _read_gene_list_file(high_corr_file)
+        if resolved_params.filtering_type == "high_corr_gene":
+            gene_list = high_corr_gene_list
+            pd.DataFrame({"gene_name": gene_list}).to_csv(gene_list_file_path, index=False)
+        elif resolved_params.filtering_type == "high_corr_gene_and_quantile_range":
             quantile_gene_list = get_gene_list_for_filtering(
                 bulk_exp_file=generated_bulk_gep_fp,
-                filtering_type='quantile_range',
-                tcga_file=config.tcga_merged_tpm_file_path,
-                quantile_range=config.gene_quantile_range,
-                result_file_path=gene_list_file_path,
-                q_col_name=q_names
+                tcga_file=resolved_params.reference_file,
+                result_file_path=gene_list_file_path.with_name(
+                    f"{gene_list_file_path.stem}_quantile_range.csv"
+                ),
+                q_col_name=resolved_params.q_col_name,
+                filtering_type="quantile_range",
+                corr_threshold=resolved_params.corr_threshold,
+                n_gene_max=resolved_params.n_gene_max,
+                corr_result_fp=str(corr_result_fp),
+                quantile_range=resolved_params.quantile_range,
             )
+            quantile_gene_set = set(quantile_gene_list)
+            gene_list = [gene for gene in high_corr_gene_list if gene in quantile_gene_set]
+            pd.DataFrame({"gene_name": gene_list}).to_csv(gene_list_file_path, index=False)
         else:
-            logging.info(f'      Loading existing gene list: {gene_list_file_path}')
-            quantile_gene_list = pd.read_csv(gene_list_file_path)['gene_name'].to_list()
+            gene_list = get_gene_list_for_filtering(
+                bulk_exp_file=generated_bulk_gep_fp,
+                tcga_file=resolved_params.reference_file,
+                result_file_path=gene_list_file_path,
+                q_col_name=resolved_params.q_col_name,
+                filtering_type=resolved_params.filtering_type,
+                corr_threshold=resolved_params.corr_threshold,
+                n_gene_max=resolved_params.n_gene_max,
+                corr_result_fp=str(corr_result_fp),
+                quantile_range=resolved_params.quantile_range,
+            )
+    else:
+        gene_list = get_gene_list_for_filtering(
+            bulk_exp_file=generated_bulk_gep_fp,
+            tcga_file=resolved_params.reference_file,
+            result_file_path=gene_list_file_path,
+            q_col_name=resolved_params.q_col_name,
+            filtering_type=resolved_params.filtering_type,
+            corr_threshold=resolved_params.corr_threshold,
+            n_gene_max=resolved_params.n_gene_max,
+            corr_result_fp=str(corr_result_fp),
+            quantile_range=resolved_params.quantile_range,
+        )
 
-        # Take intersection
-        gene_list = [g for g in gene_list if g in quantile_gene_list]
-
-    # B. Prepare data for PCA
     bulk_exp_obj = ReadH5AD(generated_bulk_gep_fp)
     bulk_exp = bulk_exp_obj.get_df()
     bulk_exp_cell_frac = bulk_exp_obj.get_cell_fraction()
-
-    # Note: Reading large TCGA files is time-consuming.
-    # If calling in a loop, consider passing pre-loaded data or using system caching.
-    tcga_exp = ReadExp(config.tcga_merged_tpm_file_path, exp_type='TPM').get_exp()
-
-    pca_model_fp = os.path.join(current_result_dir,
-                                f'both_TCGA_and_simu_{dataset_name}_PCA_{config.gene_list_type}.joblib')
-    pca_data_fp = os.path.join(current_result_dir, f'{dataset_name}_PCA_with_TCGA_{config.gene_list_type}.csv')
-
-    # C. Execute filtering and plotting
+    tcga_exp = ReadExp(resolved_params.reference_file, exp_type="TPM").get_exp()
     filtering_by_gene_list_and_pca_plot(
         bulk_exp=bulk_exp,
         tcga_exp=tcga_exp,
         gene_list=gene_list,
-        result_dir=current_result_dir,
-        n_components=2,
+        result_dir=str(current_result_dir),
         simu_dataset_name=dataset_name,
-        pca_model_name_postfix=config.gene_list_type,
-        pca_model_file_path=pca_model_fp,
-        pca_data_file_path=pca_data_fp,
-        h5ad_file_path=filtered_file_path,
+        n_components=resolved_params.pca_n_components,
+        pca_model_name_postfix=resolved_params.filtering_type,
+        pca_model_file_path=str(pca_model_fp),
+        pca_data_file_path=str(pca_data_fp),
+        h5ad_file_path=str(filtered_h5ad_file) if filtered_h5ad_file is not None else None,
         cell_frac_file=bulk_exp_cell_frac,
-        figsize=(5, 5)
+        figsize=resolved_params.pca_figsize,
+        if_plot_pca=resolved_params.plot_pca,
     )
+    outputs.update(
+        {
+            "filtered_bulk_gep_file": str(filtered_h5ad_file) if filtered_h5ad_file is not None else None,
+            "gene_list_file": str(gene_list_file_path),
+            "corr_result_file": str(corr_result_fp),
+            "pca_model_file": str(pca_model_fp) if resolved_params.plot_pca else None,
+            "pca_data_file": str(pca_data_fp) if resolved_params.plot_pca else None,
+        }
+    )
+    return outputs
+
+
+def _get_h5ad_shape(file_path: str | Path | None) -> tuple[int, int] | None:
+    if file_path in (None, ""):
+        return None
+    file_path = Path(file_path)
+    if not file_path.exists():
+        return None
+    h5ad_obj = ReadH5AD(str(file_path)).get_h5ad()
+    return int(h5ad_obj.shape[0]), int(h5ad_obj.shape[1])
+
+
+def _build_mixed_dataset_summary(
+    dataset_name: str,
+    generated_bulk_gep_fp: str | Path,
+    generated_cell_fraction_fp: str | Path,
+    gep_filtering: ResolvedGEPFilteringParams,
+    gene_filtering: ResolvedGeneFilteringParams,
+    postprocess_outputs: Dict[str, str | None],
+) -> Path:
+    summary_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+    check_dir(summary_dir)
+    generated_shape = _get_h5ad_shape(generated_bulk_gep_fp)
+    filtered_shape = _get_h5ad_shape(postprocess_outputs.get("filtered_bulk_gep_file"))
+    gene_list_file = postprocess_outputs.get("gene_list_file")
+    filtered_gene_count = None
+    if gene_list_file and Path(gene_list_file).exists():
+        filtered_gene_count = len(_read_gene_list_file(gene_list_file))
+    summary = {
+        "dataset_name": dataset_name,
+        "dataset_type": "Mixed",
+        "generated_bulk_gep_file": str(generated_bulk_gep_fp),
+        "generated_cell_fraction_file": str(generated_cell_fraction_fp),
+        "generated_n_samples": generated_shape[0] if generated_shape else None,
+        "generated_n_genes": generated_shape[1] if generated_shape else None,
+        "gep_filtering_enabled": gep_filtering.enabled,
+        "gep_filtering_method": gep_filtering.filtering_method if gep_filtering.enabled else None,
+        "gene_filtering_enabled": gene_filtering.enabled,
+        "gene_filtering_type": gene_filtering.filtering_type if gene_filtering.enabled else None,
+        "filtered_bulk_gep_file": postprocess_outputs.get("filtered_bulk_gep_file"),
+        "filtered_n_samples": filtered_shape[0] if filtered_shape else None,
+        "filtered_n_genes": filtered_shape[1] if filtered_shape else None,
+        "filtered_gene_count": filtered_gene_count,
+        "gene_list_file": gene_list_file,
+        "pca_model_file": postprocess_outputs.get("pca_model_file"),
+        "pca_data_file": postprocess_outputs.get("pca_data_file"),
+    }
+    summary_path = summary_dir / "mixed_dataset_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return summary_path
 
 
 def _run_sample_diversity_for_sct_dataset(
@@ -1071,7 +1513,18 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
 
         check_dir(result_dir)
         assert n_components >= 2, 'n_components must be >= 2'
-        if not os.path.exists(pca_data_file_path):
+        reuse_existing_pca = (
+            pca_data_file_path is not None and
+            pca_model_file_path is not None and
+            os.path.exists(pca_data_file_path) and
+            os.path.exists(pca_model_file_path)
+        )
+        if not reuse_existing_pca:
+            if pca_data_file_path is not None and os.path.exists(pca_data_file_path):
+                logging.info(
+                    'PCA data exists without a reusable PCA model; recomputing PCA artifacts for %s.',
+                    simu_dataset_name,
+                )
             # combine both simulated bulk cell GEPs and TCGA dataset together
             simu_bulk_with_tcga = pd.concat([bulk_exp, tcga_exp])
             pca_model = do_pca_analysis(exp_df=simu_bulk_with_tcga, n_components=n_components,
@@ -1081,7 +1534,8 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
                 pca_df = pd.DataFrame(pcs[:, range(3)], index=simu_bulk_with_tcga.index, columns=['PC1', 'PC2', 'PC3'])
             else:
                 pca_df = pd.DataFrame(pcs[:, range(2)], index=simu_bulk_with_tcga.index, columns=['PC1', 'PC2'])
-            pca_df.to_csv(pca_data_file_path)
+            if pca_data_file_path is not None:
+                pca_df.to_csv(pca_data_file_path)
         else:
             logging.info(f'{pca_data_file_path} already exists, skip PCA analysis')
             pca_df = pd.read_csv(pca_data_file_path, index_col=0)

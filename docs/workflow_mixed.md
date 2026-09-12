@@ -19,7 +19,8 @@ ground-truth cell fractions.
 6. Compose mixed bulk GEPs.
 7. Save cell-fraction, CSV, and `.h5ad` outputs.
 8. Save cell-fraction distribution outputs for the dataset.
-9. Optionally apply filtering and PCA-based validation.
+9. Optionally apply GEP-level filtering during generation.
+10. Optionally apply gene-level filtering and PCA-based validation after generation.
 
 The visual summary is shown below.
 
@@ -41,24 +42,50 @@ The visual summary is shown below.
 ### Dataset-level fields
 
 - `dataset_type: "Mixed"`
+- `sampling_method_gep`
 - `n_samples`
 - `sampling_method_prop`
-- `filtering`
+- `gep_filtering`
+- `gene_filtering`
 
 ### Common optional dataset-level fields
 
 - `sct_reference`
-- `sampling_method_gep`
 - `filtering_ref_types`
 - `cell_prop_prior`
 - `filtering_in_pca_space`
+- `gep_filtering_method`
+- `gep_filtering_quantile`
+- `gep_filtering_reference_file`
+- `gep_high_corr_gene_list_file`
+- `gep_filtering_by_gene_range`
+- `gep_min_percentage_within_gene_range`
+- `gep_gene_quantile_range`
+- `gep_pca_n_components`
+- `gep_norm_ord`
+- `gep_n_top`
+- `gep_show_filtering_info`
+- `gene_filtering_type`
+- `gene_filtering_reference_file`
+- `gene_filtering_high_corr_gene_file`
+- `gene_filtering_corr_threshold`
+- `gene_filtering_n_gene_max`
+- `gene_filtering_quantile_range`
+- `gene_filtering_q_col_name`
+- `gene_filtering_plot_pca`
+- `gene_filtering_pca_n_components`
+- `gene_filtering_pca_figsize`
 - `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
 - `pred_cell_prop_file_path` for `sampling_method_prop: "dirichlet"`
+
+The old Mixed-dataset key `filtering` is no longer supported. Use
+`gep_filtering` for GEP-level filtering instead.
 
 ## Reference Source Used By Mixed Simulation
 
 Mixed simulation now requires an explicit `sct_reference` block in each Mixed
-dataset entry.
+dataset entry, plus an explicit `sampling_method_gep` value in the Mixed dataset
+itself.
 
 Supported modes:
 
@@ -86,6 +113,10 @@ For `source_type: "generated_dataset"`, `version` must be one of:
 
 For `source_type: "path"`, SimuTME uses `file_path` directly and does not infer
 another SCT path from it.
+
+SimuTME also does not infer `sampling_method_gep` from the SCT filename.
+Provide it explicitly as either `random` or `n_neighbors` in every Mixed
+dataset entry.
 
 This removes the previous implicit behavior where Mixed simulation depended on
 the last in-memory SCT path update.
@@ -143,15 +174,89 @@ Dataset-local diagnostic outputs under:
 
 ## Optional Filtering And PCA Outputs
 
-If `filtering: true`, the workflow may additionally generate:
+Mixed filtering is now split into two explicit stages:
+
+1. GEP-level filtering
+
+- Controlled primarily by dataset-level `gep_filtering`
+- Runs inside Mixed bulk generation
+- Uses the `gep_*` parameter family plus the existing `filtering_ref_types`
+  and legacy `filtering_in_pca_space` override
+
+2. gene-level filtering
+
+- Controlled by dataset-level `gene_filtering`
+- Runs after the Mixed `.h5ad` is generated
+- Uses the `gene_filtering_*` parameter family
+
+When gene-level filtering is enabled, the workflow may generate:
 
 - filtered `.h5ad` files
 - filtered gene lists
+- gene/cell-fraction correlation tables
 - PCA model files
 - PCA-transformed data tables
 - PCA plots comparing simulated bulk data with TCGA reference samples
+- dataset-level summary JSON files
 
-These outputs are created by the post-processing stage in the workflow.
+These artifacts are written under the dataset-local directory:
+
+`<mixed_output_dir>/<dataset_name>/`
+
+Typical files include:
+
+- `gene_list_filtered_by_<gene_filtering_type>.csv`
+- `gene_corr_with_cell_fraction.csv`
+- `both_TCGA_and_simu_<dataset_name>_PCA_<gene_filtering_type>.joblib`
+- `<dataset_name>_PCA_with_TCGA_<gene_filtering_type>.csv`
+- `<dataset_name>_PCA_with_TCGA_<gene_filtering_type>_PC0_PC1.png`
+- `mixed_dataset_summary.json`
+
+The filtered `.h5ad` is written beside the original Mixed `.h5ad` using either
+the configured `gene_filtering_filtered_dataset_postfix` or the default
+`filtered_by_<gene_filtering_type>` suffix.
+
+## Global Defaults And Dataset Overrides
+
+Global filtering defaults live under `parameters`:
+
+- `gep_filtering_enabled_default`
+- `gep_filtering_reference_file`
+- `gep_filtering_ref_exp_type`
+- `gep_filtering_method`
+- `gep_filtering_quantile`
+- `gep_n_top`
+- `gep_show_filtering_info`
+- `gep_filtering_by_gene_range`
+- `gep_min_percentage_within_gene_range`
+- `gep_gene_quantile_range`
+- `gep_filtering_in_pca_space`
+- `gep_pca_n_components`
+- `gep_norm_ord`
+- `gep_high_corr_gene_list_file`
+- `gene_filtering_enabled_default`
+- `gene_filtering_reference_file`
+- `gene_filtering_type`
+- `gene_filtering_quantile_range`
+- `gene_filtering_q_col_name`
+- `gene_filtering_corr_threshold`
+- `gene_filtering_n_gene_max`
+- `gene_filtering_high_corr_gene_file`
+- `gene_filtering_save_filtered_h5ad`
+- `gene_filtering_filtered_dataset_postfix`
+- `gene_filtering_plot_pca`
+- `gene_filtering_pca_n_components`
+- `gene_filtering_pca_figsize`
+
+Mixed datasets may override these defaults with the flat dataset-level fields
+listed above.
+
+For backward compatibility, older global fields still work:
+
+- `gene_list_type` maps to `gene_filtering_type`
+- `gene_quantile_range` still feeds quantile-based filtering
+- `pca_n_components` still feeds GEP-level PCA filtering defaults
+- `gene_filtering` is independent from `gep_filtering`
 
 ## When To Use This Workflow
 
