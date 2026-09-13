@@ -30,7 +30,11 @@ This package lets you:
 
 ## Installation
 
-SimuTME requires Python 3.12.
+SimuTME requires Python 3.11 or later.
+
+Its dependency stack is aligned with
+[VAEDecon](https://github.com/OnlyBelter/VAEDecon), so SimuTME can be
+installed in the same environment as VAEDecon.
 
 From source:
 
