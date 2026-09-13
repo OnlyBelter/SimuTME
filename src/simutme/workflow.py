@@ -475,6 +475,19 @@ def _resolve_optional_path_value(value: Any) -> str | None:
     return str(value)
 
 
+def _resolve_dataset_override(
+    params: Dict[str, Any],
+    config: SimuConfig,
+    field_name: str,
+    default: Any = None,
+) -> Any:
+    if field_name in params:
+        return params[field_name]
+    if hasattr(config, field_name):
+        return getattr(config, field_name)
+    return default
+
+
 def _read_gene_list_file(file_path: str | Path) -> List[str]:
     gene_df = pd.read_csv(file_path)
     if "gene_name" in gene_df.columns:
@@ -553,17 +566,17 @@ def _resolve_gep_filtering_params(
     params: Dict[str, Any],
     config: SimuConfig,
 ) -> ResolvedGEPFilteringParams:
-    enabled = bool(params.get("gep_filtering", config.gep_filtering_enabled_default))
+    enabled = bool(_resolve_dataset_override(params, config, "gep_filtering", config.gep_filtering_enabled_default))
     reference_file = _resolve_optional_path_value(
-        params.get("gep_filtering_reference_file", config.gep_filtering_reference_file)
+        _resolve_dataset_override(params, config, "gep_filtering_reference_file", config.gep_filtering_reference_file)
     ) or str(config.tcga_merged_tpm_file_path)
-    ref_exp_type = params.get("gep_filtering_ref_exp_type", config.gep_filtering_ref_exp_type) or "TPM"
+    ref_exp_type = _resolve_dataset_override(params, config, "gep_filtering_ref_exp_type", config.gep_filtering_ref_exp_type) or "TPM"
     filtering_ref_types = _resolve_filtering_ref_types(
         params.get("filtering_ref_types", None),
         config=config,
         context=f'Mixed dataset "{dataset_name}"',
     )
-    quantile = params.get("gep_filtering_quantile", config.gep_filtering_quantile)
+    quantile = _resolve_dataset_override(params, config, "gep_filtering_quantile", config.gep_filtering_quantile)
     if quantile in (None, ""):
         quantile = (None, 0.95)
     quantile = tuple(
@@ -594,31 +607,35 @@ def _resolve_gep_filtering_params(
         enabled=enabled,
         reference_file=reference_file,
         ref_exp_type=str(ref_exp_type) if ref_exp_type is not None else None,
-        filtering_method=str(params.get("gep_filtering_method", config.gep_filtering_method)),
+        filtering_method=str(_resolve_dataset_override(params, config, "gep_filtering_method", config.gep_filtering_method)),
         filtering_ref_types=filtering_ref_types,
         gep_filtering_quantile=quantile,
-        n_top=int(params.get("gep_n_top", config.gep_n_top if hasattr(config, "gep_n_top") else 20)),
-        show_filtering_info=bool(params.get("gep_show_filtering_info", config.gep_show_filtering_info)),
+        n_top=int(_resolve_dataset_override(params, config, "gep_n_top", config.gep_n_top if hasattr(config, "gep_n_top") else 20)),
+        show_filtering_info=bool(_resolve_dataset_override(params, config, "gep_show_filtering_info", config.gep_show_filtering_info)),
         filtering_by_gene_range=bool(
-            params.get("gep_filtering_by_gene_range", config.gep_filtering_by_gene_range)
+            _resolve_dataset_override(params, config, "gep_filtering_by_gene_range", config.gep_filtering_by_gene_range)
         ),
         min_percentage_within_gene_range=float(
-            params.get(
+            _resolve_dataset_override(
+                params,
+                config,
                 "gep_min_percentage_within_gene_range",
                 config.gep_min_percentage_within_gene_range,
             )
         ),
         gene_quantile_range=gene_quantile_range,
         filtering_in_pca_space=bool(
-            params.get(
+            _resolve_dataset_override(
+                params,
+                config,
                 "gep_filtering_in_pca_space",
                 params.get("filtering_in_pca_space", config.gep_filtering_in_pca_space),
             )
         ),
         pca_n_components=_parse_pca_component_value(
-            params.get("gep_pca_n_components", config.gep_pca_n_components)
+            _resolve_dataset_override(params, config, "gep_pca_n_components", config.gep_pca_n_components)
         ),
-        norm_ord=int(params.get("gep_norm_ord", config.gep_norm_ord)),
+        norm_ord=int(_resolve_dataset_override(params, config, "gep_norm_ord", config.gep_norm_ord)),
         high_corr_gene_list_file=high_corr_gene_list_file,
         high_corr_gene_list=high_corr_gene_list,
     )
@@ -643,16 +660,16 @@ def _resolve_gene_filtering_params(
     params: Dict[str, Any],
     config: SimuConfig,
 ) -> ResolvedGeneFilteringParams:
-    enabled = bool(params.get("gene_filtering", config.gene_filtering_enabled_default))
+    enabled = bool(_resolve_dataset_override(params, config, "gene_filtering", config.gene_filtering_enabled_default))
     quantile_range = _resolve_quantile_triplet(
-        params.get("gene_filtering_quantile_range", config.gene_filtering_quantile_range),
+        _resolve_dataset_override(params, config, "gene_filtering_quantile_range", config.gene_filtering_quantile_range),
         "gene_filtering_quantile_range",
     )
-    filtering_type = str(params.get("gene_filtering_type", config.gene_filtering_type or config.gene_list_type))
+    filtering_type = str(_resolve_dataset_override(params, config, "gene_filtering_type", config.gene_filtering_type or config.gene_list_type))
     if quantile_range is None and "quantile_range" in filtering_type:
         quantile_range = _resolve_quantile_triplet(config.gene_quantile_range, "gene_quantile_range")
     q_col_name = _resolve_quantile_col_names(
-        params.get("gene_filtering_q_col_name", config.gene_filtering_q_col_name),
+        _resolve_dataset_override(params, config, "gene_filtering_q_col_name", config.gene_filtering_q_col_name),
         quantile_range,
         "gene_filtering_q_col_name",
     )
@@ -662,28 +679,30 @@ def _resolve_gene_filtering_params(
     resolved = ResolvedGeneFilteringParams(
         enabled=enabled,
         reference_file=_resolve_optional_path_value(
-            params.get("gene_filtering_reference_file", config.gene_filtering_reference_file)
+            _resolve_dataset_override(params, config, "gene_filtering_reference_file", config.gene_filtering_reference_file)
         ) or str(config.tcga_merged_tpm_file_path),
         filtering_type=filtering_type,
         quantile_range=quantile_range,
         q_col_name=q_col_name,
-        corr_threshold=float(params.get("gene_filtering_corr_threshold", config.gene_filtering_corr_threshold)),
-        n_gene_max=int(params.get("gene_filtering_n_gene_max", config.gene_filtering_n_gene_max)),
+        corr_threshold=float(_resolve_dataset_override(params, config, "gene_filtering_corr_threshold", config.gene_filtering_corr_threshold)),
+        n_gene_max=int(_resolve_dataset_override(params, config, "gene_filtering_n_gene_max", config.gene_filtering_n_gene_max)),
         high_corr_gene_file=high_corr_gene_file,
         save_filtered_h5ad=bool(
-            params.get("gene_filtering_save_filtered_h5ad", config.gene_filtering_save_filtered_h5ad)
+            _resolve_dataset_override(params, config, "gene_filtering_save_filtered_h5ad", config.gene_filtering_save_filtered_h5ad)
         ),
-        filtered_dataset_postfix=params.get(
+        filtered_dataset_postfix=_resolve_dataset_override(
+            params,
+            config,
             "gene_filtering_filtered_dataset_postfix",
             config.gene_filtering_filtered_dataset_postfix,
         ),
-        plot_pca=bool(params.get("gene_filtering_plot_pca", config.gene_filtering_plot_pca)),
+        plot_pca=bool(_resolve_dataset_override(params, config, "gene_filtering_plot_pca", config.gene_filtering_plot_pca)),
         pca_n_components=int(
-            params.get("gene_filtering_pca_n_components", config.gene_filtering_pca_n_components)
+            _resolve_dataset_override(params, config, "gene_filtering_pca_n_components", config.gene_filtering_pca_n_components)
         ),
         pca_figsize=tuple(
             float(v)
-            for v in params.get("gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
+            for v in _resolve_dataset_override(params, config, "gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
         ),
     )
     if len(resolved.pca_figsize) != 2:
@@ -881,6 +900,18 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
         )
+        resolved_cell_type2subtypes = _resolve_dataset_override(
+            params,
+            config,
+            "cell_type2subtypes",
+            config.cell_type2subtypes,
+        )
+        resolved_total_rna_coefficient = _resolve_dataset_override(
+            params,
+            config,
+            "total_rna_coefficient",
+            config.total_rna_coefficient,
+        )
         resolved_gep_filtering = _resolve_gep_filtering_params(
             dataset_name=dataset_name,
             params=params,
@@ -915,7 +946,7 @@ def run_bulk_simulation(dataset_name: str,
         else:
             resolved_dirichlet_alpha = params.get(
                 'dirichlet_alpha',
-                get_default_dirichlet_alpha(params.get('cell_type2subtypes', config.cell_type2subtypes)),
+                get_default_dirichlet_alpha(resolved_cell_type2subtypes),
             )
             pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
         if not 'sampling_method_gep' in params:
@@ -929,7 +960,7 @@ def run_bulk_simulation(dataset_name: str,
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
-            cell_type2subtype=params.get('cell_type2subtypes', config.cell_type2subtypes),
+            cell_type2subtype=resolved_cell_type2subtypes,
             sc_dataset_ids=config.sc_dataset_ids,
             stratify_by_dataset=resolved_stratify,
             stratify_seed=config.sorted_bulk_imputation_seed,
@@ -937,7 +968,7 @@ def run_bulk_simulation(dataset_name: str,
             sct_dataset_file_path=resolved_sct_dataset_file_path,
             check_basic_info=False,
             tcga2cancer_type_file_path=config.tcga2cancer_type_file_path,
-            total_rna_coefficient=config.total_rna_coefficient,
+            total_rna_coefficient=resolved_total_rna_coefficient,
             cell_type_col_name='cell_type',
             subtype_col_name='cell_type',
             sampling_method_gep=sampling_method_gep,

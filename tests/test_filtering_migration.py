@@ -100,6 +100,31 @@ def test_resolve_gene_filtering_params_uses_explicit_gene_filtering_switch(tmp_p
     assert resolved.high_corr_gene_file == str(config.high_corr_gene_file_path)
 
 
+def test_resolve_gene_filtering_params_prefers_dataset_overrides_over_global_defaults(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.gene_filtering_corr_threshold = 0.2
+    config.gene_filtering_n_gene_max = 1600
+    config.gene_filtering_plot_pca = False
+    config.gene_filtering_pca_figsize = (5.0, 5.0)
+
+    resolved = _resolve_gene_filtering_params(
+        dataset_name="Mixed_Test",
+        params={
+            "gene_filtering": True,
+            "gene_filtering_corr_threshold": 0.15,
+            "gene_filtering_n_gene_max": 2000,
+            "gene_filtering_plot_pca": True,
+            "gene_filtering_pca_figsize": [6, 4],
+        },
+        config=config,
+    )
+
+    assert resolved.corr_threshold == 0.15
+    assert resolved.n_gene_max == 2000
+    assert resolved.plot_pca is True
+    assert resolved.pca_figsize == (6.0, 4.0)
+
+
 def test_resolve_gene_filtering_params_validates_pca_components(tmp_path: Path):
     config = _make_filtering_config(tmp_path)
 

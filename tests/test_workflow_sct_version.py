@@ -449,3 +449,92 @@ def test_run_bulk_simulation_rejects_legacy_filtering_key_for_mixed(tmp_path: Pa
             },
             config=config,
         )
+
+
+def test_run_bulk_simulation_mixed_prefers_dataset_total_rna_coefficient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    sct_path = tmp_path / "toy_sct.h5ad"
+    sct_path.write_text("placeholder", encoding="utf-8")
+
+    tcga_path = tmp_path / "tcga.csv"
+    tcga_path.write_text("sample_id,G1,G2\ns1,1,2\n", encoding="utf-8")
+    tcga2type_path = tmp_path / "tcga2type.csv"
+    tcga2type_path.write_text("sample_id,cancer_type\ns1,LUAD\n", encoding="utf-8")
+    high_corr_path = tmp_path / "high_corr.csv"
+    high_corr_path.write_text("gene_name\nG1\n", encoding="utf-8")
+
+    config = SimpleNamespace(
+        simu_bulk_dir=tmp_path / "simu_bulk",
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2"],
+        stratify_by_dataset="none",
+        _dataset_definitions={"Mixed_Test": {"dataset_type": "Mixed"}},
+        _dataset_order=["Mixed_Test"],
+        _generated_sct_outputs={},
+        merged_sc_dataset_file_path=tmp_path / "merged_sc.h5ad",
+        tcga2cancer_type_file_path=tcga2type_path,
+        tcga_merged_tpm_file_path=tcga_path,
+        high_corr_gene_file_path=high_corr_path,
+        sorted_bulk_imputation_seed=123,
+        cell_type2subtypes={"B Cells": ["B Cells"]},
+        total_rna_coefficient={"B Cells": 1.0},
+        gep_filtering_enabled_default=False,
+        gep_filtering_reference_file=None,
+        gep_filtering_ref_exp_type=None,
+        gep_filtering_quantile=(0.0, 0.95),
+        gep_filtering_method="median_gep",
+        gep_n_top=20,
+        gep_show_filtering_info=False,
+        gep_filtering_by_gene_range=False,
+        gep_min_percentage_within_gene_range=0.95,
+        gep_gene_quantile_range=None,
+        gene_quantile_range=[0.005, 0.5, 0.995],
+        gep_filtering_in_pca_space=True,
+        gep_pca_n_components=0.9,
+        gep_norm_ord=1,
+        gene_filtering_enabled_default=False,
+        gene_filtering_reference_file=None,
+        gene_filtering_type="all_genes",
+        gene_list_type="all_genes",
+        gene_filtering_quantile_range=None,
+        gene_filtering_q_col_name=None,
+        gene_filtering_corr_threshold=0.3,
+        gene_filtering_n_gene_max=1000,
+        gene_filtering_save_filtered_h5ad=True,
+        gene_filtering_filtered_dataset_postfix=None,
+        gene_filtering_plot_pca=True,
+        gene_filtering_pca_n_components=2,
+        gene_filtering_pca_figsize=(5.0, 5.0),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeBulkGEPGenerator:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.generated_bulk_gep_fp = tmp_path / "existing_bulk.h5ad"
+            self.generated_bulk_gep_fp.write_text("placeholder", encoding="utf-8")
+            self.generated_cell_fraction_fp = tmp_path / "cell_fractions.csv"
+            self.generated_cell_fraction_fp.write_text("sample_id\n", encoding="utf-8")
+
+    monkeypatch.setattr("simutme.workflow.BulkGEPGenerator", FakeBulkGEPGenerator)
+    monkeypatch.setattr("simutme.workflow._save_cancer_cell_fraction_distribution", lambda **kwargs: None)
+    monkeypatch.setattr("simutme.workflow._run_gene_filtering_postprocess", lambda **kwargs: {})
+    monkeypatch.setattr("simutme.workflow._build_mixed_dataset_summary", lambda **kwargs: None)
+
+    run_bulk_simulation(
+        dataset_name="Mixed_Test",
+        params={
+            "dataset_type": "Mixed",
+            "sct_reference": {
+                "source_type": "path",
+                "file_path": str(sct_path),
+            },
+            "n_samples": 10,
+            "sampling_method_prop": "segment",
+            "sampling_method_gep": "random",
+            "total_rna_coefficient": {"B Cells": 2.5},
+        },
+        config=config,
+    )
+
+    assert captured["total_rna_coefficient"] == {"B Cells": 2.5}
