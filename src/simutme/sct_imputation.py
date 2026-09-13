@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .utility.pub_func import MAX_LOG2_TPM
+
 
 def _detect_delimiter(file_path: Path) -> str:
     sample = file_path.read_text(encoding="utf-8", errors="replace")[:8192]
@@ -45,17 +47,29 @@ def _infer_sct_cell_types(obs: pd.DataFrame, mapping_df: pd.DataFrame) -> pd.Ser
 
 
 def _log2cpm1p_to_tpm(x: np.ndarray) -> np.ndarray:
-    return np.exp2(x) - 1.0
+    values = np.asarray(x, dtype=np.float64)
+    values = np.clip(values, None, MAX_LOG2_TPM)
+    return (np.exp2(values) - 1.0).astype(np.float32, copy=False)
 
 
 def _tpm_to_log2cpm1p(tpm: np.ndarray) -> np.ndarray:
-    return np.log2(tpm + 1.0)
+    values = np.asarray(tpm, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError('Encountered non-finite TPM values before log2(TPM+1) conversion.')
+    if np.any(values < 0):
+        raise ValueError('Encountered negative TPM values before log2(TPM+1) conversion.')
+    return np.clip(np.log2(values + 1.0), None, MAX_LOG2_TPM).astype(np.float32, copy=False)
 
 
 def _row_normalize_to_1e6(x: np.ndarray) -> np.ndarray:
-    lib = x.sum(axis=1, keepdims=True)
+    values = np.asarray(x, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError('Encountered non-finite values before row normalization to 1e6.')
+    if np.any(values < 0):
+        raise ValueError('Encountered negative values before row normalization to 1e6.')
+    lib = values.sum(axis=1, keepdims=True, dtype=np.float64)
     lib[lib == 0] = 1.0
-    return (x / lib) * 1e6
+    return ((values / lib) * 1e6).astype(np.float32, copy=False)
 
 
 @dataclass(frozen=True)
@@ -443,15 +457,26 @@ def _assign_nearest_bulk_samples_for_sct_cells(
             assigned[rows] = int(choices[0])
             continue
 
-        candidate_tpm = bulk_tpm[choices, :].astype(np.float32, copy=False)
-        candidate_sq = np.einsum("ij,ij->i", candidate_tpm, candidate_tpm).astype(np.float32, copy=False)
+        candidate_tpm = bulk_tpm[choices, :].astype(np.float64, copy=False)
+        candidate_sq = np.einsum("ij,ij->i", candidate_tpm, candidate_tpm)
         for start in range(0, rows.size, batch_size):
             batch_rows = rows[start:start + batch_size]
             sct_tpm = _row_normalize_to_1e6(
-                _log2cpm1p_to_tpm(x_log2cpm1p[batch_rows, :].astype(np.float32, copy=False))
-            ).astype(np.float32, copy=False)
-            sct_sq = np.einsum("ij,ij->i", sct_tpm, sct_tpm).astype(np.float32, copy=False)
-            dot = sct_tpm @ candidate_tpm.T
+                _log2cpm1p_to_tpm(x_log2cpm1p[batch_rows, :].astype(np.float64, copy=False))
+            ).astype(np.float64, copy=False)
+            if not np.isfinite(sct_tpm).all():
+                raise ValueError(f'Encountered non-finite SCT TPM values while matching donors for cell type {sct_ct!r}.')
+            if not np.isfinite(candidate_tpm).all():
+                raise ValueError(f'Encountered non-finite bulk TPM values while matching donors for cell type {sct_ct!r}.')
+            sct_sq = np.einsum("ij,ij->i", sct_tpm, sct_tpm)
+            with np.errstate(over='raise', invalid='raise'):
+                try:
+                    dot = np.einsum("ij,kj->ik", sct_tpm, candidate_tpm, dtype=np.float64, optimize=True)
+                except FloatingPointError as exc:
+                    raise ValueError(
+                        f'Failed donor matching for SCT cell type {sct_ct!r} because the TPM matrix contains '
+                        'extreme or non-finite values.'
+                    ) from exc
             dist_sq = sct_sq[:, None] + candidate_sq[None, :] - (2.0 * dot)
             np.maximum(dist_sq, 0.0, out=dist_sq)
             nearest_choice = np.argmin(dist_sq, axis=1)

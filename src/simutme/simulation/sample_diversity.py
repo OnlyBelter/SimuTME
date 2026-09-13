@@ -59,10 +59,9 @@ def _compute_gene_variance_table(
     col_sum = np.zeros(n_vars, dtype=np.float64)
     col_sumsq = np.zeros(n_vars, dtype=np.float64)
 
-    x = adata.X
-    for start in range(0, n_obs, int(chunk_size)):
-        end = min(n_obs, start + int(chunk_size))
-        x_chunk = x[start:end, :]
+    # Use AnnData's chunk iterator instead of slicing backed sparse datasets
+    # directly, which can fail during index validation for some h5ad layouts.
+    for x_chunk, _start, _end in adata.chunked_X(int(chunk_size)):
         if sp.issparse(x_chunk):
             col_sum += np.asarray(x_chunk.sum(axis=0)).ravel()
             col_sumsq += np.asarray(x_chunk.multiply(x_chunk).sum(axis=0)).ravel()
@@ -138,13 +137,18 @@ def _compute_distance_to_centroid(
     metric: str,
 ) -> np.ndarray:
     if metric == "cosine":
+        x = np.asarray(x, dtype=np.float64)
+        centroid = np.asarray(centroid, dtype=np.float64)
+        if not np.isfinite(x).all() or not np.isfinite(centroid).all():
+            raise ValueError("Cannot compute centroid distance with non-finite values.")
         centroid_norm = float(np.linalg.norm(centroid))
         if centroid_norm == 0.0:
             raise ValueError("Cannot compute cosine distance with a zero-norm centroid.")
         x_norm = np.linalg.norm(x, axis=1)
         valid = x_norm > 0
         cosine_similarity = np.ones(x.shape[0], dtype=np.float32)
-        cosine_similarity[valid] = (x[valid] @ centroid) / (x_norm[valid] * centroid_norm)
+        dot = np.einsum("ij,j->i", x[valid], centroid, dtype=np.float64, optimize=True)
+        cosine_similarity[valid] = dot / (x_norm[valid] * centroid_norm)
         cosine_similarity = np.clip(cosine_similarity, -1.0, 1.0)
         return 1.0 - cosine_similarity
     if metric == "l2":

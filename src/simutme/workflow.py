@@ -9,7 +9,7 @@ from joblib import load
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any, Literal, Optional
 
-from .utility import do_pca_analysis, plot_pca
+from .utility import do_pca_analysis, plot_pca, safe_pca_transform
 from .utility import cal_corr_gene_exp_with_cell_frac
 # Assuming these are existing imports in your project
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
@@ -1523,7 +1523,11 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
             simu_bulk_with_tcga = pd.concat([bulk_exp, tcga_exp])
             pca_model = do_pca_analysis(exp_df=simu_bulk_with_tcga, n_components=n_components,
                                         pca_result_fp=pca_model_file_path)
-            pcs = pca_model.transform(simu_bulk_with_tcga)
+            pcs = safe_pca_transform(
+                pca_model,
+                simu_bulk_with_tcga,
+                label='Combined simulated bulk and TCGA expression',
+            )
             if n_components >= 3:
                 pca_df = pd.DataFrame(pcs[:, range(3)], index=simu_bulk_with_tcga.index, columns=['PC1', 'PC2', 'PC3'])
             else:
@@ -1585,6 +1589,13 @@ def _run_sorted_bulk_imputation_for_sct_dataset(
     generated_sct_fp = Path(generated_sct_fp)
     output_suffix = params.get("sorted_bulk_imputation_output_suffix", config.sorted_bulk_imputation_output_suffix)
     output_h5ad = _build_sorted_bulk_imputed_sct_path(generated_sct_fp, output_suffix)
+    if output_h5ad.exists():
+        logging.info(
+            "   > Skipping optional sorted-bulk-guided SCT imputation for %s because output already exists: %s",
+            dataset_name,
+            output_h5ad,
+        )
+        return output_h5ad
     out_dir = _resolve_sct_aux_output_dir(
         sct_dataset_file_path=generated_sct_fp,
         dataset_name=dataset_name,

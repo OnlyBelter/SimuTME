@@ -2,6 +2,7 @@ import os
 import csv
 import time
 import logging
+import warnings
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -23,6 +24,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 from ..config import DEFAULT_CELL_TYPES, DEFAULT_CORE_MARKER_GENES
+
+MAX_LOG2_TPM = 20.0
 
 
 def set_fig_style(font_family: str = None, font_size: int = None):
@@ -72,16 +75,31 @@ def log_exp2cpm(exp_df: Union[pd.DataFrame, np.ndarray], log_base: int = 2, corr
     :return: CPM/TPM normalized expression data.
 
     """
+    is_dataframe = isinstance(exp_df, pd.DataFrame)
+    values = exp_df.to_numpy(dtype=np.float64, copy=True) if is_dataframe else np.asarray(exp_df, dtype=np.float64)
+    values = np.clip(values, None, MAX_LOG2_TPM)
+
     # 1. Inverse Log
-    exp = np.power(log_base, exp_df) - correct
+    with np.errstate(over='raise', invalid='raise'):
+        try:
+            exp = np.power(np.float64(log_base), values, dtype=np.float64) - np.float64(correct)
+        except FloatingPointError as exc:
+            raise ValueError(
+                'Failed to convert log-space expression back to CPM/TPM because the input contains '
+                'values that are too large or non-finite.'
+            ) from exc
+
+    if not np.isfinite(exp).all():
+        raise ValueError('Converted CPM/TPM values contain non-finite entries.')
 
     # 2. Normalize
-    if isinstance(exp, pd.DataFrame):
-        cpm = exp.div(exp.sum(axis=1), axis=0) * 1e6
-    else:
-        # Numpy array
-        cpm = exp / exp.sum(axis=1, keepdims=True) * 1e6
+    row_sums = exp.sum(axis=1, keepdims=True, dtype=np.float64)
+    if not np.isfinite(row_sums).all() or np.any(row_sums <= 0):
+        raise ValueError('Converted CPM/TPM values have non-positive or non-finite row sums.')
 
+    cpm = (exp / row_sums * 1e6).astype(np.float32, copy=False)
+    if is_dataframe:
+        return pd.DataFrame(cpm, index=exp_df.index, columns=exp_df.columns)
     return cpm
 
 
@@ -110,7 +128,7 @@ def non_log2log_cpm(input_data: Union[str, pd.DataFrame], result_file_path: str 
     bulk_exp = non_log2cpm(bulk_exp)
 
     # Log transform
-    bulk_exp = np.log2(bulk_exp + correct)
+    bulk_exp = log2_transform(bulk_exp, correct=correct)
 
     # Output
     if result_file_path:
@@ -126,19 +144,42 @@ def non_log2cpm(exp_df: pd.DataFrame, sum_exp: float = 1e6) -> pd.DataFrame:
     :param exp_df: Raw expression DataFrame. Assumes rows are samples, columns are genes.
 
     """
-    return exp_df.div(exp_df.sum(axis=1), axis=0) * sum_exp
+    is_dataframe = isinstance(exp_df, pd.DataFrame)
+    values = exp_df.to_numpy(dtype=np.float64, copy=True) if is_dataframe else np.asarray(exp_df, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError('Expression values contain non-finite entries before CPM/TPM normalization.')
+    if np.any(values < 0):
+        raise ValueError('Expression values contain negative entries before CPM/TPM normalization.')
+
+    row_sums = values.sum(axis=1, keepdims=True, dtype=np.float64)
+    if not np.isfinite(row_sums).all() or np.any(row_sums <= 0):
+        raise ValueError('Expression values have non-positive or non-finite row sums before CPM/TPM normalization.')
+
+    normalized = (values / row_sums * float(sum_exp)).astype(np.float32, copy=False)
+    if is_dataframe:
+        return pd.DataFrame(normalized, index=exp_df.index, columns=exp_df.columns)
+    return normalized
 
 
-def log2_transform(df):
+def log2_transform(df, correct: int = 1):
     """
     log2 transform expression values (plus 1)
     :param df:
     :return:
     """
-    df = df.astype(np.float64)
-    df = np.log2(df + 1)
-    df = df.astype(np.float32)
-    return df
+    is_dataframe = isinstance(df, pd.DataFrame)
+    values = df.to_numpy(dtype=np.float64, copy=True) if is_dataframe else np.asarray(df, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError('Expression values contain non-finite entries before log2 transform.')
+    if np.any(values < -float(correct)):
+        raise ValueError('Expression values contain entries smaller than -correct before log2 transform.')
+
+    values = np.log2(values + float(correct))
+    values = np.clip(values, None, MAX_LOG2_TPM)
+    values = values.astype(np.float32)
+    if is_dataframe:
+        return pd.DataFrame(values, index=df.index, columns=df.columns)
+    return values
 
 
 def read_df(df_file: Union[str, Path, pd.DataFrame, np.ndarray], index_col: Union[str, int] = 0) -> Union[
@@ -501,7 +542,10 @@ def plot_pca(data: pd.DataFrame, result_fp=None, color_code=None, s=5, figsize=(
             if show_legend:
                 # g_legend = ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.2 - 0.1 * n_class), ncol=2)
                 g_legend = ax.legend(loc='best', ncol=2)
-                for _ in g_legend.legendHandles:
+                legend_handles = getattr(g_legend, 'legend_handles', None)
+                if legend_handles is None:
+                    legend_handles = getattr(g_legend, 'legendHandles', [])
+                for _ in legend_handles:
                     _.set_linewidth(1)
             else:
                 ax.legend([], [], frameon=False)
@@ -626,11 +670,50 @@ def do_pca_analysis(exp_df, n_components=5, pca_result_fp=None, save_model: bool
         print(f'Loading PCA result from file: {pca_result_fp}')
         pca = load(pca_result_fp)
     else:
-        pca = PCA(n_components=n_components)
-        pca.fit(exp_df)
+        pca = PCA(n_components=n_components, svd_solver='full')
+        values = exp_df.to_numpy(dtype=np.float64, copy=False) if isinstance(exp_df, pd.DataFrame) else np.asarray(exp_df, dtype=np.float64)
+        if not np.isfinite(values).all():
+            raise ValueError('PCA input contains non-finite values.')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', RuntimeWarning)
+            pca.fit(values)
         if save_model:
             dump(pca, pca_result_fp)
     return pca
+
+
+def safe_pca_transform(pca: PCA, exp_df, label: str = 'PCA input') -> np.ndarray:
+    values = exp_df.to_numpy(dtype=np.float64, copy=False) if isinstance(exp_df, pd.DataFrame) else np.asarray(exp_df, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError(f'{label} contains non-finite values before PCA transform.')
+    if values.ndim != 2:
+        raise ValueError(f'{label} must be a 2D matrix for PCA transform.')
+
+    mean = np.asarray(getattr(pca, 'mean_', None), dtype=np.float64)
+    components = np.asarray(getattr(pca, 'components_', None), dtype=np.float64)
+    if mean.ndim != 1 or components.ndim != 2:
+        raise ValueError('PCA model is missing mean_ or components_ for transform.')
+    if values.shape[1] != components.shape[1]:
+        raise ValueError(
+            f'{label} has {values.shape[1]} features, but the PCA model expects {components.shape[1]}.'
+        )
+
+    centered = values - mean.reshape(1, -1)
+    with np.errstate(over='raise', invalid='raise'):
+        try:
+            projected = np.einsum('ij,kj->ik', centered, components, dtype=np.float64, optimize=True)
+        except FloatingPointError as exc:
+            raise ValueError(f'{label} produced a floating-point error during PCA transform.') from exc
+
+    if getattr(pca, 'whiten', False):
+        scale = np.sqrt(np.asarray(pca.explained_variance_, dtype=np.float64))
+        if not np.isfinite(scale).all() or np.any(scale <= 0):
+            raise ValueError('PCA whitening scale contains non-finite or non-positive values.')
+        projected = projected / scale.reshape(1, -1)
+
+    if not np.isfinite(projected).all():
+        raise ValueError(f'{label} produced non-finite PCA coordinates.')
+    return projected
 
 
 def get_distance_matrices_by_class(

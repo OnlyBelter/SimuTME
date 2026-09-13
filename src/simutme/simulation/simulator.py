@@ -1,5 +1,6 @@
 import os
 import json
+import warnings
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -9,6 +10,7 @@ from pathlib import Path
 from joblib import dump, load
 from dataclasses import dataclass, field
 from sklearn.decomposition import PCA
+from sklearn.exceptions import InconsistentVersionWarning
 from typing import List, Dict, Union, Optional, Tuple, Any
 import logging
 logger = logging.getLogger(__name__)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from ..utility import get_gene_list_filtered_by_quantile_range, get_quantile, check_dir
 from ..utility import ReadExp, ReadH5AD, ExpObj, QueryNeighbors, read_single_cell_type_dataset
-from ..utility import get_available_threads, non_log2cpm, log2_transform, get_cell_num, create_h5ad_dataset, print_msg
+from ..utility import get_available_threads, non_log2cpm, log2_transform, get_cell_num, create_h5ad_dataset, print_msg, safe_pca_transform
 from .sampling import (
     estimate_dirichlet_alpha_from_pred_cell_props,
     flatten_cell_type2subtype,
@@ -226,14 +228,70 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.generated_bulk_gep_csv_fp = self.simu_bulk_dir / f'{prefix}_log2cpm1p.csv'
         self.sampled_sc_cell_id_file_path = self.simu_bulk_dir / f'{prefix}_sampled_sc_cell_id.csv'
         self.generated_bulk_gep_fp = self.generated_bulk_gep_csv_fp.parent / self.generated_bulk_gep_csv_fp.name.replace('.csv', '.h5ad')
+        self._reset_runtime_log_state()
 
         if check_basic_info and not self.generated_bulk_gep_fp.exists():  # Put this checker the last one
             self._check_basic_info()
+
+    def _reset_runtime_log_state(self) -> None:
+        self._logged_total_rna_coefficients = set()
+        self._logged_pca_model_loads = set()
+        self._logged_pca_variance = set()
+
+    @staticmethod
+    def _format_total_rna_coefficient_message(ct2rna_coefficient: Dict[str, float]) -> str:
+        if not ct2rna_coefficient:
+            return 'Total RNA coefficients: none applied.'
+
+        n_cell_types = len(ct2rna_coefficient)
+        non_default = {
+            cell_type: float(value)
+            for cell_type, value in sorted(ct2rna_coefficient.items())
+            if not np.isclose(float(value), 1.0)
+        }
+        if not non_default:
+            return f'Total RNA coefficients: all {n_cell_types} cell types use 1.0.'
+
+        coeff_summary = ', '.join(f'{cell_type}={value:g}' for cell_type, value in non_default.items())
+        return f'Total RNA coefficients: {len(non_default)}/{n_cell_types} non-default ({coeff_summary}).'
+
+    def _maybe_log_total_rna_coefficients(self, ct2rna_coefficient: Dict[str, float]) -> None:
+        if not hasattr(self, '_logged_total_rna_coefficients'):
+            self._reset_runtime_log_state()
+        signature = tuple((cell_type, float(value)) for cell_type, value in sorted(ct2rna_coefficient.items()))
+        if signature in self._logged_total_rna_coefficients:
+            return
+        self._logged_total_rna_coefficients.add(signature)
+        tqdm.write(f'   > {self._format_total_rna_coefficient_message(ct2rna_coefficient)}')
+
+    def _maybe_log_pca_model_loaded(
+        self,
+        pca_model_path: Path,
+        gene_list_in_pca_file_path: Path,
+        n_genes: int,
+    ) -> None:
+        if not hasattr(self, '_logged_pca_model_loads'):
+            self._reset_runtime_log_state()
+        signature = (str(pca_model_path), str(gene_list_in_pca_file_path), int(n_genes))
+        if signature in self._logged_pca_model_loads:
+            return
+        self._logged_pca_model_loads.add(signature)
+        logger.info('PCA model loaded: %s (%d genes).', pca_model_path, n_genes)
+
+    def _maybe_log_pca_variance_summary(self, pca_model_path: Path, n_components: int, explained_variance_pct: float) -> None:
+        if not hasattr(self, '_logged_pca_variance'):
+            self._reset_runtime_log_state()
+        signature = (str(pca_model_path), int(n_components), round(float(explained_variance_pct), 2))
+        if signature in self._logged_pca_variance:
+            return
+        self._logged_pca_variance.add(signature)
+        logger.info('PCA reference space: %d PCs explain %.2f%% variance.', n_components, explained_variance_pct)
 
     def generate_gep(self, config: GEPGenerationConfig) -> None:
         """
         Main method to generate simulated bulk GEPs.
         """
+        self._reset_runtime_log_state()
         self.n_samples = config.n_samples
         self.total_cell_number = config.total_cell_number
         self.filtering_quantile_lower, self.filtering_quantile_upper = config.gep_filtering_quantile
@@ -266,7 +324,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if config.filtering and config.filtering_ref_types:
             s2c = pd.read_csv(self.tcga2cancer_type_file_path, index_col=0)
             sample_id_for_filtering = s2c.loc[s2c['cancer_type'].isin(config.filtering_ref_types)].index.to_list()
-            logger.info(f'{len(sample_id_for_filtering)} samples used for filtering.')
+            if sample_id_for_filtering:
+                logger.info(f'{len(sample_id_for_filtering)} samples used for filtering.')
+            else:
+                logger.warning(
+                    'No TCGA reference samples matched filtering_ref_types=%s; using the full reference cohort.',
+                    config.filtering_ref_types,
+                )
 
         # Main Generation Loop
         dirichlet_alpha = config.dirichlet_alpha
@@ -434,6 +498,26 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         exp_ref_df = None
         exp_obj_ref = None
 
+        def _load_reference_df() -> pd.DataFrame:
+            reference_obj = ExpObj(exp_file=reference_file, exp_type=ref_exp_type)
+            reference_df = reference_obj.get_exp()
+            if sample_id_for_filtering:
+                filtered_ref_df = reference_df.loc[reference_df.index.isin(sample_id_for_filtering)]
+                if filtered_ref_df.empty:
+                    logger.warning(
+                        'No reference samples matched the requested filtering_ref_types; '
+                        'using the full reference cohort instead.'
+                    )
+                else:
+                    reference_df = filtered_ref_df
+            return reference_df
+
+        def _pca_input_matrix(df: pd.DataFrame, label: str) -> np.ndarray:
+            values = df.to_numpy(dtype=np.float64, copy=False)
+            if not np.isfinite(values).all():
+                raise ValueError(f'{label} contains non-finite values before PCA.')
+            return values
+
         # 1. Pre-processing for filtering
         if high_corr_gene_list is not None:
             gene_list_in_sc_ds = high_corr_gene_list
@@ -443,8 +527,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Load Reference if needed
         if self.m_gep_ref is None or filtering_method == 'marker_ratio':
             exp_obj_ref = ExpObj(exp_file=reference_file, exp_type=ref_exp_type)
-            exp_ref_df = exp_obj_ref.get_exp()
-            exp_ref_df = exp_ref_df.loc[exp_ref_df.index.isin(sample_id_for_filtering)]
+            exp_ref_df = _load_reference_df()
 
         # 2. Marker Ratio Filtering
         if filtering_method == 'marker_ratio':
@@ -474,6 +557,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         # 3. Gene Range Filtering
         if filtering_by_gene_range and simulated_gep is not None:
+            if exp_ref_df is None:
+                exp_ref_df = _load_reference_df()
             # if tcga_gene_info is None:
             if gene_quantile_range is None:
                 quantile_range = [0.005, 0.5, 0.995]
@@ -502,6 +587,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
             # PCA Transformation logic
             if filtering_in_pca_space:
+                if exp_ref_df is None:
+                    exp_ref_df = _load_reference_df()
                 # ... (Load or Train PCA model, transform ref and simu GEPs) ...
                 # Note: This block in original code is complex. Ensure gene lists align perfectly.
                 # TODO, this gene list should be the same as the gene list in PCA model, not the gene list in sc_ds
@@ -511,37 +598,68 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 pca_model_path = os.path.join(pca_model_dir, 'tcga_pca_model_for_gep_filtering.pkl')
                 gene_list_in_pca_file_path = os.path.join(pca_model_dir, 'gene_list_for_pca.csv')
                 if os.path.exists(pca_model_path) and os.path.exists(gene_list_in_pca_file_path):
-                    pca_model = load(pca_model_path)
-                    gene_list_in_pca = pd.read_csv(gene_list_in_pca_file_path,
-                                                   index_col='0').index.to_list()
-                    logger.info(f'PCA model was loaded from {pca_model_path}, '
-                          f'and gene list was loaded from {gene_list_in_pca_file_path}')
-                    # align reference GEPs with the gene list in the PCA model
-                    exp_obj_ref = ReadExp(exp_file=exp_ref_df, exp_type=ref_exp_type)
-                    exp_obj_ref.align_with_gene_list(gene_list=gene_list_in_pca, fill_not_exist=True)
-                    exp_ref_df = exp_obj_ref.get_exp()  # TPM
+                    with warnings.catch_warnings(record=True) as caught_warnings:
+                        warnings.simplefilter('always', InconsistentVersionWarning)
+                        pca_model = load(pca_model_path)
+                    version_warning = any(
+                        issubclass(current_warning.category, InconsistentVersionWarning)
+                        for current_warning in caught_warnings
+                    )
+                    if version_warning:
+                        logger.warning(
+                            'Stored PCA model %s was created with a different scikit-learn version; '
+                            'retraining it with the current environment.',
+                            pca_model_path,
+                        )
+                        pca_model = None
+                    else:
+                        gene_list_in_pca = pd.read_csv(gene_list_in_pca_file_path,
+                                                       index_col='0').index.to_list()
+                        self._maybe_log_pca_model_loaded(
+                            pca_model_path=pca_model_path,
+                            gene_list_in_pca_file_path=gene_list_in_pca_file_path,
+                            n_genes=len(gene_list_in_pca),
+                        )
+                        # align reference GEPs with the gene list in the PCA model
+                        exp_obj_ref = ReadExp(exp_file=exp_ref_df, exp_type=ref_exp_type)
+                        exp_obj_ref.align_with_gene_list(gene_list=gene_list_in_pca, fill_not_exist=True)
+                        exp_ref_df = exp_obj_ref.get_exp()  # TPM
                 else:
+                    pca_model = None
+
+                if pca_model is None:
                     pca_model = PCA(n_components=pca_n_components, random_state=42)
                     # using the intersection of gene list in sc_ds and gene list in TCGA
                     gene_list_in_pca = list(set(gene_list_in_sc_ds) & set(exp_ref_df.columns))
                     exp_ref_df = exp_ref_df.loc[:, gene_list_in_pca].copy()
+                    if exp_ref_df.shape[0] == 0:
+                        raise ValueError(
+                            'Reference expression matrix is empty after filtering and cannot be used for PCA.'
+                        )
                     exp_ref_df = non_log2cpm(exp_ref_df)  # TPM
                     exp_ref_df_log = log2_transform(exp_ref_df)  # using log2(TPM+1) for PCA
-                    pca_model.fit(exp_ref_df_log)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('error', RuntimeWarning)
+                        pca_model.fit(_pca_input_matrix(exp_ref_df_log, 'Reference expression matrix'))
                     dump(pca_model, pca_model_path)
                     # save the gene list for PCA
                     pd.DataFrame(gene_list_in_pca).to_csv(gene_list_in_pca_file_path)
+                if exp_ref_df.shape[0] == 0:
+                    raise ValueError('Reference expression matrix is empty after filtering and cannot be used for PCA.')
                 assert np.all(exp_ref_df.columns == gene_list_in_pca)
                 exp_ref_df = log2_transform(exp_ref_df)
-                exp_ref_df = pca_model.transform(exp_ref_df)
+                exp_ref_df = safe_pca_transform(pca_model, exp_ref_df, label='Reference expression matrix')
                 exp_ref_df = pd.DataFrame(exp_ref_df, index=range(exp_ref_df.shape[0]),
                                           columns=range(exp_ref_df.shape[1]))
                 if not os.path.exists(os.path.join(pca_model_dir, 'tcga_pca_ref.csv')):
                     exp_ref_df.to_csv(os.path.join(pca_model_dir, 'tcga_pca_ref.csv'))
                 cumsum = np.cumsum(pca_model.explained_variance_ratio_)
                 d = len(cumsum)
-                logger.info(f'{d} dimensions are needed to explain '
-                      f'{cumsum.max() * 100}% variance.')  # 1515
+                self._maybe_log_pca_variance_summary(
+                    pca_model_path=pca_model_path,
+                    n_components=d,
+                    explained_variance_pct=float(cumsum.max() * 100),
+                )
                 # exp_ref_df = exp_ref_df.iloc[:, :d].copy()
                 # align simulated GEP with the gene list in the PCA model
                 simulated_gep_obj = ReadExp(exp_file=simulated_gep, exp_type='TPM')
@@ -549,7 +667,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 simulated_gep = simulated_gep_obj.get_exp()  # TPM
                 assert np.all(simulated_gep.columns == gene_list_in_pca)
                 simulated_gep = log2_transform(simulated_gep)
-                simulated_gep = pca_model.transform(simulated_gep)
+                simulated_gep = safe_pca_transform(pca_model, simulated_gep, label='Simulated expression matrix')
                 simulated_gep = pd.DataFrame(simulated_gep, index=simulated_gep_bak.index,
                                              columns=range(simulated_gep.shape[1]))
                 # simulated_gep = simulated_gep.iloc[:, :d].copy()
@@ -682,7 +800,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         ct2rna_coefficient[cell_type] = self.total_rna_coefficient[subtype2cell_type[cell_type]]
                     else:
                         ct2rna_coefficient[cell_type] = 1.0
-                print('   > The following total RNA coefficient will be used: ', ct2rna_coefficient)
+                self._maybe_log_total_rna_coefficients(ct2rna_coefficient)
 
             # Group by sample to perform aggregation
             for sample_id, group in selected_cell_id.groupby(level=0):
@@ -692,24 +810,63 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 # Note: This line is memory intensive if cell_ids is large
                 current_merged = sc_ds_df.loc[cell_ids, :].copy()
 
+                # Perform aggregation in float64 to avoid overflow when large TPM
+                # values are combined with RNA scaling coefficients.
+                expression_matrix = current_merged.to_numpy(dtype=np.float64, copy=True)
+
                 # Align cell types
                 _cell_types = group['cell_type'].to_list()
-                current_cell_frac = cell_frac.loc[sample_id, _cell_types].values.reshape(-1, 1)
+                current_cell_frac = cell_frac.loc[sample_id, _cell_types].to_numpy(dtype=np.float64).reshape(-1, 1)
+
+                if not np.isfinite(expression_matrix).all():
+                    raise ValueError(
+                        f'Encountered non-finite single-cell expression values for sample "{sample_id}" '
+                        'before aggregation.'
+                    )
+                if not np.isfinite(current_cell_frac).all():
+                    raise ValueError(
+                        f'Encountered non-finite cell fractions for sample "{sample_id}" before aggregation.'
+                    )
 
                 if self.total_rna_coefficient:
-                    rna_coeffs = np.array([ct2rna_coefficient.get(ct, 1.0) for ct in _cell_types]).reshape(-1, 1)
-                    # Apply coefficient to the expression matrix
-                    current_merged = current_merged * rna_coeffs
+                    rna_coeffs = np.array(
+                        [ct2rna_coefficient.get(ct, 1.0) for ct in _cell_types],
+                        dtype=np.float64,
+                    ).reshape(-1, 1)
+                    expression_matrix *= rna_coeffs
 
-                    # Weighted sum
-                    # (Cells x Genes).T @ (Cells x 1) -> (Genes x 1)
-                    matrix_mul = current_merged.values.T @ current_cell_frac
+                # Weighted sum
+                # Broadcasting the cell fractions across rows is equivalent to
+                # expression_matrix.T @ current_cell_frac, but avoids backend-specific
+                # matmul floating-point warnings seen in some environments.
+                with np.errstate(over='raise', invalid='raise'):
+                    try:
+                        matrix_mul = np.sum(
+                            expression_matrix * current_cell_frac,
+                            axis=0,
+                            dtype=np.float64,
+                        ).reshape(-1, 1)
+                    except FloatingPointError as exc:
+                        raise ValueError(
+                            f'Failed to aggregate expression for sample "{sample_id}" because the '
+                            'expression matrix contains extreme or non-finite values.'
+                        ) from exc
 
+                if not np.isfinite(matrix_mul).all():
+                    raise ValueError(
+                        f'Encountered non-finite aggregated expression for sample "{sample_id}". '
+                        'Please check the single-cell expression scale and total_rna_coefficient values.'
+                    )
+
+                if self.total_rna_coefficient:
                     # Normalize to TPM (1e6)
-                    matrix_mul = matrix_mul / np.sum(matrix_mul) * 1e6
-                else:
-                    # Standard mix
-                    matrix_mul = current_merged.values.T @ current_cell_frac
+                    total_expression = float(np.sum(matrix_mul, dtype=np.float64))
+                    if not np.isfinite(total_expression) or total_expression <= 0:
+                        raise ValueError(
+                            f'Invalid total expression ({total_expression}) for sample "{sample_id}" '
+                            'after RNA coefficient weighting.'
+                        )
+                    matrix_mul = matrix_mul / total_expression * 1e6
 
                 simulated_exp[sample_id] = pd.Series(matrix_mul.flatten(), index=current_merged.columns)
 
