@@ -188,6 +188,7 @@ Mixed filtering is now split into two explicit stages:
 - Controlled by dataset-level `gene_filtering`
 - Runs after the Mixed `.h5ad` is generated
 - Uses the `gene_filtering_*` parameter family
+- Reuses `paths.high_corr_gene_file_path` as the shared fallback high-corr gene list when needed
 
 When gene-level filtering is enabled, the workflow may generate:
 
@@ -233,7 +234,6 @@ Global filtering defaults live under `parameters`:
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
 - `gep_norm_ord`
-- `gep_high_corr_gene_list_file`
 - `gene_filtering_enabled_default`
 - `gene_filtering_reference_file`
 - `gene_filtering_type`
@@ -241,7 +241,6 @@ Global filtering defaults live under `parameters`:
 - `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
-- `gene_filtering_high_corr_gene_file`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`
 - `gene_filtering_plot_pca`

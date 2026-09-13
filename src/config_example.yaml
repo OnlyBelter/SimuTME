@@ -3,7 +3,7 @@ paths:
   simu_bulk_dir: "./datasets/simulated_bulk_cell_dataset"
   tcga2cancer_type_file_path: "path/to/tcga_sample_id2cancer_type.csv"
   tcga_merged_tpm_file_path: "path/to/merged_tpm.csv"
-  high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"
+  high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional shared fallback high-correlation gene list for Mixed filtering; set to null for a clean first run
   merged_sc_dataset_file_path: "path/to/merged_sc_dataset.h5ad"
   sorted_bulk_expr_file_path: "path/to/sorted_bulk_expr.tsv"  # Optional: sorted bulk reference expression matrix for SCT post-imputation
   sorted_bulk_annot_file_path: "path/to/sorted_bulk_annot.tsv"  # Optional: annotation table for the sorted bulk reference
@@ -95,7 +95,6 @@ parameters:
   gep_filtering_in_pca_space: true  # Optional PCA-space distance filtering during Mixed generation
   gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
   gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
-  gep_high_corr_gene_list_file: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional gene list reused during GEP-level filtering
   gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
   gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for post-generation gene filtering; defaults to paths.tcga_merged_tpm_file_path
   gene_filtering_type: "high_corr_gene_and_quantile_range"  # Optional post-generation gene filtering mode; defaults to the legacy `gene_list_type`
@@ -103,7 +102,6 @@ parameters:
   gene_filtering_q_col_name: ["q_0.5", "q_50", "q_99.5"]  # Optional column names paired with the quantile triplet
   gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
-  gene_filtering_high_corr_gene_file: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional precomputed high-correlation gene list reused during post-processing
   gene_filtering_save_filtered_h5ad: true  # Optional switch for writing the filtered Mixed `.h5ad`
   gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming
   gene_filtering_plot_pca: true  # Optional PCA plotting switch for post-generation filtering
@@ -142,9 +140,6 @@ datasets:
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
     apply_sorted_bulk_imputation: true  # Optional post-step; if true, SimuTME records both the original and `_sorted_bulk_imputed` SCT outputs for later explicit Mixed references
     run_sample_diversity_analysis: true  # Optional SCT-only post-step; saves sample-diversity outputs under <output_parent>/<dataset_name>/sample_diversity/
-    filtering: false  # Whether to apply gene filtering and TCGA-guided filtering
-    filtering_ref_types: null
-    cell_prop_prior: null
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

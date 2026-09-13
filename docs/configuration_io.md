@@ -29,7 +29,8 @@ then reads `datasets` separately when executing the workflow.
   TCGA bulk expression matrix used by filtering and PCA-based validation.
 
 - `high_corr_gene_file_path`
-  Gene list used by filtering and post-processing.
+  Optional shared fallback high-correlation gene list used by Mixed
+  filtering and post-processing. Set it to `null` for a clean first run.
 
 ### Optional sorted-bulk-guided SCT imputation paths
 
@@ -108,7 +109,6 @@ Dataset-level Mixed fields can override them.
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
 - `gep_norm_ord`
-- `gep_high_corr_gene_list_file`
 
 #### Gene-level filtering defaults
 
@@ -119,7 +119,6 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
-- `gene_filtering_high_corr_gene_file`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`
 - `gene_filtering_plot_pca`
@@ -233,6 +232,8 @@ For Mixed datasets:
 - `sampling_method_gep` is required and must be set explicitly
 - `gep_filtering` controls GEP-level filtering during Mixed generation
 - `gene_filtering` controls post-generation gene-level filtering
+- `paths.high_corr_gene_file_path` is the shared fallback when a dataset does
+  not provide a filtering-specific high-correlation gene file
 - the old Mixed key `filtering` is no longer supported
 
 ### Mixed `sct_reference` schema

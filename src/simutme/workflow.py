@@ -283,7 +283,7 @@ class SimuConfig:
     simu_bulk_dir: Path
     tcga2cancer_type_file_path: Path
     tcga_merged_tpm_file_path: Path
-    high_corr_gene_file_path: Path
+    high_corr_gene_file_path: Path | None
     merged_sc_dataset_file_path: Path
 
     # Core constants
@@ -310,7 +310,6 @@ class SimuConfig:
     gep_filtering_in_pca_space: bool = True
     gep_pca_n_components: int | float | None = None
     gep_norm_ord: int = 1
-    gep_high_corr_gene_list_file: Path | None = None
     gene_filtering_enabled_default: bool = False
     gene_filtering_reference_file: Path | None = None
     gene_filtering_type: str | None = None
@@ -318,7 +317,6 @@ class SimuConfig:
     gene_filtering_q_col_name: List[str] | None = None
     gene_filtering_corr_threshold: float = 0.3
     gene_filtering_n_gene_max: int = 1000
-    gene_filtering_high_corr_gene_file: Path | None = None
     gene_filtering_save_filtered_h5ad: bool = True
     gene_filtering_filtered_dataset_postfix: str | None = None
     gene_filtering_plot_pca: bool = True
@@ -425,7 +423,7 @@ class SimuConfig:
     def high_corr_genes(self) -> List[str]:
         """Lazy load high correlation genes"""
         if self._high_corr_gene_list is None:
-            if os.path.exists(self.high_corr_gene_file_path):
+            if self.high_corr_gene_file_path and os.path.exists(self.high_corr_gene_file_path):
                 df = pd.read_csv(self.high_corr_gene_file_path)
                 self._high_corr_gene_list = df['gene_name'].to_list()
             else:
@@ -584,9 +582,7 @@ def _resolve_gep_filtering_params(
         ),
         "gep_gene_quantile_range",
     )
-    high_corr_gene_list_file = _resolve_optional_path_value(
-        params.get("gep_high_corr_gene_list_file", config.gep_high_corr_gene_list_file)
-    )
+    high_corr_gene_list_file = _resolve_optional_path_value(params.get("gep_high_corr_gene_list_file"))
     if high_corr_gene_list_file is None and config.high_corr_gene_file_path not in (None, ""):
         high_corr_gene_list_file = str(config.high_corr_gene_file_path)
     high_corr_gene_list = None
@@ -660,9 +656,7 @@ def _resolve_gene_filtering_params(
         quantile_range,
         "gene_filtering_q_col_name",
     )
-    high_corr_gene_file = _resolve_optional_path_value(
-        params.get("gene_filtering_high_corr_gene_file", config.gene_filtering_high_corr_gene_file)
-    )
+    high_corr_gene_file = _resolve_optional_path_value(params.get("gene_filtering_high_corr_gene_file"))
     if high_corr_gene_file is None and config.high_corr_gene_file_path not in (None, ""):
         high_corr_gene_file = str(config.high_corr_gene_file_path)
     resolved = ResolvedGeneFilteringParams(

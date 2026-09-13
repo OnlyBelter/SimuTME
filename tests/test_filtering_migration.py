@@ -50,7 +50,6 @@ def _make_filtering_config(tmp_path: Path):
         gene_filtering_q_col_name=None,
         gene_filtering_corr_threshold=0.3,
         gene_filtering_n_gene_max=1000,
-        gene_filtering_high_corr_gene_file=None,
         gene_filtering_save_filtered_h5ad=True,
         gene_filtering_filtered_dataset_postfix=None,
         gene_filtering_plot_pca=True,
