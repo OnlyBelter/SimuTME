@@ -159,12 +159,22 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         cell_type_col_name: str = 'cell_type',
         output_types: Optional[List[str]] = None,
         sampling_method_gep: str = 'random',
+        mixed_sct_loading_mode: str = "auto",
+        mixed_sct_auto_eager_max_gb: float = 4.0,
     ):
         allowed_stratify = {"none", "balanced_quota"}
         if stratify_by_dataset not in allowed_stratify:
             raise ValueError(
                 f"Invalid stratify_by_dataset={stratify_by_dataset!r}; expected one of {sorted(allowed_stratify)}"
             )
+        allowed_loading_modes = {"auto", "eager", "lazy"}
+        if mixed_sct_loading_mode not in allowed_loading_modes:
+            raise ValueError(
+                f"Invalid mixed_sct_loading_mode={mixed_sct_loading_mode!r}; "
+                f"expected one of {sorted(allowed_loading_modes)}"
+            )
+        if float(mixed_sct_auto_eager_max_gb) <= 0:
+            raise ValueError("mixed_sct_auto_eager_max_gb must be positive")
 
         self.simu_bulk_dir = Path(simu_bulk_dir)
         self.simu_bulk_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +195,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.total_rna_coefficient = total_rna_coefficient
         self.subtype_col_name = subtype_col_name
         self.cell_type_col_name = cell_type_col_name
+        self.mixed_sct_loading_mode = mixed_sct_loading_mode
+        self.mixed_sct_auto_eager_max_gb = float(mixed_sct_auto_eager_max_gb)
 
         # Initialize state variables
         self.cell_type_in_sc = []
@@ -195,6 +207,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.merged_sc_dataset_df = None
         self.sct_dataset_obs = None
         self.sct_dataset_df = None
+        self.sct_dataset_reader = None
         self.generated_sc_dataset_df = None
         self.generated_sc_fp = None
 
@@ -213,6 +226,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.n_round = 0
         self.n_samples = 0
         self.total_cell_number = 0
+        self.gep_filtering_input_n_samples = None
+        self.gep_filtering_kept_n_samples = None
+        self.gep_filtering_removed_n_samples = None
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
@@ -237,6 +253,43 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self._logged_total_rna_coefficients = set()
         self._logged_pca_model_loads = set()
         self._logged_pca_variance = set()
+
+    @staticmethod
+    def _estimate_sct_matrix_bytes(reader: ReadH5AD) -> int:
+        h5ad = reader.get_h5ad()
+        return int(h5ad.n_obs) * int(h5ad.n_vars) * np.dtype(np.float32).itemsize
+
+    def _resolve_sct_loading_mode(self, reader: ReadH5AD) -> str:
+        if self.mixed_sct_loading_mode != "auto":
+            return self.mixed_sct_loading_mode
+        estimated_bytes = self._estimate_sct_matrix_bytes(reader)
+        max_bytes = int(self.mixed_sct_auto_eager_max_gb * (1024 ** 3))
+        return "eager" if estimated_bytes <= max_bytes else "lazy"
+
+    @staticmethod
+    def _close_backed_reader(reader: ReadH5AD) -> None:
+        h5ad = reader.get_h5ad()
+        file_manager = getattr(h5ad, "file", None)
+        if file_manager is not None:
+            file_manager.close()
+
+    def _reset_gep_filtering_stats(self, enabled: bool) -> None:
+        if enabled:
+            self.gep_filtering_input_n_samples = 0
+            self.gep_filtering_kept_n_samples = 0
+            self.gep_filtering_removed_n_samples = 0
+        else:
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+
+    def _record_gep_filtering_counts(self, input_n_samples: int, kept_n_samples: int) -> None:
+        if self.gep_filtering_input_n_samples is None:
+            return
+        removed_n_samples = max(0, int(input_n_samples) - int(kept_n_samples))
+        self.gep_filtering_input_n_samples += int(input_n_samples)
+        self.gep_filtering_kept_n_samples += int(kept_n_samples)
+        self.gep_filtering_removed_n_samples += removed_n_samples
 
     @staticmethod
     def _format_total_rna_coefficient_message(ct2rna_coefficient: Dict[str, float]) -> str:
@@ -292,6 +345,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         Main method to generate simulated bulk GEPs.
         """
         self._reset_runtime_log_state()
+        self._reset_gep_filtering_stats(config.filtering)
         self.n_samples = config.n_samples
         self.total_cell_number = config.total_cell_number
         self.filtering_quantile_lower, self.filtering_quantile_upper = config.gep_filtering_quantile
@@ -383,6 +437,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
                 # 4. Filtering (GEP-level filtering during generation)
                 if config.filtering:
+                    pre_filter_n_samples = int(simulated_gep.shape[0])
                     simulated_gep = self._filter_simulated_geps(
                         simulated_gep=simulated_gep,
                         simulated_gep_bak=simulated_gep_bak,
@@ -400,6 +455,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         norm_ord=config.norm_ord,
                         n_top=config.n_top,
                         show_filtering_info=config.show_filtering_info
+                    )
+                    kept_n_samples = 0 if simulated_gep is None else int(simulated_gep.shape[0])
+                    self._record_gep_filtering_counts(
+                        input_n_samples=pre_filter_n_samples,
+                        kept_n_samples=kept_n_samples,
                     )
 
                 # 5. Save Results
@@ -466,11 +526,34 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         elif simu_method == SimuMethod.MULTIPLY:  # generate multi-cell-type bulk GEPs by matrix multiplication
             self.total_cell_number = 1
-            if (self.sct_dataset_file_path is not None) and (self.sct_dataset_df is None):
-                self.sct_dataset_obs, self.sct_dataset_df = self._read_sct_dataset()
+            if (self.sct_dataset_file_path is not None) and (self.sct_dataset_reader is None):
+                probe_reader = ReadH5AD(self.sct_dataset_file_path, backed='r')
+                resolved_loading_mode = self._resolve_sct_loading_mode(probe_reader)
+                estimated_bytes = self._estimate_sct_matrix_bytes(probe_reader)
+                self._close_backed_reader(probe_reader)
+
+                if resolved_loading_mode == "eager":
+                    self.sct_dataset_obs, self.sct_dataset_df, self.sct_dataset_reader = self._read_sct_dataset(
+                        load_expression=True,
+                        backed=None,
+                    )
+                else:
+                    self.sct_dataset_obs, self.sct_dataset_df, self.sct_dataset_reader = self._read_sct_dataset(
+                        load_expression=False,
+                        backed='r',
+                    )
+                logger.info(
+                    'Using Mixed SCT loading mode "%s" for %s (%d rows x %d genes, estimated %.2f GiB; auto eager threshold %.2f GiB).',
+                    resolved_loading_mode,
+                    self.sct_dataset_file_path,
+                    int(self.sct_dataset_reader.get_h5ad().n_obs),
+                    int(self.sct_dataset_reader.get_h5ad().n_vars),
+                    estimated_bytes / float(1024 ** 3),
+                    self.mixed_sct_auto_eager_max_gb,
+                )
                 sc_dataset = DatasetType.SCT
                 obs_df = self.sct_dataset_obs
-                gene_list = self.sct_dataset_df.columns.to_list()
+                gene_list = self.sct_dataset_reader.get_h5ad().var.index.to_list()
 
         else:
             supported = ", ".join(
@@ -756,12 +839,21 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         Aggregates single-cell expression to bulk.
         """
         # Select source dataframe
+        lazy_sct_reader = None
         if sc_dataset == DatasetType.SCT:
             sc_ds_df = self.sct_dataset_df
+            lazy_sct_reader = self.sct_dataset_reader
         elif sc_dataset == DatasetType.MERGED_SC:
             sc_ds_df = self.merged_sc_dataset_df
         else:
             sc_ds_df = self.generated_sc_dataset_df
+
+        def _get_expression_rows(cell_ids: List[str]) -> pd.DataFrame:
+            if sc_ds_df is not None:
+                return sc_ds_df.loc[cell_ids, :].copy()
+            if lazy_sct_reader is not None:
+                return lazy_sct_reader.get_rows_df(cell_ids, convert_to_tpm=True)
+            raise RuntimeError('Single-cell expression data is not loaded.')
 
         simulated_exp = {}
 
@@ -772,8 +864,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             for cell_type, group in selected_cell_id.groupby('cell_type'):
                 for sample_id, row in group.iterrows():
                     cell_ids = row['selected_cell_id'].split(';')
-                    # simulated_exp[sample_id] = sc_ds_df.loc[cell_ids, :].mean(axis=0)  # average
-                    current_gene_exp = sc_ds_df.loc[cell_ids, :].mean(axis=0)  # average
+                    current_gene_exp = _get_expression_rows(cell_ids).mean(axis=0)
                     if simu_method == 'random_replacement':
                         # long_tail_noise_non_zero = np.random.random(n_non_zero) * 2
                         # n_zero = np.random.randint(n_non_zero/10, n_non_zero)
@@ -802,85 +893,164 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         ct2rna_coefficient[cell_type] = 1.0
                 self._maybe_log_total_rna_coefficients(ct2rna_coefficient)
 
-            # Group by sample to perform aggregation
-            for sample_id, group in selected_cell_id.groupby(level=0):
-                cell_ids = group['selected_cell_id'].to_list()
+            if lazy_sct_reader is not None and not selected_cell_id['selected_cell_id'].astype(str).str.contains(';', regex=False).any():
+                simulated_exp = self._aggregate_lazy_sct_bulk(
+                    selected_cell_id=selected_cell_id,
+                    cell_frac=cell_frac,
+                    ct2rna_coefficient=ct2rna_coefficient,
+                    add_noise=add_noise,
+                    noise_params=noise_params,
+                )
+            else:
+                # Group by sample to perform aggregation
+                for sample_id, group in selected_cell_id.groupby(level=0):
+                    cell_ids = group['selected_cell_id'].to_list()
 
-                # Extract expression for these cells
-                # Note: This line is memory intensive if cell_ids is large
-                current_merged = sc_ds_df.loc[cell_ids, :].copy()
+                    # Extract expression for these cells
+                    current_merged = _get_expression_rows(cell_ids)
 
-                # Perform aggregation in float64 to avoid overflow when large TPM
-                # values are combined with RNA scaling coefficients.
-                expression_matrix = current_merged.to_numpy(dtype=np.float64, copy=True)
+                    # Perform aggregation in float64 to avoid overflow when large TPM
+                    # values are combined with RNA scaling coefficients.
+                    expression_matrix = current_merged.to_numpy(dtype=np.float64, copy=True)
 
-                # Align cell types
-                _cell_types = group['cell_type'].to_list()
-                current_cell_frac = cell_frac.loc[sample_id, _cell_types].to_numpy(dtype=np.float64).reshape(-1, 1)
+                    # Align cell types
+                    _cell_types = group['cell_type'].to_list()
+                    current_cell_frac = cell_frac.loc[sample_id, _cell_types].to_numpy(dtype=np.float64).reshape(-1, 1)
 
-                if not np.isfinite(expression_matrix).all():
-                    raise ValueError(
-                        f'Encountered non-finite single-cell expression values for sample "{sample_id}" '
-                        'before aggregation.'
-                    )
-                if not np.isfinite(current_cell_frac).all():
-                    raise ValueError(
-                        f'Encountered non-finite cell fractions for sample "{sample_id}" before aggregation.'
-                    )
+                    if not np.isfinite(expression_matrix).all():
+                        raise ValueError(
+                            f'Encountered non-finite single-cell expression values for sample "{sample_id}" '
+                            'before aggregation.'
+                        )
+                    if not np.isfinite(current_cell_frac).all():
+                        raise ValueError(
+                            f'Encountered non-finite cell fractions for sample "{sample_id}" before aggregation.'
+                        )
 
-                if self.total_rna_coefficient:
-                    rna_coeffs = np.array(
-                        [ct2rna_coefficient.get(ct, 1.0) for ct in _cell_types],
-                        dtype=np.float64,
-                    ).reshape(-1, 1)
-                    expression_matrix *= rna_coeffs
-
-                # Weighted sum
-                # Broadcasting the cell fractions across rows is equivalent to
-                # expression_matrix.T @ current_cell_frac, but avoids backend-specific
-                # matmul floating-point warnings seen in some environments.
-                with np.errstate(over='raise', invalid='raise'):
-                    try:
-                        matrix_mul = np.sum(
-                            expression_matrix * current_cell_frac,
-                            axis=0,
+                    if self.total_rna_coefficient:
+                        rna_coeffs = np.array(
+                            [ct2rna_coefficient.get(ct, 1.0) for ct in _cell_types],
                             dtype=np.float64,
                         ).reshape(-1, 1)
-                    except FloatingPointError as exc:
-                        raise ValueError(
-                            f'Failed to aggregate expression for sample "{sample_id}" because the '
-                            'expression matrix contains extreme or non-finite values.'
-                        ) from exc
+                        expression_matrix *= rna_coeffs
 
-                if not np.isfinite(matrix_mul).all():
-                    raise ValueError(
-                        f'Encountered non-finite aggregated expression for sample "{sample_id}". '
-                        'Please check the single-cell expression scale and total_rna_coefficient values.'
-                    )
+                    # Weighted sum
+                    # Broadcasting the cell fractions across rows is equivalent to
+                    # expression_matrix.T @ current_cell_frac, but avoids backend-specific
+                    # matmul floating-point warnings seen in some environments.
+                    with np.errstate(over='raise', invalid='raise'):
+                        try:
+                            matrix_mul = np.sum(
+                                expression_matrix * current_cell_frac,
+                                axis=0,
+                                dtype=np.float64,
+                            ).reshape(-1, 1)
+                        except FloatingPointError as exc:
+                            raise ValueError(
+                                f'Failed to aggregate expression for sample "{sample_id}" because the '
+                                'expression matrix contains extreme or non-finite values.'
+                            ) from exc
 
-                if self.total_rna_coefficient:
-                    # Normalize to TPM (1e6)
-                    total_expression = float(np.sum(matrix_mul, dtype=np.float64))
-                    if not np.isfinite(total_expression) or total_expression <= 0:
+                    if not np.isfinite(matrix_mul).all():
                         raise ValueError(
-                            f'Invalid total expression ({total_expression}) for sample "{sample_id}" '
-                            'after RNA coefficient weighting.'
+                            f'Encountered non-finite aggregated expression for sample "{sample_id}". '
+                            'Please check the single-cell expression scale and total_rna_coefficient values.'
                         )
-                    matrix_mul = matrix_mul / total_expression * 1e6
 
-                simulated_exp[sample_id] = pd.Series(matrix_mul.flatten(), index=current_merged.columns)
+                    if self.total_rna_coefficient:
+                        # Normalize to TPM (1e6)
+                        total_expression = float(np.sum(matrix_mul, dtype=np.float64))
+                        if not np.isfinite(total_expression) or total_expression <= 0:
+                            raise ValueError(
+                                f'Invalid total expression ({total_expression}) for sample "{sample_id}" '
+                                'after RNA coefficient weighting.'
+                            )
+                        matrix_mul = matrix_mul / total_expression * 1e6
 
-                # Add Noise
-                if add_noise:
-                    noise = self._sample_noise(n_samples=len(simulated_exp[sample_id]), f=noise_params[0])
-                    if noise.sum() > noise_params[1]:
-                        noise = noise / np.sum(noise) * noise_params[1]
-                    simulated_exp[sample_id] += noise
+                    simulated_exp[sample_id] = pd.Series(matrix_mul.flatten(), index=current_merged.columns)
+
+                    # Add Noise
+                    if add_noise:
+                        noise = self._sample_noise(n_samples=len(simulated_exp[sample_id]), f=noise_params[0])
+                        if noise.sum() > noise_params[1]:
+                            noise = noise / np.sum(noise) * noise_params[1]
+                        simulated_exp[sample_id] += noise
 
         simulated_exp_df = pd.DataFrame.from_dict(simulated_exp, orient='index')
         # Ensure TPM format (if not already)
         simulated_exp_df = non_log2cpm(simulated_exp_df, sum_exp=1e6)
         return simulated_exp_df.round(3)
+
+    @staticmethod
+    def _lazy_sct_chunk_size() -> int:
+        return 512
+
+    def _aggregate_lazy_sct_bulk(
+        self,
+        selected_cell_id: pd.DataFrame,
+        cell_frac: pd.DataFrame,
+        ct2rna_coefficient: Dict[str, float],
+        add_noise: bool = False,
+        noise_params: tuple = (),
+    ) -> Dict[str, pd.Series]:
+        if self.sct_dataset_reader is None:
+            raise RuntimeError('Lazy SCT reader is not available for aggregation.')
+
+        chunk_size = self._lazy_sct_chunk_size()
+        sample_order = list(dict.fromkeys(selected_cell_id.index.to_list()))
+        sample_accumulators: Dict[str, np.ndarray] = {sample_id: None for sample_id in sample_order}
+        gene_index = None
+
+        for start in range(0, len(selected_cell_id), chunk_size):
+            chunk_meta = selected_cell_id.iloc[start:start + chunk_size].copy()
+            chunk_ids = chunk_meta['selected_cell_id'].astype(str).to_list()
+            chunk_df = self.sct_dataset_reader.get_rows_df(chunk_ids, convert_to_tpm=True)
+            if gene_index is None:
+                gene_index = chunk_df.columns
+
+            expression_matrix = chunk_df.to_numpy(dtype=np.float64, copy=False)
+            if not np.isfinite(expression_matrix).all():
+                raise ValueError('Encountered non-finite lazy SCT expression values before aggregation.')
+
+            chunk_sample_ids = chunk_meta.index.to_list()
+            chunk_cell_types = chunk_meta['cell_type'].to_list()
+            weights = np.array(
+                [
+                    float(cell_frac.loc[sample_id, cell_type]) * float(ct2rna_coefficient.get(cell_type, 1.0))
+                    for sample_id, cell_type in zip(chunk_sample_ids, chunk_cell_types)
+                ],
+                dtype=np.float64,
+            )
+            if not np.isfinite(weights).all():
+                raise ValueError('Encountered non-finite lazy SCT aggregation weights.')
+
+            weighted_expression = expression_matrix * weights.reshape(-1, 1)
+            chunk_sample_index = pd.Index(chunk_sample_ids)
+            for sample_id in chunk_sample_index.unique():
+                sample_values = np.sum(
+                    weighted_expression[chunk_sample_index == sample_id],
+                    axis=0,
+                    dtype=np.float64,
+                )
+                if sample_accumulators[sample_id] is None:
+                    sample_accumulators[sample_id] = sample_values
+                else:
+                    sample_accumulators[sample_id] += sample_values
+
+        simulated_exp: Dict[str, pd.Series] = {}
+        for sample_id in sample_order:
+            aggregated = sample_accumulators[sample_id]
+            if aggregated is None or not np.isfinite(aggregated).all():
+                raise ValueError(f'Encountered invalid lazy SCT aggregated expression for sample "{sample_id}".')
+            current_series = pd.Series(aggregated, index=gene_index)
+            if add_noise:
+                noise = self._sample_noise(n_samples=len(current_series), f=noise_params[0])
+                if noise.sum() > noise_params[1]:
+                    noise = noise / np.sum(noise) * noise_params[1]
+                current_series = current_series + noise
+            simulated_exp[sample_id] = current_series
+
+        return simulated_exp
 
     def _finalize_generation(self, sampling_method, filtering_method, log_file_path):
         """Prints summary and creates final h5ad."""
@@ -1180,15 +1350,17 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         else:
             return None
 
-    def _read_sct_dataset(self, latent_z_nn_info_file=None):
+    def _read_sct_dataset(self, latent_z_nn_info_file=None, load_expression: bool = True, backed: Optional[str] = None):
         """
         positive samples of SCT (single cell type), generated by BulkGEPGeneratorSCT
         :param latent_z_nn_info_file: neighbor information of latent z for all samples, used for QC
         """
-        sct_dataset_obs, sct_dataset_df = \
+        sct_dataset_obs, sct_dataset_df, sct_dataset_obj = \
             read_single_cell_type_dataset(sct_dataset_file_path=self.sct_dataset_file_path,
-                                          latent_z_nn_info_file=latent_z_nn_info_file)
-        return sct_dataset_obs, sct_dataset_df
+                                          latent_z_nn_info_file=latent_z_nn_info_file,
+                                          load_expression=load_expression,
+                                          backed=backed)
+        return sct_dataset_obs, sct_dataset_df, sct_dataset_obj
 
     def _validate_inputs(self) -> None:
         """Validate initialization inputs."""

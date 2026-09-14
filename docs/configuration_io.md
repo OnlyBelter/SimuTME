@@ -232,9 +232,37 @@ For Mixed datasets:
 - `sampling_method_gep` is required and must be set explicitly
 - `gep_filtering` controls GEP-level filtering during Mixed generation
 - `gene_filtering` controls post-generation gene-level filtering
+- `parameters.mixed_sct_loading_mode` controls whether the upstream SCT
+  reference is loaded eagerly in memory, lazily in backed mode, or selected
+  automatically based on matrix size
 - `paths.high_corr_gene_file_path` is the shared fallback when a dataset does
   not provide a filtering-specific high-correlation gene file
 - the old Mixed key `filtering` is no longer supported
+
+### Global Mixed SCT loading mode
+
+Set `parameters.mixed_sct_loading_mode` to control how Mixed simulation loads
+its SCT reference `.h5ad`:
+
+```yaml
+parameters:
+  mixed_sct_loading_mode: "auto"
+  mixed_sct_auto_eager_max_gb: 4.0
+```
+
+Supported values:
+
+- `auto`
+  Use eager in-memory loading for smaller SCT references and lazy backed
+  loading for larger ones. `mixed_sct_auto_eager_max_gb` sets the cutoff in
+  GiB. SimuTME estimates the dense `float32` matrix size as
+  `n_obs * n_vars * 4`.
+- `eager`
+  Load the full SCT matrix into memory before Mixed generation. This is usually
+  the fastest option when RAM is sufficient.
+- `lazy`
+  Keep the SCT reference backed on disk and materialize rows on demand during
+  Mixed aggregation. This uses less memory but can be slower for large runs.
 
 ### Mixed `sct_reference` schema
 

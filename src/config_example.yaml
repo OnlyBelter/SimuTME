@@ -123,6 +123,8 @@ parameters:
   sample_diversity_distance_metric: "cosine"  # Optional: "cosine" or "l2"
   sample_diversity_min_samples_per_cell_type: 5  # Optional: skip cell types with fewer samples than this threshold
   stratify_by_dataset: "none"   # Optional: "none" (default) or "balanced_quota". "balanced_quota" downsamples each (cell_type, dataset_id) group to the size of the smallest dataset still containing that cell type, preventing large datasets from dominating the candidate pool. Can also be overridden per-SCT dataset below.
+  mixed_sct_loading_mode: "auto"  # Optional Mixed-only SCT loading mode: "auto" prefers eager loading for smaller SCT references and lazy backed loading for larger ones; use "eager" for maximum speed when RAM is sufficient, or "lazy" to minimize memory usage.
+  mixed_sct_auto_eager_max_gb: 4.0  # Optional threshold used only when mixed_sct_loading_mode is "auto"; eager loading is selected when the estimated dense float32 SCT matrix size is <= this value in GiB.
 
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here.

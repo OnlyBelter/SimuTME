@@ -204,15 +204,80 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
             "pca_model_file": str(result_dir / "pca.joblib"),
             "pca_data_file": str(result_dir / "pca.csv"),
         },
+        gep_filtering_input_n_samples=14,
+        gep_filtering_kept_n_samples=10,
+        gep_filtering_removed_n_samples=4,
     )
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["generated_n_samples"] == 10
     assert summary["generated_n_genes"] == 5
+    assert summary["gep_filtering_input_n_samples"] == 14
+    assert summary["gep_filtering_kept_n_samples"] == 10
+    assert summary["gep_filtering_removed_n_samples"] == 4
     assert summary["filtered_n_samples"] == 8
     assert summary["filtered_n_genes"] == 3
     assert summary["filtered_gene_count"] == 3
     assert summary["gene_filtering_type"] == "high_corr_gene"
+
+
+def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
+    generated_h5ad.write_text("placeholder", encoding="utf-8")
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = str(file_path)
+
+        def get_h5ad(self):
+            return SimpleNamespace(shape=(10, 5))
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+
+    summary_path = _build_mixed_dataset_summary(
+        dataset_name="Mixed_Test",
+        generated_bulk_gep_fp=generated_h5ad,
+        generated_cell_fraction_fp=tmp_path / "cell_fractions.csv",
+        gep_filtering=ResolvedGEPFilteringParams(
+            enabled=False,
+            reference_file=None,
+            ref_exp_type=None,
+            filtering_method="median_gep",
+            filtering_ref_types=None,
+            gep_filtering_quantile=(0.0, 0.95),
+            n_top=20,
+            show_filtering_info=False,
+            filtering_by_gene_range=False,
+            min_percentage_within_gene_range=0.95,
+            gene_quantile_range=None,
+            filtering_in_pca_space=True,
+            pca_n_components=0.9,
+            norm_ord=1,
+            high_corr_gene_list_file=None,
+            high_corr_gene_list=None,
+        ),
+        gene_filtering=ResolvedGeneFilteringParams(
+            enabled=False,
+            reference_file=None,
+            filtering_type="all_genes",
+            quantile_range=None,
+            q_col_name=None,
+            corr_threshold=0.3,
+            n_gene_max=1000,
+            high_corr_gene_file=None,
+            save_filtered_h5ad=True,
+            filtered_dataset_postfix=None,
+            plot_pca=True,
+            pca_n_components=2,
+            pca_figsize=(5.0, 5.0),
+        ),
+        postprocess_outputs={},
+    )
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["gep_filtering_input_n_samples"] is None
+    assert summary["gep_filtering_kept_n_samples"] is None
+    assert summary["gep_filtering_removed_n_samples"] is None
 
 
 def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(

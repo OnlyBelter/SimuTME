@@ -14,6 +14,15 @@ SimuTME provides two linked workflows:
 - `Mixed`: generate mixed bulk RNA-seq profiles from those references using
   configurable composition sampling
 
+For Mixed datasets, the global parameter `parameters.mixed_sct_loading_mode`
+controls how the SCT reference `.h5ad` is loaded:
+
+- `auto` uses eager in-memory loading for smaller SCT references and lazy
+  backed loading for larger ones, using
+  `parameters.mixed_sct_auto_eager_max_gb` as the `auto` threshold
+- `eager` maximizes throughput when RAM is sufficient
+- `lazy` minimizes memory usage for very large SCT references
+
 The package is YAML-driven. One config file defines file paths, biological
 constants, global parameters, and the datasets to run.
 

@@ -340,6 +340,8 @@ class SimuConfig:
     sample_diversity_distance_metric: Literal["cosine", "l2"] = "cosine"
     sample_diversity_min_samples_per_cell_type: int = 5
     stratify_by_dataset: Literal["none", "balanced_quota"] = "none"
+    mixed_sct_loading_mode: Literal["auto", "eager", "lazy"] = "auto"
+    mixed_sct_auto_eager_max_gb: float = 4.0
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -402,6 +404,15 @@ class SimuConfig:
         )
         self.sample_diversity_distance_metric = _resolve_sample_diversity_distance_metric(
             self.sample_diversity_distance_metric,
+            "global parameters",
+        )
+        self.mixed_sct_loading_mode = _resolve_mixed_sct_loading_mode(
+            self.mixed_sct_loading_mode,
+            "global parameters",
+        )
+        self.mixed_sct_auto_eager_max_gb = _resolve_positive_float(
+            self.mixed_sct_auto_eager_max_gb,
+            "mixed_sct_auto_eager_max_gb",
             "global parameters",
         )
         self.sample_diversity_n_top_genes = int(self.sample_diversity_n_top_genes)
@@ -531,6 +542,24 @@ def _parse_pca_component_value(value: Any) -> int | float:
         return value
     text = str(value).strip()
     return float(text) if "." in text else int(text)
+
+
+def _resolve_mixed_sct_loading_mode(value: Any, context: str) -> Literal["auto", "eager", "lazy"]:
+    resolved = str(value).strip().lower()
+    allowed = {"auto", "eager", "lazy"}
+    if resolved not in allowed:
+        raise ValueError(
+            f'Invalid "mixed_sct_loading_mode" for {context}: {value!r}. '
+            f'Expected one of {sorted(allowed)}.'
+        )
+    return resolved
+
+
+def _resolve_positive_float(value: Any, field_name: str, context: str) -> float:
+    resolved = float(value)
+    if resolved <= 0:
+        raise ValueError(f'Invalid "{field_name}" for {context}: {value!r}. Expected a positive number.')
+    return resolved
 
 
 def _resolve_filtering_ref_types(
@@ -972,6 +1001,8 @@ def run_bulk_simulation(dataset_name: str,
             cell_type_col_name='cell_type',
             subtype_col_name='cell_type',
             sampling_method_gep=sampling_method_gep,
+            mixed_sct_loading_mode=config.mixed_sct_loading_mode,
+            mixed_sct_auto_eager_max_gb=config.mixed_sct_auto_eager_max_gb,
         )
 
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
@@ -1034,6 +1065,9 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering=resolved_gep_filtering,
             gene_filtering=resolved_gene_filtering,
             postprocess_outputs=postprocess_outputs,
+            gep_filtering_input_n_samples=bulk_generator.gep_filtering_input_n_samples,
+            gep_filtering_kept_n_samples=bulk_generator.gep_filtering_kept_n_samples,
+            gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
         )
 
         return str(generated_bulk_gep_fp)
@@ -1319,6 +1353,9 @@ def _build_mixed_dataset_summary(
     gep_filtering: ResolvedGEPFilteringParams,
     gene_filtering: ResolvedGeneFilteringParams,
     postprocess_outputs: Dict[str, str | None],
+    gep_filtering_input_n_samples: int | None = None,
+    gep_filtering_kept_n_samples: int | None = None,
+    gep_filtering_removed_n_samples: int | None = None,
 ) -> Path:
     summary_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(summary_dir)
@@ -1337,6 +1374,9 @@ def _build_mixed_dataset_summary(
         "generated_n_genes": generated_shape[1] if generated_shape else None,
         "gep_filtering_enabled": gep_filtering.enabled,
         "gep_filtering_method": gep_filtering.filtering_method if gep_filtering.enabled else None,
+        "gep_filtering_input_n_samples": gep_filtering_input_n_samples,
+        "gep_filtering_kept_n_samples": gep_filtering_kept_n_samples,
+        "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
         "gene_filtering_enabled": gene_filtering.enabled,
         "gene_filtering_type": gene_filtering.filtering_type if gene_filtering.enabled else None,
         "filtered_bulk_gep_file": postprocess_outputs.get("filtered_bulk_gep_file"),

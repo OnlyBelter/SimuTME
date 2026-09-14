@@ -121,6 +121,30 @@ dataset entry.
 This removes the previous implicit behavior where Mixed simulation depended on
 the last in-memory SCT path update.
 
+## Mixed SCT loading mode
+
+Mixed simulation uses the global parameter
+`parameters.mixed_sct_loading_mode` to choose how the referenced SCT `.h5ad`
+is loaded before aggregation.
+
+Supported values:
+
+- `auto`
+  Use eager in-memory loading for smaller SCT references and lazy backed
+  loading for larger ones. The global parameter
+  `parameters.mixed_sct_auto_eager_max_gb` sets the cutoff in GiB. SimuTME
+  estimates the dense `float32` SCT matrix size as `n_obs * n_vars * 4`.
+- `eager`
+  Load the full SCT matrix into memory up front. This is usually the fastest
+  option when the SCT reference fits comfortably in RAM.
+- `lazy`
+  Keep the SCT `.h5ad` backed on disk and materialize rows on demand. This
+  reduces memory pressure for very large SCT references but can slow down large
+  Mixed runs because it performs repeated row reads.
+
+We recommend `auto` unless you already know the memory limits of the machine
+running the workflow.
+
 ## Proportion Sampling Modes
 
 Supported values for `sampling_method_prop`:

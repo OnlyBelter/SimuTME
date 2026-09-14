@@ -18,11 +18,30 @@ from simutme.utility.pub_func import MAX_LOG2_TPM, do_pca_analysis, log_exp2cpm,
 def _make_generator_with_sct_matrix(sct_dataset_df: pd.DataFrame) -> BulkGEPGenerator:
     generator = object.__new__(BulkGEPGenerator)
     generator.sct_dataset_df = sct_dataset_df
+    generator.sct_dataset_reader = None
     generator.merged_sc_dataset_df = None
     generator.generated_sc_dataset_df = None
     generator.cell_type2subtype = {"CT1": ["CT1"], "CT2": ["CT2"]}
     generator.total_rna_coefficient = {"CT1": 1.0e12, "CT2": 2.0e12}
     return generator
+
+
+class _FakeLazySCTReader:
+    def __init__(self, source_df: pd.DataFrame):
+        self.source_df = source_df
+        self.calls: list[tuple[list[str], bool]] = []
+
+    def get_rows_df(self, row_ids: list[str], convert_to_tpm: bool = False) -> pd.DataFrame:
+        self.calls.append((list(row_ids), bool(convert_to_tpm)))
+        return self.source_df.loc[row_ids, :].copy()
+
+
+class _FakeReaderWithShape:
+    def __init__(self, n_obs: int, n_vars: int):
+        self._h5ad = type("FakeH5AD", (), {"n_obs": n_obs, "n_vars": n_vars})()
+
+    def get_h5ad(self):
+        return self._h5ad
 
 
 def test_map_cell_id2exp_uses_stable_float64_aggregation_for_weighted_bulk():
@@ -70,6 +89,41 @@ def test_map_cell_id2exp_uses_stable_float64_aggregation_for_weighted_bulk():
         expected.flatten(),
         rtol=1e-6,
     )
+
+
+def test_map_cell_id2exp_supports_lazy_sct_row_loading():
+    sct_dataset_df = pd.DataFrame(
+        {
+            "gene_a": np.array([10.0, 30.0], dtype=np.float32),
+            "gene_b": np.array([20.0, 40.0], dtype=np.float32),
+        },
+        index=["cell_1", "cell_2"],
+    )
+    generator = _make_generator_with_sct_matrix(None)
+    generator.sct_dataset_reader = _FakeLazySCTReader(sct_dataset_df)
+
+    selected_cell_id = pd.DataFrame(
+        {
+            "cell_type": ["CT1", "CT2"],
+            "selected_cell_id": ["cell_1", "cell_2"],
+        },
+        index=pd.Index(["sample_1", "sample_1"], name="sample_id"),
+    )
+    cell_frac = pd.DataFrame(
+        {"CT1": np.array([0.25], dtype=np.float32), "CT2": np.array([0.75], dtype=np.float32)},
+        index=["sample_1"],
+    )
+
+    simulated = generator._map_cell_id2exp(
+        selected_cell_id=selected_cell_id,
+        sc_dataset=DatasetType.SCT,
+        simu_method=SimuMethod.MULTIPLY,
+        cell_frac=cell_frac,
+        gep_type="MCT",
+    )
+
+    assert generator.sct_dataset_reader.calls == [(["cell_1", "cell_2"], True)]
+    np.testing.assert_allclose(simulated.sum(axis=1).to_numpy(), np.array([1.0e6]), rtol=1e-6)
 
 
 def test_log_exp2cpm_converts_large_float32_values_without_overflow():
@@ -268,3 +322,66 @@ def test_do_pca_analysis_uses_full_solver_for_stable_fit():
     pca = do_pca_analysis(exp_df=exp_df, n_components=2, pca_result_fp="")
 
     assert getattr(pca, "_fit_svd_solver", None) == "full"
+
+
+def test_gep_filtering_counters_accumulate_totals():
+    generator = object.__new__(BulkGEPGenerator)
+
+    generator._reset_gep_filtering_stats(True)
+    generator._record_gep_filtering_counts(input_n_samples=12, kept_n_samples=9)
+    generator._record_gep_filtering_counts(input_n_samples=5, kept_n_samples=0)
+
+    assert generator.gep_filtering_input_n_samples == 17
+    assert generator.gep_filtering_kept_n_samples == 9
+    assert generator.gep_filtering_removed_n_samples == 8
+
+
+def test_gep_filtering_counters_stay_null_when_disabled():
+    generator = object.__new__(BulkGEPGenerator)
+
+    generator._reset_gep_filtering_stats(False)
+    generator._record_gep_filtering_counts(input_n_samples=12, kept_n_samples=9)
+
+    assert generator.gep_filtering_input_n_samples is None
+    assert generator.gep_filtering_kept_n_samples is None
+    assert generator.gep_filtering_removed_n_samples is None
+
+
+def test_resolve_sct_loading_mode_uses_eager_for_smaller_auto_sct_matrix():
+    generator = object.__new__(BulkGEPGenerator)
+    generator.mixed_sct_loading_mode = "auto"
+    generator.mixed_sct_auto_eager_max_gb = 4.0
+
+    resolved = generator._resolve_sct_loading_mode(_FakeReaderWithShape(n_obs=1_000, n_vars=2_000))
+
+    assert resolved == "eager"
+
+
+def test_resolve_sct_loading_mode_uses_lazy_for_larger_auto_sct_matrix():
+    generator = object.__new__(BulkGEPGenerator)
+    generator.mixed_sct_loading_mode = "auto"
+    generator.mixed_sct_auto_eager_max_gb = 4.0
+
+    resolved = generator._resolve_sct_loading_mode(_FakeReaderWithShape(n_obs=200_000, n_vars=20_000))
+
+    assert resolved == "lazy"
+
+
+def test_resolve_sct_loading_mode_honors_explicit_override():
+    generator = object.__new__(BulkGEPGenerator)
+    generator.mixed_sct_loading_mode = "lazy"
+    generator.mixed_sct_auto_eager_max_gb = 4.0
+
+    resolved = generator._resolve_sct_loading_mode(_FakeReaderWithShape(n_obs=1_000, n_vars=2_000))
+
+    assert resolved == "lazy"
+
+
+def test_resolve_sct_loading_mode_uses_configured_auto_threshold():
+    generator = object.__new__(BulkGEPGenerator)
+    generator.mixed_sct_loading_mode = "auto"
+    generator.mixed_sct_auto_eager_max_gb = 0.001
+
+    resolved = generator._resolve_sct_loading_mode(_FakeReaderWithShape(n_obs=1_000, n_vars=2_000))
+
+    assert resolved == "lazy"

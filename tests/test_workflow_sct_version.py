@@ -7,6 +7,7 @@ import yaml
 from simutme.workflow import (
     SimuConfig,
     _resolve_mixed_sct_dataset_path,
+    _resolve_mixed_sct_loading_mode,
     _resolve_output_dir_naming_metadata,
     _resolve_sct_aux_output_dir,
     run_bulk_simulation,
@@ -46,6 +47,91 @@ def test_resolve_mixed_sct_dataset_path_supports_explicit_path_reference(tmp_pat
     )
 
     assert resolved_path == original_sct_path
+
+
+def test_resolve_mixed_sct_loading_mode_accepts_supported_values():
+    assert _resolve_mixed_sct_loading_mode("auto", "test") == "auto"
+    assert _resolve_mixed_sct_loading_mode("eager", "test") == "eager"
+    assert _resolve_mixed_sct_loading_mode("lazy", "test") == "lazy"
+
+
+def test_resolve_mixed_sct_loading_mode_rejects_invalid_value():
+    with pytest.raises(ValueError, match='Invalid "mixed_sct_loading_mode"'):
+        _resolve_mixed_sct_loading_mode("banana", "test")
+
+
+def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {
+                    "simu_bulk_dir": "./datasets",
+                    "tcga2cancer_type_file_path": "./datasets/tcga_id.csv",
+                    "tcga_merged_tpm_file_path": "./datasets/merged_tpm.csv",
+                    "high_corr_gene_file_path": "./datasets/high_corr.csv",
+                    "merged_sc_dataset_file_path": "./datasets/merged_sc.h5ad",
+                },
+                "constants": {
+                    "sc_dataset_ids": ["ds1"],
+                    "cell_type2subtypes": {"B Cells": ["B Cells"]},
+                    "total_rna_coefficient": {"B Cells": 1.0},
+                    "output_types": ["B Cells"],
+                },
+                "parameters": {
+                    "gene_quantile_range": [0.005, 0.5, 0.995],
+                    "gep_filtering_quantile": [0.0, 0.95],
+                    "pca_n_components": 0.9,
+                    "gene_list_type": "all_genes",
+                    "n_base": 30,
+                    "mixed_sct_loading_mode": "auto",
+                    "mixed_sct_auto_eager_max_gb": 6.5,
+                },
+                "datasets": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = SimuConfig.from_yaml(str(config_path))
+
+    assert config.mixed_sct_auto_eager_max_gb == 6.5
+
+
+def test_simu_config_from_yaml_rejects_non_positive_mixed_sct_auto_eager_max_gb(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {
+                    "simu_bulk_dir": "./datasets",
+                    "tcga2cancer_type_file_path": "./datasets/tcga_id.csv",
+                    "tcga_merged_tpm_file_path": "./datasets/merged_tpm.csv",
+                    "high_corr_gene_file_path": "./datasets/high_corr.csv",
+                    "merged_sc_dataset_file_path": "./datasets/merged_sc.h5ad",
+                },
+                "constants": {
+                    "sc_dataset_ids": ["ds1"],
+                    "cell_type2subtypes": {"B Cells": ["B Cells"]},
+                    "total_rna_coefficient": {"B Cells": 1.0},
+                    "output_types": ["B Cells"],
+                },
+                "parameters": {
+                    "gene_quantile_range": [0.005, 0.5, 0.995],
+                    "gep_filtering_quantile": [0.0, 0.95],
+                    "pca_n_components": 0.9,
+                    "gene_list_type": "all_genes",
+                    "n_base": 30,
+                    "mixed_sct_auto_eager_max_gb": 0,
+                },
+                "datasets": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match='mixed_sct_auto_eager_max_gb'):
+        SimuConfig.from_yaml(str(config_path))
 
 
 def test_resolve_mixed_sct_dataset_path_rejects_version_for_explicit_path_reference(tmp_path: Path):
