@@ -137,13 +137,16 @@ class TestStratifyByDatasetBalancedQuota:
             simu_bulk_dir=str(tmp),
             bulk_dataset_name="dummy",
             merged_sc_dataset_file_path=str(tmp / "x.h5ad"),
-            cell_type2subtype={"CT": ["CT"]},
+            cell_type2subtype={"CT": ["CT"], "DC": ["pDC", "mDC"]},
             sc_dataset_ids=["ds1"],
             cancer_cell_dataset_ids=None,
             non_cancer_cell_dataset_ids=None,
+            selected_subtypes_by_cell_type={"DC": ["pDC"]},
+            subtype_col_name="cell_subtype",
             check_basic_info=False,
         )
         assert g.stratify_by_dataset == "none"
+        assert g.selected_subtypes_by_cell_type == {"DC": ["pDC"]}
 
     def test_get_obs_for_type_applies_selected_subtypes_for_parent_cell_type(self):
         g = object.__new__(SingleCellTypeGEPGenerator)

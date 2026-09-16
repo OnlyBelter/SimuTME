@@ -188,6 +188,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.cancer_cell_dataset_ids = cancer_cell_dataset_ids
         self.non_cancer_cell_dataset_ids = non_cancer_cell_dataset_ids
         self.stratify_by_dataset = stratify_by_dataset
+        self.subtype_col_name = subtype_col_name
+        self.cell_type_col_name = cell_type_col_name
         self.selected_subtypes_by_cell_type = self._normalize_selected_subtypes_by_cell_type(
             selected_subtypes_by_cell_type
         )
@@ -197,8 +199,6 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.sc_dataset_gep_type = sc_dataset_gep_type
         self.tcga2cancer_type_file_path = tcga2cancer_type_file_path
         self.total_rna_coefficient = total_rna_coefficient
-        self.subtype_col_name = subtype_col_name
-        self.cell_type_col_name = cell_type_col_name
         self.mixed_sct_loading_mode = mixed_sct_loading_mode
         self.mixed_sct_auto_eager_max_gb = float(mixed_sct_auto_eager_max_gb)
 
