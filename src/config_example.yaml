@@ -135,7 +135,7 @@ datasets:
   SCT_N10_hnscc_07Jan_01:  # Dataset name
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
     n_samples: 10  # Number of bulk samples to simulate for each cell type
-    sampling_method_gep: "n_neighbors"  # Sampling method for finding single cells: 'random', 'n_neighbors'
+    sampling_method_gep: "n_neighbors"  # Required for SCT datasets: sampling method for finding single cells, either "random" or "n_neighbors"
     neighbor_sampling_scheme: "single_anchor"  # Optional SCT-only: "single_anchor" (default) keeps the existing one-anchor neighbor sampling; "two_half_anchor" builds one SCT sample from two half-sized neighbor groups and softly prefers different datasets for the two halves when feasible.
     stratify_by_dataset: "balanced_quota"   # Optional SCT-only override: "none" (default) or "balanced_quota". Balances the candidate-cell pool across scRNA-seq datasets per cell type.
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
@@ -153,7 +153,6 @@ datasets:
     sct_reference:
       source_type: "path"  # Mixed only: use an external SCT `.h5ad` directly
       file_path: "path/to/sct_dataset_gepsamp-random.h5ad"
-    sampling_method_gep: "random"  # Required for Mixed datasets: sampling method used to draw SCT profiles, either "random" or "n_neighbors"
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "segment"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
@@ -171,7 +170,6 @@ datasets:
       source_type: "generated_dataset"  # Mixed only: reference an SCT dataset defined earlier in this YAML
       dataset_name: "SCT_N10_hnscc_07Jan_01"
       version: "sorted_bulk_imputed"
-    sampling_method_gep: "n_neighbors"  # Required for Mixed datasets: set this explicitly rather than relying on filename inference
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "dirichlet"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     dirichlet_alpha:  # Mixed + dirichlet only: default symmetric prior over the 16 configured output cell types

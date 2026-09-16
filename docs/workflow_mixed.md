@@ -42,7 +42,7 @@ The visual summary is shown below.
 ### Dataset-level fields
 
 - `dataset_type: "Mixed"`
-- `sampling_method_gep`
+- `sct_reference`
 - `n_samples`
 - `sampling_method_prop`
 - `gep_filtering`
@@ -50,7 +50,6 @@ The visual summary is shown below.
 
 ### Common optional dataset-level fields
 
-- `sct_reference`
 - `filtering_ref_types`
 - `cell_prop_prior`
 - `filtering_in_pca_space`
@@ -84,8 +83,7 @@ The old Mixed-dataset key `filtering` is no longer supported. Use
 ## Reference Source Used By Mixed Simulation
 
 Mixed simulation now requires an explicit `sct_reference` block in each Mixed
-dataset entry, plus an explicit `sampling_method_gep` value in the Mixed dataset
-itself.
+dataset entry.
 
 Supported modes:
 
@@ -114,9 +112,9 @@ For `source_type: "generated_dataset"`, `version` must be one of:
 For `source_type: "path"`, SimuTME uses `file_path` directly and does not infer
 another SCT path from it.
 
-SimuTME also does not infer `sampling_method_gep` from the SCT filename.
-Provide it explicitly as either `random` or `n_neighbors` in every Mixed
-dataset entry.
+Mixed generation always uses `random` when drawing SCT profiles from the
+referenced SCT dataset. If `sampling_method_gep` is present in a Mixed dataset
+entry, it is ignored and the workflow logs that `random` is being used.
 
 This removes the previous implicit behavior where Mixed simulation depended on
 the last in-memory SCT path update.
@@ -171,18 +169,17 @@ For `sampling_method_prop: "dirichlet"`, the workflow also supports:
 
 ## Main Outputs
 
-For a dataset named `<dataset_name>` and SCT sampling method
-`<sampling_method_gep>`, the Mixed workflow writes files under:
+For a dataset named `<dataset_name>`, the Mixed workflow writes files under:
 
 `paths.simu_bulk_dir/<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_median_gep/`
 
 Main files:
 
-- `cell_fractions_<dataset_name>_gepsamp-<sampling_method_gep>.csv`
-- `ref2n_neighbors_<dataset_name>_gepsamp-<sampling_method_gep>.csv`
-- `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_sampled_sc_cell_id.csv`
-- `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.csv`
-- `simu_gep_<dataset_name>_gepsamp-<sampling_method_gep>_log2cpm1p.h5ad`
+- `cell_fractions_<dataset_name>_gepsamp-random.csv`
+- `ref2n_neighbors_<dataset_name>_gepsamp-random.csv`
+- `simu_gep_<dataset_name>_gepsamp-random_sampled_sc_cell_id.csv`
+- `simu_gep_<dataset_name>_gepsamp-random_log2cpm1p.csv`
+- `simu_gep_<dataset_name>_gepsamp-random_log2cpm1p.h5ad`
 
 Dataset-local diagnostic outputs under:
 

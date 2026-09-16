@@ -44,10 +44,10 @@ The visual summary is shown below.
 
 - `dataset_type: "SCT"`
 - `n_samples`
+- `sampling_method_gep`
 
 ### Common optional dataset-level fields
 
-- `sampling_method_gep`
 - `zero_ratio_threshold`
 - `cell_type_col`
 - `cell_subtype_col`
@@ -60,6 +60,9 @@ The visual summary is shown below.
 - `sample_diversity_min_samples_per_cell_type`
 
 ## Sampling Behavior
+
+`sampling_method_gep` is required for every SCT dataset and must be set
+explicitly to either `random` or `n_neighbors`.
 
 ### `sampling_method_gep: "random"`
 

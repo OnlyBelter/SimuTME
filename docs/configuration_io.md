@@ -195,10 +195,13 @@ Each entry under `datasets:` defines one simulation task.
 - `cancer_cell_dataset_ids`
 - `non_cancer_cell_dataset_ids`
 
+For SCT datasets:
+
+- `sampling_method_gep` is required and must be set explicitly to `random` or `n_neighbors`
+
 ### Mixed-only fields
 
 - `sct_reference`
-- `sampling_method_gep`
 - `sampling_method_prop`
 - `gep_filtering`
 - `gene_filtering`
@@ -229,7 +232,8 @@ Each entry under `datasets:` defines one simulation task.
 
 For Mixed datasets:
 
-- `sampling_method_gep` is required and must be set explicitly
+- `sampling_method_gep` is ignored if provided; Mixed generation always uses `random`
+  when drawing SCT profiles from the referenced SCT dataset
 - `gep_filtering` controls GEP-level filtering during Mixed generation
 - `gene_filtering` controls post-generation gene-level filtering
 - `parameters.mixed_sct_loading_mode` controls whether the upstream SCT
@@ -307,7 +311,6 @@ Required:
 - YAML configuration file
 - merged scRNA-seq `.h5ad`
 - SCT reference `.h5ad` resolved from each Mixed dataset's `sct_reference`
-- explicit `sampling_method_gep`
 - explicit `sampling_method_prop`
 
 Optional but commonly used:

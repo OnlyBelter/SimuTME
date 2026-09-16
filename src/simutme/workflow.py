@@ -917,10 +917,11 @@ def run_bulk_simulation(dataset_name: str,
         if resolved_selected_subtypes:
             logging.info(f"   > selected_subtypes_by_cell_type: {resolved_selected_subtypes}")
         if 'sampling_method_gep' not in params:
-            logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
-            sampling_method_gep = 'random'
-        else:
-            sampling_method_gep = params.get('sampling_method_gep')
+            raise ValueError(
+                f'Missing "sampling_method_gep" for SCT dataset "{dataset_name}". '
+                'Please set params["sampling_method_gep"] explicitly to "random" or "n_neighbors".'
+            )
+        sampling_method_gep = params.get('sampling_method_gep')
         neighbor_sampling_scheme = _resolve_neighbor_sampling_scheme(params)
         logging.info(f"   > neighbor_sampling_scheme: {neighbor_sampling_scheme}")
 
@@ -1034,12 +1035,14 @@ def run_bulk_simulation(dataset_name: str,
                 get_default_dirichlet_alpha(resolved_cell_type2subtypes),
             )
             pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
-        if not 'sampling_method_gep' in params:
-            raise ValueError(
-                f'Missing "sampling_method_gep" for Mixed dataset "{dataset_name}". '
-                'Please set params["sampling_method_gep"] explicitly to "random" or "n_neighbors".'
+        if 'sampling_method_gep' in params:
+            logging.info(
+                '   > Mixed dataset %s ignores params["sampling_method_gep"]=%r and uses "random" '
+                'because Mixed generation samples one SCT profile per cell type from the referenced SCT dataset.',
+                dataset_name,
+                params.get('sampling_method_gep'),
             )
-        sampling_method_gep = params.get('sampling_method_gep')
+        sampling_method_gep = 'random'
 
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
         bulk_generator = BulkGEPGenerator(
