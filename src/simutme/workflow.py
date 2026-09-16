@@ -795,6 +795,51 @@ def _resolve_neighbor_sampling_scheme(params: Dict[str, Any]) -> str:
     return value
 
 
+def _resolve_selected_subtypes_by_cell_type(
+    params: Dict[str, Any],
+    config: SimuConfig,
+) -> Dict[str, List[str]] | None:
+    value = params.get("selected_subtypes_by_cell_type", None)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('"selected_subtypes_by_cell_type" must be a mapping from parent cell type to subtype list.')
+
+    normalized: Dict[str, List[str]] = {}
+    for parent_cell_type, subtypes in value.items():
+        parent_name = str(parent_cell_type).strip()
+        if parent_name == "":
+            raise ValueError('Invalid empty parent cell type in "selected_subtypes_by_cell_type".')
+        if parent_name not in config.cell_type2subtypes:
+            raise ValueError(
+                f'Unknown parent cell type in "selected_subtypes_by_cell_type": {parent_name!r}. '
+                f'Available parent cell types: {sorted(config.cell_type2subtypes)}'
+            )
+        if isinstance(subtypes, str) or subtypes in (None, ""):
+            raise ValueError(
+                f'"selected_subtypes_by_cell_type[{parent_name}]" must be a non-empty list of subtype names.'
+            )
+        cleaned_subtypes = [str(subtype).strip() for subtype in list(subtypes)]
+        if any(subtype == "" for subtype in cleaned_subtypes):
+            raise ValueError(
+                f'Invalid empty subtype name found in "selected_subtypes_by_cell_type[{parent_name}]".'
+            )
+        deduped_subtypes = list(dict.fromkeys(cleaned_subtypes))
+        if not deduped_subtypes:
+            raise ValueError(
+                f'"selected_subtypes_by_cell_type[{parent_name}]" must contain at least one subtype.'
+            )
+        allowed_subtypes = set(config.cell_type2subtypes[parent_name])
+        invalid_subtypes = [subtype for subtype in deduped_subtypes if subtype not in allowed_subtypes]
+        if invalid_subtypes:
+            raise ValueError(
+                f'Invalid subtype(s) for parent cell type {parent_name!r}: {invalid_subtypes}. '
+                f'Allowed subtypes: {config.cell_type2subtypes[parent_name]}'
+            )
+        normalized[parent_name] = deduped_subtypes
+    return normalized
+
+
 # --- 2. Main Workflow Function ---
 def run_bulk_simulation(dataset_name: str,
                         params: Dict[str, Any],
@@ -825,6 +870,10 @@ def run_bulk_simulation(dataset_name: str,
         if 'stratify_by_dataset' in params:
             raise ValueError(
                 '"stratify_by_dataset" override is only supported for SCT datasets. Use the global parameters.stratify_by_dataset for default behavior; Mixed datasets inherit their pool from an upstream SCT dataset via sct_reference.'
+            )
+        if 'selected_subtypes_by_cell_type' in params:
+            raise ValueError(
+                '"selected_subtypes_by_cell_type" is only supported for SCT datasets.'
             )
         if 'neighbor_sampling_scheme' in params:
             raise ValueError(
@@ -861,6 +910,12 @@ def run_bulk_simulation(dataset_name: str,
         logging.info(f"   > stratify_by_dataset: {resolved_stratify}")
     if dataset_type == 'sct':  # single-cell-type dataset
         logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
+        resolved_selected_subtypes = _resolve_selected_subtypes_by_cell_type(
+            params=params,
+            config=config,
+        )
+        if resolved_selected_subtypes:
+            logging.info(f"   > selected_subtypes_by_cell_type: {resolved_selected_subtypes}")
         if 'sampling_method_gep' not in params:
             logging.info("   > Warning: 'sampling_method_gep' not specified in params, defaulting to 'random'")
             sampling_method_gep = 'random'
@@ -877,6 +932,7 @@ def run_bulk_simulation(dataset_name: str,
             cancer_cell_dataset_ids=params.get('cancer_cell_dataset_ids', None),
             non_cancer_cell_dataset_ids=params.get('non_cancer_cell_dataset_ids', None),
             stratify_by_dataset=resolved_stratify,
+            selected_subtypes_by_cell_type=resolved_selected_subtypes,
             stratify_seed=config.sorted_bulk_imputation_seed,
             bulk_dataset_name=dataset_name,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,

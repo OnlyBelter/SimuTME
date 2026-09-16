@@ -6,6 +6,7 @@ import yaml
 
 from simutme.workflow import (
     SimuConfig,
+    _resolve_selected_subtypes_by_cell_type,
     _resolve_mixed_sct_dataset_path,
     _resolve_mixed_sct_loading_mode,
     _resolve_output_dir_naming_metadata,
@@ -58,6 +59,34 @@ def test_resolve_mixed_sct_loading_mode_accepts_supported_values():
 def test_resolve_mixed_sct_loading_mode_rejects_invalid_value():
     with pytest.raises(ValueError, match='Invalid "mixed_sct_loading_mode"'):
         _resolve_mixed_sct_loading_mode("banana", "test")
+
+
+def test_resolve_selected_subtypes_by_cell_type_validates_and_deduplicates():
+    config = SimpleNamespace(
+        cell_type2subtypes={
+            "DC": ["pDC", "mDC"],
+            "B Cells": ["B Cells"],
+        }
+    )
+
+    resolved = _resolve_selected_subtypes_by_cell_type(
+        {"selected_subtypes_by_cell_type": {"DC": ["pDC", "pDC"]}},
+        config,
+    )
+
+    assert resolved == {"DC": ["pDC"]}
+
+    with pytest.raises(ValueError, match='Unknown parent cell type'):
+        _resolve_selected_subtypes_by_cell_type(
+            {"selected_subtypes_by_cell_type": {"NK": ["NK"]}},
+            config,
+        )
+
+    with pytest.raises(ValueError, match='Invalid subtype'):
+        _resolve_selected_subtypes_by_cell_type(
+            {"selected_subtypes_by_cell_type": {"DC": ["badDC"]}},
+            config,
+        )
 
 
 def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path):
@@ -532,6 +561,67 @@ def test_run_bulk_simulation_rejects_legacy_filtering_key_for_mixed(tmp_path: Pa
                 "n_samples": 10,
                 "sampling_method_prop": "segment",
                 "filtering": False,
+            },
+            config=config,
+        )
+
+
+def test_run_bulk_simulation_rejects_selected_subtypes_for_mixed(tmp_path: Path):
+    sct_path = tmp_path / "toy_sct.h5ad"
+    sct_path.write_text("placeholder", encoding="utf-8")
+    config = SimpleNamespace(
+        simu_bulk_dir=tmp_path / "simu_bulk",
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2"],
+        stratify_by_dataset="none",
+        _dataset_definitions={"Mixed_Test": {"dataset_type": "Mixed"}},
+        _dataset_order=["Mixed_Test"],
+        _generated_sct_outputs={},
+        gep_filtering_enabled_default=False,
+        gep_filtering_reference_file=None,
+        tcga_merged_tpm_file_path=tmp_path / "tcga.csv",
+        gep_filtering_ref_exp_type=None,
+        gep_filtering_quantile=(0.0, 0.95),
+        gep_filtering_method="median_gep",
+        gep_n_top=20,
+        gep_show_filtering_info=False,
+        gep_filtering_by_gene_range=False,
+        gep_min_percentage_within_gene_range=0.95,
+        gep_gene_quantile_range=None,
+        gene_quantile_range=[0.005, 0.5, 0.995],
+        gep_filtering_in_pca_space=True,
+        gep_pca_n_components=0.9,
+        gep_norm_ord=1,
+        high_corr_gene_file_path=tmp_path / "high_corr.csv",
+        tcga2cancer_type_file_path=tmp_path / "tcga2type.csv",
+        gene_filtering_enabled_default=False,
+        gene_filtering_reference_file=None,
+        gene_filtering_type="all_genes",
+        gene_list_type="all_genes",
+        gene_filtering_quantile_range=None,
+        gene_filtering_q_col_name=None,
+        gene_filtering_corr_threshold=0.3,
+        gene_filtering_n_gene_max=1000,
+        gene_filtering_save_filtered_h5ad=True,
+        gene_filtering_filtered_dataset_postfix=None,
+        gene_filtering_plot_pca=True,
+        gene_filtering_pca_n_components=2,
+        gene_filtering_pca_figsize=(5.0, 5.0),
+    )
+
+    with pytest.raises(ValueError, match='"selected_subtypes_by_cell_type" is only supported for SCT datasets'):
+        run_bulk_simulation(
+            dataset_name="Mixed_Test",
+            params={
+                "dataset_type": "Mixed",
+                "sct_reference": {
+                    "source_type": "path",
+                    "file_path": str(sct_path),
+                },
+                "sampling_method_gep": "random",
+                "n_samples": 10,
+                "sampling_method_prop": "segment",
+                "selected_subtypes_by_cell_type": {"DC": ["pDC"]},
             },
             config=config,
         )

@@ -145,6 +145,28 @@ class TestStratifyByDatasetBalancedQuota:
         )
         assert g.stratify_by_dataset == "none"
 
+    def test_get_obs_for_type_applies_selected_subtypes_for_parent_cell_type(self):
+        g = object.__new__(SingleCellTypeGEPGenerator)
+        g.cell_subtype_used = []
+        g.cell_type_col_name = "cell_type"
+        g.subtype_col_name = "cell_subtype"
+        g.selected_subtypes_by_cell_type = {"DC": ["pDC"]}
+        g.merged_sc_dataset_obs = pd.DataFrame(
+            [
+                {"cell_type": "DC", "cell_subtype": "pDC", "dataset_id": "ds1"},
+                {"cell_type": "DC", "cell_subtype": "mDC", "dataset_id": "ds1"},
+                {"cell_type": "DC", "cell_subtype": "pDC", "dataset_id": "ds2"},
+                {"cell_type": "B Cells", "cell_subtype": "B Cells", "dataset_id": "ds1"},
+            ],
+            index=["dc_p_1", "dc_m_1", "dc_p_2", "b_1"],
+        )
+
+        filtered = g._get_obs_for_type("DC", min_n=1, warn_n=5)
+
+        assert filtered.index.tolist() == ["dc_p_1", "dc_p_2"]
+        assert set(filtered["cell_type"]) == {"DC"}
+        assert set(filtered["cell_subtype"]) == {"pDC"}
+
     def test_resolve_stratify_default_none(self):
         # Construct a dataclass with just the required subset of SimuConfig fields.
         from dataclasses import dataclass

@@ -31,6 +31,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                  non_cancer_cell_dataset_ids: Optional[List[str]],
                  simu_bulk_dir: str | Path,
                  bulk_dataset_name: str,
+                 selected_subtypes_by_cell_type: Optional[Dict[str, List[str]]] = None,
                  zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space',
                  subtype_col_name: Optional[str] = None,
@@ -49,6 +50,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             cancer_cell_dataset_ids=cancer_cell_dataset_ids,
             non_cancer_cell_dataset_ids=non_cancer_cell_dataset_ids,
             stratify_by_dataset=stratify_by_dataset,
+            selected_subtypes_by_cell_type=selected_subtypes_by_cell_type,
             stratify_seed=stratify_seed,
             bulk_dataset_name=bulk_dataset_name,
             zero_ratio_threshold=zero_ratio_threshold,
@@ -325,6 +327,18 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         filtered_obs = self.merged_sc_dataset_obs[
             self.merged_sc_dataset_obs[col_name] == cell_type
             ].copy()
+        if cell_type not in self.cell_subtype_used and self.selected_subtypes_by_cell_type:
+            allowed_subtypes = self.selected_subtypes_by_cell_type.get(cell_type, None)
+            if allowed_subtypes is not None:
+                if self.subtype_col_name not in filtered_obs.columns:
+                    available_cols = list(filtered_obs.columns)
+                    raise ValueError(
+                        f"Column '{self.subtype_col_name}' not found in obs. "
+                        f"Available columns: {available_cols}"
+                    )
+                filtered_obs = filtered_obs[
+                    filtered_obs[self.subtype_col_name].isin(allowed_subtypes)
+                ].copy()
 
         n_cells = filtered_obs.shape[0]
 

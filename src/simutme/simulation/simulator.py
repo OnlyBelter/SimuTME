@@ -148,6 +148,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         cancer_cell_dataset_ids: Optional[List[str]] = None,
         non_cancer_cell_dataset_ids: Optional[List[str]] = None,
         stratify_by_dataset: str = "none",
+        selected_subtypes_by_cell_type: Optional[Dict[str, List[str]]] = None,
         stratify_seed: int = 123,
         bulk_dataset_name: str = "simulated_bulk",
         check_basic_info: bool = True,
@@ -187,6 +188,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.cancer_cell_dataset_ids = cancer_cell_dataset_ids
         self.non_cancer_cell_dataset_ids = non_cancer_cell_dataset_ids
         self.stratify_by_dataset = stratify_by_dataset
+        self.selected_subtypes_by_cell_type = self._normalize_selected_subtypes_by_cell_type(
+            selected_subtypes_by_cell_type
+        )
         self.stratify_seed = int(stratify_seed)
         self.bulk_dataset_name = bulk_dataset_name
         self.zero_ratio_threshold = zero_ratio_threshold
@@ -1105,6 +1109,56 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         print(f"   > Using {len(self.cell_type_used)} cell types, "
               f"{len(self.cell_subtype_used)} subtypes and {len(self.sc_dataset_used)} datasets.")
+
+    def _normalize_selected_subtypes_by_cell_type(
+        self,
+        selected_subtypes_by_cell_type: Optional[Dict[str, List[str]]],
+    ) -> Dict[str, List[str]] | None:
+        """Validate and normalize optional SCT parent-type subtype restrictions."""
+        if selected_subtypes_by_cell_type in (None, ""):
+            return None
+        if not isinstance(selected_subtypes_by_cell_type, dict):
+            raise ValueError(
+                '"selected_subtypes_by_cell_type" must be a mapping from parent cell type to subtype list.'
+            )
+        if self.subtype_col_name in (None, ""):
+            raise ValueError(
+                '"selected_subtypes_by_cell_type" requires a valid subtype column name.'
+            )
+
+        normalized: Dict[str, List[str]] = {}
+        for parent_cell_type, subtypes in selected_subtypes_by_cell_type.items():
+            parent_name = str(parent_cell_type).strip()
+            if parent_name == "":
+                raise ValueError('Invalid empty parent cell type in "selected_subtypes_by_cell_type".')
+            if parent_name not in self.cell_type2subtype:
+                raise ValueError(
+                    f'Unknown parent cell type in "selected_subtypes_by_cell_type": {parent_name!r}. '
+                    f'Available parent cell types: {sorted(self.cell_type2subtype)}'
+                )
+            if isinstance(subtypes, str) or subtypes in (None, ""):
+                raise ValueError(
+                    f'"selected_subtypes_by_cell_type[{parent_name}]" must be a non-empty list of subtype names.'
+                )
+            cleaned_subtypes = [str(subtype).strip() for subtype in list(subtypes)]
+            if any(subtype == "" for subtype in cleaned_subtypes):
+                raise ValueError(
+                    f'Invalid empty subtype name found in "selected_subtypes_by_cell_type[{parent_name}]".'
+                )
+            deduped_subtypes = list(dict.fromkeys(cleaned_subtypes))
+            if not deduped_subtypes:
+                raise ValueError(
+                    f'"selected_subtypes_by_cell_type[{parent_name}]" must contain at least one subtype.'
+                )
+            allowed_subtypes = set(self.cell_type2subtype[parent_name])
+            invalid_subtypes = [subtype for subtype in deduped_subtypes if subtype not in allowed_subtypes]
+            if invalid_subtypes:
+                raise ValueError(
+                    f'Invalid subtype(s) for parent cell type {parent_name!r}: {invalid_subtypes}. '
+                    f'Allowed subtypes: {self.cell_type2subtype[parent_name]}'
+                )
+            normalized[parent_name] = deduped_subtypes
+        return normalized
 
     def _validate_dataset_id_subset(self, dataset_ids: Optional[List[str]], label: str) -> None:
         """Validate configured dataset_id filters against the merged scRNA-seq obs."""
