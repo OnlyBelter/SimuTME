@@ -23,6 +23,7 @@ from .sampling import (
     estimate_dirichlet_alpha_from_pred_cell_props,
     flatten_cell_type2subtype,
     generate_cell_fraction,
+    restrict_cell_type2subtype_to_output_types,
 )
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
@@ -236,6 +237,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
+        self.cell_fraction_type2subtype = restrict_cell_type2subtype_to_output_types(
+            cell_type2subtype,
+            output_types,
+        )
 
         # Define file paths
         prefix = f'simu_gep_{self.bulk_dataset_name}_gepsamp-{sampling_method_gep}'
@@ -393,7 +398,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Main Generation Loop
         dirichlet_alpha = config.dirichlet_alpha
         if config.sampling_method_prop == 'dirichlet' and config.pred_cell_prop_file_path is not None:
-            cell_type_with_subtype = flatten_cell_type2subtype(self.cell_type2subtype)
+            cell_type_with_subtype = flatten_cell_type2subtype(self.cell_fraction_type2subtype)
             logger.info(
                 'Estimating Dirichlet alpha from predicted cell proportions: %s',
                 config.pred_cell_prop_file_path,
@@ -415,7 +420,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     n_cell_frac=min_n_cell_frac,
                     sample_prefix=f's_{config.sampling_method_prop}_{self.n_round}',
                     cell_prop_prior=config.cell_prop_prior if config.filtering else None,
-                    cell_type2subtype=self.cell_type2subtype,
+                    cell_type2subtype=self.cell_fraction_type2subtype,
                     dirichlet_alpha=dirichlet_alpha,
                 )
 

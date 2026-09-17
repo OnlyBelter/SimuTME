@@ -2,7 +2,27 @@ from pathlib import Path
 
 import pandas as pd
 
+from simutme.simulation.sampling import (
+    generate_cell_fraction,
+    restrict_cell_type2subtype_to_output_types,
+)
 from simutme.workflow import _save_cancer_cell_fraction_distribution
+
+
+def test_mixed_fraction_mapping_uses_parent_label_when_requested():
+    mapping = restrict_cell_type2subtype_to_output_types(
+        {"B Cells": ["Non-plasma B cells", "Plasma B cells"], "DC": ["pDC", "mDC"]},
+        ["Non-plasma B cells", "Plasma B cells", "DC"],
+    )
+
+    cell_fractions = generate_cell_fraction(
+        sampling_method="segment",
+        n_cell_frac=4,
+        cell_type2subtype=mapping,
+    )
+
+    assert mapping["DC"] == ["DC"]
+    assert cell_fractions.columns.tolist() == ["Non-plasma B cells", "Plasma B cells", "DC"]
 
 
 def test_save_cancer_cell_fraction_distribution_writes_outputs(tmp_path: Path):

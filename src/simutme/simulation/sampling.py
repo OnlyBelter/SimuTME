@@ -15,6 +15,29 @@ def flatten_cell_type2subtype(cell_type2subtype: Dict[str, List[str]]) -> List[s
     return cell_type_with_subtype
 
 
+def restrict_cell_type2subtype_to_output_types(
+    cell_type2subtype: Dict[str, List[str]],
+    output_types: Optional[List[str]],
+) -> Dict[str, List[str]]:
+    """Build a fraction-label mapping constrained to the requested outputs."""
+    if output_types is None:
+        return {cell_type: list(subtypes) for cell_type, subtypes in cell_type2subtype.items()}
+
+    output_type_set = set(output_types)
+    resolved_mapping: Dict[str, List[str]] = {}
+    for cell_type, subtypes in cell_type2subtype.items():
+        if cell_type in output_type_set:
+            # A parent output label represents the parent, not all of its subtypes.
+            resolved_mapping[cell_type] = [cell_type]
+            continue
+
+        selected_subtypes = [subtype for subtype in subtypes if subtype in output_type_set]
+        if selected_subtypes:
+            resolved_mapping[cell_type] = selected_subtypes
+
+    return resolved_mapping
+
+
 def get_default_dirichlet_alpha(cell_type2subtype: Dict[str, List[str]]) -> Dict[str, float]:
     """Build the default symmetric Dirichlet prior (all ones)."""
     return {cell_type: 1.0 for cell_type in flatten_cell_type2subtype(cell_type2subtype)}

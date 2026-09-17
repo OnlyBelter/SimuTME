@@ -14,12 +14,17 @@ nonexistent subtype label from the referenced SCT dataset.
 
 ## Design
 
-Pass `config.output_types` to `BulkGEPGenerator` for Mixed datasets. This
-constrains Mixed fraction generation and sampling to the same output labels
-used by the SCT reference.
+Pass `config.output_types` to `BulkGEPGenerator` for Mixed datasets. Derive a
+separate fraction-label mapping from the original `cell_type2subtypes` mapping
+and those output types. When a parent type is requested, such as `DC`, the
+fraction mapping retains the parent label rather than expanding to its
+subtypes. The original mapping remains available for SCT source-cell
+restriction and subtype validation.
 
-No data files or sampling algorithms change. A regression test will assert
-that the Mixed workflow forwards `output_types` to the generator.
+No data files or sampling algorithms change. Regression tests assert that the
+Mixed workflow forwards `output_types` to the generator and that a
+`DC: [pDC, mDC]` mapping produces a `DC` fraction column when `DC` is the
+requested output label.
 
 ## Verification
 

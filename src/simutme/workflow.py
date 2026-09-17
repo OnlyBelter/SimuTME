@@ -15,7 +15,11 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
-from .simulation.sampling import estimate_dirichlet_alpha_from_pred_cell_props, get_default_dirichlet_alpha
+from .simulation.sampling import (
+    estimate_dirichlet_alpha_from_pred_cell_props,
+    get_default_dirichlet_alpha,
+    restrict_cell_type2subtype_to_output_types,
+)
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 
@@ -1054,9 +1058,13 @@ def run_bulk_simulation(dataset_name: str,
             resolved_dirichlet_alpha = None
             pred_cell_prop_file_path = None
         else:
+            output_cell_type2subtypes = restrict_cell_type2subtype_to_output_types(
+                resolved_cell_type2subtypes,
+                config.output_types,
+            )
             resolved_dirichlet_alpha = params.get(
                 'dirichlet_alpha',
-                get_default_dirichlet_alpha(resolved_cell_type2subtypes),
+                get_default_dirichlet_alpha(output_cell_type2subtypes),
             )
             pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
         if 'sampling_method_gep' in params:
