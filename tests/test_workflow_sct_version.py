@@ -614,8 +614,9 @@ def test_run_bulk_simulation_mixed_uses_random_sampling_and_prefers_dataset_tota
         tcga_merged_tpm_file_path=tcga_path,
         high_corr_gene_file_path=high_corr_path,
         sorted_bulk_imputation_seed=123,
-        cell_type2subtypes={"B Cells": ["B Cells"]},
-        total_rna_coefficient={"B Cells": 1.0},
+        cell_type2subtypes={"B Cells": ["B Cells"], "DC": ["pDC", "mDC"]},
+        output_types=["B Cells", "DC"],
+        total_rna_coefficient={"B Cells": 1.0, "DC": 1.0},
         gep_filtering_enabled_default=False,
         gep_filtering_reference_file=None,
         gep_filtering_ref_exp_type=None,
@@ -678,3 +679,4 @@ def test_run_bulk_simulation_mixed_uses_random_sampling_and_prefers_dataset_tota
 
     assert captured["sampling_method_gep"] == "random"
     assert captured["total_rna_coefficient"] == {"B Cells": 2.5}
+    assert captured["output_types"] == ["B Cells", "DC"]
