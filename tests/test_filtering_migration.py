@@ -13,6 +13,7 @@ from simutme.workflow import (
     _build_mixed_dataset_summary,
     _resolve_gep_filtering_params,
     _resolve_gene_filtering_params,
+    _run_gene_filtering_postprocess,
     filtering_by_gene_list_and_pca_plot,
 )
 
@@ -138,6 +139,103 @@ def test_resolve_gene_filtering_params_validates_pca_components(tmp_path: Path):
             },
             config=config,
         )
+
+
+def test_resolve_gep_filtering_params_allows_missing_optional_high_corr_file(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.high_corr_gene_file_path = tmp_path / "missing_high_corr.csv"
+
+    resolved = _resolve_gep_filtering_params(
+        dataset_name="Mixed_Test",
+        params={},
+        config=config,
+    )
+
+    assert resolved.high_corr_gene_list_file is None
+    assert resolved.high_corr_gene_list is None
+
+
+def test_resolve_gene_filtering_params_allows_missing_optional_high_corr_file(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.high_corr_gene_file_path = tmp_path / "missing_high_corr.csv"
+
+    resolved = _resolve_gene_filtering_params(
+        dataset_name="Mixed_Test",
+        params={
+            "gene_filtering": True,
+            "gene_filtering_type": "high_corr_gene",
+        },
+        config=config,
+    )
+
+    assert resolved.enabled is True
+    assert resolved.high_corr_gene_file is None
+
+
+def test_run_gene_filtering_postprocess_generates_high_corr_on_the_fly_when_file_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
+    generated_h5ad.write_text("placeholder", encoding="utf-8")
+    tcga_file = tmp_path / "tcga.csv"
+    tcga_file.write_text("sample_id,G1,G2\ns1,1,2\n", encoding="utf-8")
+    config = _make_filtering_config(tmp_path)
+
+    calls = {"get_gene_list_for_filtering": 0}
+
+    def fake_get_gene_list_for_filtering(**kwargs):
+        calls["get_gene_list_for_filtering"] += 1
+        pd.DataFrame({"gene_name": ["G1", "G2"]}).to_csv(kwargs["result_file_path"], index=False)
+        return ["G1", "G2"]
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def get_df(self):
+            return pd.DataFrame({"G1": [1.0], "G2": [2.0]}, index=["sample_1"])
+
+        def get_cell_fraction(self):
+            return pd.DataFrame({"B Cells": [1.0]}, index=["sample_1"])
+
+    class FakeReadExp:
+        def __init__(self, exp_file, exp_type=None):
+            self.exp_file = exp_file
+
+        def get_exp(self):
+            return pd.DataFrame({"G1": [1.0], "G2": [2.0]}, index=["tcga_1"])
+
+    monkeypatch.setattr(workflow_module, "get_gene_list_for_filtering", fake_get_gene_list_for_filtering)
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    monkeypatch.setattr(workflow_module, "ReadExp", FakeReadExp)
+    monkeypatch.setattr(workflow_module, "filtering_by_gene_list_and_pca_plot", lambda **kwargs: None)
+
+    outputs = _run_gene_filtering_postprocess(
+        dataset_name="Mixed_Test",
+        generated_bulk_gep_fp=generated_h5ad,
+        params={},
+        config=config,
+        resolved_params=ResolvedGeneFilteringParams(
+            enabled=True,
+            reference_file=str(tcga_file),
+            filtering_type="high_corr_gene",
+            quantile_range=None,
+            q_col_name=None,
+            corr_threshold=0.3,
+            n_gene_max=1000,
+            high_corr_gene_file=None,
+            save_filtered_h5ad=True,
+            filtered_dataset_postfix=None,
+            plot_pca=False,
+            pca_n_components=2,
+            pca_figsize=(5.0, 5.0),
+        ),
+    )
+
+    assert calls["get_gene_list_for_filtering"] == 1
+    assert outputs["gene_list_file"] is not None
+    assert Path(outputs["gene_list_file"]).exists()
 
 
 def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

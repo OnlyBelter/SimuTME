@@ -508,6 +508,24 @@ def _read_gene_list_file(file_path: str | Path) -> List[str]:
     raise ValueError(f"Gene list file must contain a gene_name column: {file_path}")
 
 
+def _resolve_reusable_high_corr_gene_file(
+    file_path: str | Path | None,
+    context: str,
+) -> str | None:
+    normalized = _resolve_optional_path_value(file_path)
+    if normalized is None:
+        return None
+    if os.path.exists(normalized):
+        return normalized
+    logging.warning(
+        'High-correlation gene file not found for %s: %s. '
+        'Falling back to on-the-fly generation when a filtering step needs it.',
+        context,
+        normalized,
+    )
+    return None
+
+
 def _resolve_quantile_triplet(values: Any, field_name: str) -> List[float] | None:
     if values in (None, ""):
         return None
@@ -624,13 +642,17 @@ def _resolve_gep_filtering_params(
         ),
         "gep_gene_quantile_range",
     )
-    high_corr_gene_list_file = _resolve_optional_path_value(params.get("gep_high_corr_gene_list_file"))
+    high_corr_gene_list_file = _resolve_reusable_high_corr_gene_file(
+        params.get("gep_high_corr_gene_list_file"),
+        f'Mixed dataset "{dataset_name}" GEP filtering override',
+    )
     if high_corr_gene_list_file is None and config.high_corr_gene_file_path not in (None, ""):
-        high_corr_gene_list_file = str(config.high_corr_gene_file_path)
+        high_corr_gene_list_file = _resolve_reusable_high_corr_gene_file(
+            config.high_corr_gene_file_path,
+            f'Mixed dataset "{dataset_name}" shared GEP filtering fallback',
+        )
     high_corr_gene_list = None
     if high_corr_gene_list_file:
-        if not os.path.exists(high_corr_gene_list_file):
-            raise FileNotFoundError(f'GEP high-correlation gene file not found: {high_corr_gene_list_file}')
         high_corr_gene_list = _read_gene_list_file(high_corr_gene_list_file)
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
@@ -702,9 +724,15 @@ def _resolve_gene_filtering_params(
         quantile_range,
         "gene_filtering_q_col_name",
     )
-    high_corr_gene_file = _resolve_optional_path_value(params.get("gene_filtering_high_corr_gene_file"))
+    high_corr_gene_file = _resolve_reusable_high_corr_gene_file(
+        params.get("gene_filtering_high_corr_gene_file"),
+        f'Mixed dataset "{dataset_name}" gene filtering override',
+    )
     if high_corr_gene_file is None and config.high_corr_gene_file_path not in (None, ""):
-        high_corr_gene_file = str(config.high_corr_gene_file_path)
+        high_corr_gene_file = _resolve_reusable_high_corr_gene_file(
+            config.high_corr_gene_file_path,
+            f'Mixed dataset "{dataset_name}" shared gene filtering fallback',
+        )
     resolved = ResolvedGeneFilteringParams(
         enabled=enabled,
         reference_file=_resolve_optional_path_value(
@@ -753,10 +781,6 @@ def _resolve_gene_filtering_params(
         if resolved.plot_pca and resolved.pca_n_components < 2:
             raise ValueError(
                 f'"gene_filtering_pca_n_components" must be >= 2 when PCA plotting is enabled for Mixed dataset "{dataset_name}".'
-            )
-        if resolved.high_corr_gene_file and not os.path.exists(resolved.high_corr_gene_file):
-            raise FileNotFoundError(
-                f'Gene-filtering high-correlation gene file not found: {resolved.high_corr_gene_file}'
             )
     return resolved
 
