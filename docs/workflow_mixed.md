@@ -85,6 +85,15 @@ The old Mixed-dataset key `filtering` is no longer supported. Use
 Mixed simulation now requires an explicit `sct_reference` block in each Mixed
 dataset entry.
 
+### `sct_reference` fields
+
+`source_type` is required and determines which remaining fields are valid:
+
+| `source_type` | Required fields | Purpose and constraints |
+| --- | --- | --- |
+| `"path"` | `file_path` | Uses the specified external SCT `.h5ad` file directly. Do not set `dataset_name` or `version`. |
+| `"generated_dataset"` | `dataset_name`, `version` | References an SCT dataset defined earlier in the same YAML file and generated during the current workflow run. `version` must be `"original"` or `"sorted_bulk_imputed"`. The latter requires the referenced SCT dataset to have produced its imputed output. |
+
 Supported modes:
 
 1. external path
@@ -147,12 +156,20 @@ running the workflow.
 
 Supported values for `sampling_method_prop`:
 
-- `segment`
-- `seg_random`
-- `sparse`
-- `random`
-- `dirichlet`
-- `mixed`
+- `segment`: iteratively allocates fractions from the remaining total, producing
+  uneven compositions; optional `cell_prop_prior` ranges are enforced by
+  rejection sampling.
+- `seg_random`: assigns one randomly sized fraction, then distributes the
+  remaining fraction across the other cell types using normalized random draws.
+- `sparse`: randomly selects the cell types present in each sample, sets all
+  other cell types to zero, and normalizes random fractions among the present
+  types.
+- `random`: draws an independent uniform value for every cell type and
+  normalizes the values to sum to one.
+- `dirichlet`: draws a composition from a Dirichlet distribution; the
+  `dirichlet_alpha` vector controls each cell type's expected abundance and the
+  overall concentration of compositions.
+- `mixed` (a composite mode that distributes samples across all five methods above)
 
 These control how cell-type proportions are generated before composing the mixed
 bulk samples.

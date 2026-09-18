@@ -52,6 +52,7 @@ The visual summary is shown below.
 - `cell_type_col`
 - `cell_subtype_col`
 - `max_cells_per_cell_type`
+- `neighbor_sampling_scheme`
 - `run_sample_diversity_analysis`
 - `sample_diversity_gene_mode`
 - `sample_diversity_n_top_genes`
@@ -73,6 +74,30 @@ Randomly sample cells from the target class and average them.
 Select a seed cell and then use its nearest neighbors within the same class to
 construct the SCT profile. This mode is more expensive and may require limiting
 the number of cells per class via `max_cells_per_cell_type`.
+
+#### `neighbor_sampling_scheme`
+
+This SCT-only option controls how cells are grouped when
+`sampling_method_gep: "n_neighbors"`. Its default is `"single_anchor"`; it
+must remain `"single_anchor"` when `sampling_method_gep: "random"`.
+
+- `"single_anchor"`: select one anchor cell and construct the entire SCT
+  profile from its nearest neighbors. This preserves the original
+  nearest-neighbor sampling behavior.
+- `"two_half_anchor"`: construct one SCT profile from two approximately
+  half-sized nearest-neighbor groups, each selected from its own anchor cell.
+  When cells from multiple source datasets are available, SimuTME preferentially
+  selects the second group from a different dataset. It falls back to the same
+  dataset when a second source dataset is not feasible.
+
+Use `"two_half_anchor"` when the requested number of SCT GEPs for a cell
+type is large relative to the available single cells. Under `"single_anchor"`,
+the nearest-neighbor group is determined by the selected anchor; selecting the
+same anchor again can therefore reproduce the same SCT profile. By combining
+two independently anchored half-groups, `"two_half_anchor"` increases the
+number of possible cell combinations and reduces repeated SCT profiles in small
+candidate pools. It improves diversity but does not guarantee that all
+simulated profiles are unique.
 
 ## Main Outputs
 
