@@ -212,18 +212,45 @@ def _resolve_effective_sct_dataset_ids_for_naming(
     return list(params.get("sc_dataset_ids", config.sc_dataset_ids))
 
 
+def _resolve_effective_sct_n_base(
+    dataset_name: str,
+    params: Dict[str, Any],
+    config: "SimuConfig",
+) -> int:
+    """Resolve and validate the effective positive-sample base size."""
+    value = params.get("n_base", config.n_base)
+    try:
+        if isinstance(value, bool):
+            raise TypeError
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError
+        resolved_n_base = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f'Invalid "n_base" for SCT dataset "{dataset_name}": '
+            f"{value!r}. Expected a positive integer."
+        ) from exc
+    if resolved_n_base <= 0:
+        raise ValueError(
+            f'Invalid "n_base" for SCT dataset "{dataset_name}": '
+            f"{value!r}. Expected a positive integer."
+        )
+    return resolved_n_base
+
+
 def _resolve_output_dir_naming_metadata(
     params: Dict[str, Any],
     config: "SimuConfig",
     dataset_type: str,
+    dataset_name: str = "<dataset>",
 ) -> tuple[int, int]:
     """Return `(n_datasets, n_base)` for output directory naming."""
-    n_base = int(config.n_base)
-
     if dataset_type == "sct":
+        n_base = _resolve_effective_sct_n_base(dataset_name, params, config)
         dataset_ids = _resolve_effective_sct_dataset_ids_for_naming(params, config)
         return len(dataset_ids), n_base
 
+    n_base = int(config.n_base)
     dataset_ids: Optional[List[str]] = None
     sct_reference = params.get("sct_reference")
     if isinstance(sct_reference, dict) and str(sct_reference.get("source_type", "")).strip() == "generated_dataset":
@@ -231,6 +258,11 @@ def _resolve_output_dir_naming_metadata(
         referenced_params = config._dataset_definitions.get(referenced_dataset_name)
         if isinstance(referenced_params, dict):
             dataset_ids = _resolve_effective_sct_dataset_ids_for_naming(referenced_params, config)
+            n_base = _resolve_effective_sct_n_base(
+                referenced_dataset_name,
+                referenced_params,
+                config,
+            )
 
     if dataset_ids is None:
         dataset_ids = list(params.get("sc_dataset_ids", config.sc_dataset_ids))
@@ -826,7 +858,7 @@ def _resolve_neighbor_sampling_scheme(params: Dict[str, Any]) -> str:
 def _resolve_selected_subtypes_by_cell_type(
     params: Dict[str, Any],
     config: SimuConfig,
-) -> Dict[str, List[str]] | None:
+) -> Dict[str, List[str] | str] | None:
     value = params.get("selected_subtypes_by_cell_type", None)
     if value in (None, ""):
         return None
@@ -843,6 +875,9 @@ def _resolve_selected_subtypes_by_cell_type(
                 f'Unknown parent cell type in "selected_subtypes_by_cell_type": {parent_name!r}. '
                 f'Available parent cell types: {sorted(config.cell_type2subtypes)}'
             )
+        if isinstance(subtypes, str) and subtypes.strip().lower() == "auto":
+            normalized[parent_name] = "auto"
+            continue
         if isinstance(subtypes, str) or subtypes in (None, ""):
             raise ValueError(
                 f'"selected_subtypes_by_cell_type[{parent_name}]" must be a non-empty list of subtype names.'
@@ -886,6 +921,11 @@ def run_bulk_simulation(dataset_name: str,
     dataset_type = params.get('dataset_type', 'mixed').lower()
     dirichlet_only_keys = {"dirichlet_alpha", "pred_cell_prop_file_path"}
     if dataset_type != 'sct':
+        if 'n_base' in params:
+            raise ValueError(
+                f'"n_base" is only supported for SCT datasets; '
+                f'Mixed dataset "{dataset_name}" must not define it.'
+            )
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
                 '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
@@ -929,6 +969,7 @@ def run_bulk_simulation(dataset_name: str,
     # 1. Initialize generator
     simu_bulk_dir = Path(config.simu_bulk_dir)
     n_sc_datasets, n_base = _resolve_output_dir_naming_metadata(
+        dataset_name=dataset_name,
         params=params,
         config=config,
         dataset_type=dataset_type,

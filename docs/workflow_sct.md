@@ -53,6 +53,7 @@ The visual summary is shown below.
 - `cell_subtype_col`
 - `max_cells_per_cell_type`
 - `neighbor_sampling_scheme`
+- `selected_subtypes_by_cell_type`
 - `run_sample_diversity_analysis`
 - `sample_diversity_gene_mode`
 - `sample_diversity_n_top_genes`
@@ -64,6 +65,37 @@ The visual summary is shown below.
 
 `sampling_method_gep` is required for every SCT dataset and must be set
 explicitly to either `random` or `n_neighbors`.
+
+### `selected_subtypes_by_cell_type`
+
+Use this SCT-only mapping to control which subtype cells contribute to samples
+whose output label is a parent cell type. The configured subtype list comes
+from `constants.cell_type2subtypes`.
+
+For example:
+
+```yaml
+selected_subtypes_by_cell_type:
+  DC: "auto"
+```
+
+With `"auto"`, SimuTME independently chooses one sampling pool for each
+positive sample:
+
+- the parent cell type, which includes all configured subtypes; or
+- one subtype selected from the configured subtype list.
+
+The generated sample remains labeled as the parent cell type, such as `DC`,
+regardless of which pool was selected. The parent pool and each subtype are
+selected with equal probability. To restrict every sample to specific
+subtypes, provide an explicit list instead:
+
+```yaml
+selected_subtypes_by_cell_type:
+  DC: ["pDC"]
+```
+
+Omit the mapping to sample from the default parent-cell-type candidate pool.
 
 ### `sampling_method_gep: "random"`
 

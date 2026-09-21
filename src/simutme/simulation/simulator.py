@@ -1090,7 +1090,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             )
             tasks.append(part)
 
-        return pd.concat(tasks)
+        sampled_tasks = pd.concat(tasks)
+        overrides = cell_frac.attrs.get("sampling_task_overrides", {})
+        for sample_id, override in overrides.items():
+            if sample_id not in sampled_tasks.index:
+                continue
+            sampled_tasks.loc[sample_id, ["cell_type", "class_by"]] = override
+        return sampled_tasks
 
     @staticmethod
     def _sample_noise(miu=0, s=566.1, f=0.25, n_samples=10000) -> np.ndarray:
@@ -1117,8 +1123,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
     def _normalize_selected_subtypes_by_cell_type(
         self,
-        selected_subtypes_by_cell_type: Optional[Dict[str, List[str]]],
-    ) -> Dict[str, List[str]] | None:
+        selected_subtypes_by_cell_type: Optional[Dict[str, List[str] | str]],
+    ) -> Dict[str, List[str] | str] | None:
         """Validate and normalize optional SCT parent-type subtype restrictions."""
         if selected_subtypes_by_cell_type in (None, ""):
             return None
@@ -1141,6 +1147,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     f'Unknown parent cell type in "selected_subtypes_by_cell_type": {parent_name!r}. '
                     f'Available parent cell types: {sorted(self.cell_type2subtype)}'
                 )
+            if isinstance(subtypes, str) and subtypes.strip().lower() == "auto":
+                normalized[parent_name] = "auto"
+                continue
             if isinstance(subtypes, str) or subtypes in (None, ""):
                 raise ValueError(
                     f'"selected_subtypes_by_cell_type[{parent_name}]" must be a non-empty list of subtype names.'

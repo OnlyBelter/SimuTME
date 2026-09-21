@@ -31,7 +31,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                  non_cancer_cell_dataset_ids: Optional[List[str]],
                  simu_bulk_dir: str | Path,
                  bulk_dataset_name: str,
-                 selected_subtypes_by_cell_type: Optional[Dict[str, List[str]]] = None,
+                 selected_subtypes_by_cell_type: Optional[Dict[str, List[str] | str]] = None,
                  zero_ratio_threshold: float = 0.97,
                  sc_dataset_gep_type: str = 'log_space',
                  subtype_col_name: Optional[str] = None,
@@ -222,6 +222,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         # For positive samples, optimize by filtering obs if chunk is homogeneous
         if sample_type == SampleType.POSITIVE:
             current_obs_df = self._get_filtered_obs_for_chunk(rows, min_n_base, n_base)
+            rows = self._add_auto_sampling_task_overrides(rows)
 
         # Sampling
         selected_cell_ids = self._sc_sampling(
@@ -248,6 +249,29 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         # Save
         self._save_chunk_results(simulated_gep, selected_cell_ids)
 
+    def _add_auto_sampling_task_overrides(self, rows: pd.DataFrame) -> pd.DataFrame:
+        """Choose a parent or one subtype independently for each auto sample."""
+        auto_types = {
+            cell_type: subtypes
+            for cell_type, subtypes in (self.selected_subtypes_by_cell_type or {}).items()
+            if subtypes == "auto"
+        }
+        if not auto_types:
+            return rows
+
+        rows = rows.copy()
+        overrides = {}
+        for sample_id, row in rows.iterrows():
+            cell_type = str(row.idxmax())
+            if cell_type not in auto_types:
+                continue
+            subtypes = list(self.cell_type2subtype[cell_type])
+            selected_type = np.random.choice([cell_type, *subtypes])
+            class_by = self.subtype_col_name if selected_type != cell_type else self.cell_type_col_name
+            overrides[sample_id] = (selected_type, class_by)
+        rows.attrs["sampling_task_overrides"] = overrides
+        return rows
+
     def _get_filtered_obs_for_chunk(
             self,
             rows: pd.DataFrame,
@@ -257,6 +281,13 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         """Get filtered observation DataFrame for a chunk."""
         unique_targets = rows.idxmax(axis=1).unique()
 
+        auto_targets = {
+            target
+            for target in unique_targets
+            if (self.selected_subtypes_by_cell_type or {}).get(target) == "auto"
+        }
+        if auto_targets:
+            return self.merged_sc_dataset_obs
         if len(unique_targets) == 1:
             # Homogeneous chunk - filter to single cell type
             return self._get_obs_for_type(unique_targets[0], min_n_base, n_base)
@@ -329,7 +360,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             ].copy()
         if cell_type not in self.cell_subtype_used and self.selected_subtypes_by_cell_type:
             allowed_subtypes = self.selected_subtypes_by_cell_type.get(cell_type, None)
-            if allowed_subtypes is not None:
+            if allowed_subtypes is not None and allowed_subtypes != "auto":
                 if self.subtype_col_name not in filtered_obs.columns:
                     available_cols = list(filtered_obs.columns)
                     raise ValueError(

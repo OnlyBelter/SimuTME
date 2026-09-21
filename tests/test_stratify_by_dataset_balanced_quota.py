@@ -170,6 +170,29 @@ class TestStratifyByDatasetBalancedQuota:
         assert set(filtered["cell_type"]) == {"DC"}
         assert set(filtered["cell_subtype"]) == {"pDC"}
 
+    def test_auto_sampling_overrides_are_applied_per_sample(self):
+        g = object.__new__(SingleCellTypeGEPGenerator)
+        g.cell_type_used = ["DC"]
+        g.cell_subtype_used = []
+        g.cell_type_col_name = "cell_type"
+        g.subtype_col_name = "cell_subtype"
+        g.selected_subtypes_by_cell_type = {"DC": "auto"}
+        g.cell_type2subtype = {"DC": ["pDC", "mDC"]}
+        g.total_cell_number = 2
+
+        cell_frac = pd.DataFrame({"DC": [1.0, 1.0]}, index=["sample_1", "sample_2"])
+        cell_frac.attrs["sampling_task_overrides"] = {
+            "sample_1": ("pDC", "cell_subtype"),
+            "sample_2": ("DC", "cell_type"),
+        }
+
+        tasks = g._prepare_sampling_tasks(cell_frac)
+
+        assert tasks.loc["sample_1", "cell_type"] == "pDC"
+        assert tasks.loc["sample_1", "class_by"] == "cell_subtype"
+        assert tasks.loc["sample_2", "cell_type"] == "DC"
+        assert tasks.loc["sample_2", "class_by"] == "cell_type"
+
     def test_resolve_stratify_default_none(self):
         # Construct a dataclass with just the required subset of SimuConfig fields.
         from dataclasses import dataclass

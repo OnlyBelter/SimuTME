@@ -9,6 +9,7 @@ from simutme.workflow import (
     _resolve_selected_subtypes_by_cell_type,
     _resolve_mixed_sct_dataset_path,
     _resolve_mixed_sct_loading_mode,
+    _resolve_effective_sct_n_base,
     _resolve_output_dir_naming_metadata,
     _resolve_sct_aux_output_dir,
     run_bulk_simulation,
@@ -75,6 +76,12 @@ def test_resolve_selected_subtypes_by_cell_type_validates_and_deduplicates():
     )
 
     assert resolved == {"DC": ["pDC"]}
+
+    resolved_auto = _resolve_selected_subtypes_by_cell_type(
+        {"selected_subtypes_by_cell_type": {"DC": "auto"}},
+        config,
+    )
+    assert resolved_auto == {"DC": "auto"}
 
     with pytest.raises(ValueError, match='Unknown parent cell type'):
         _resolve_selected_subtypes_by_cell_type(
@@ -347,6 +354,57 @@ def test_output_dir_naming_metadata_uses_unique_union_of_sct_subset_lists():
 
     assert n_datasets == 3
     assert n_base == 30
+
+
+def test_sct_n_base_resolver_uses_global_fallback_and_dataset_override():
+    config = SimpleNamespace(n_base=30)
+
+    assert _resolve_effective_sct_n_base("SCT_Default", {}, config) == 30
+    assert _resolve_effective_sct_n_base("SCT_Override", {"n_base": 50}, config) == 50
+
+
+@pytest.mark.parametrize("value", [0, -1, "not-a-number", None])
+def test_sct_n_base_resolver_rejects_invalid_overrides(value):
+    config = SimpleNamespace(n_base=30)
+
+    with pytest.raises(ValueError, match='Invalid "n_base" for SCT dataset "SCT_Invalid"'):
+        _resolve_effective_sct_n_base("SCT_Invalid", {"n_base": value}, config)
+
+
+def test_output_dir_naming_metadata_for_mixed_generated_dataset_inherits_sct_n_base():
+    config = SimpleNamespace(
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2"],
+        _dataset_definitions={
+            "SCT_A": {"dataset_type": "SCT", "n_base": 50},
+        },
+    )
+
+    n_datasets, n_base = _resolve_output_dir_naming_metadata(
+        params={
+            "dataset_type": "Mixed",
+            "sct_reference": {
+                "source_type": "generated_dataset",
+                "dataset_name": "SCT_A",
+            },
+        },
+        config=config,
+        dataset_type="mixed",
+    )
+
+    assert n_datasets == 2
+    assert n_base == 50
+
+
+def test_run_bulk_simulation_rejects_n_base_for_mixed():
+    config = SimpleNamespace(n_base=30)
+
+    with pytest.raises(ValueError, match='"n_base" is only supported for SCT datasets'):
+        run_bulk_simulation(
+            dataset_name="Mixed_Test",
+            params={"dataset_type": "Mixed", "n_base": 50},
+            config=config,
+        )
 
 
 def test_output_dir_naming_metadata_falls_back_to_sc_dataset_ids_when_sct_subset_lists_incomplete():
