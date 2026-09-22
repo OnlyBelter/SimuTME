@@ -1082,6 +1082,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         tasks = []
         for cell_type in cell_num.columns:
             part = pd.DataFrame({'n_cell': cell_num[cell_type]})
+            part = part.loc[part['n_cell'] > 0]
+            if part.empty:
+                continue
             part['cell_type'] = cell_type
             part['class_by'] = (
                 self.subtype_col_name

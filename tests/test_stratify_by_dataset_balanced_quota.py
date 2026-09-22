@@ -194,6 +194,23 @@ class TestStratifyByDatasetBalancedQuota:
         assert tasks.loc["sample_2", "cell_type"] == "DC"
         assert tasks.loc["sample_2", "class_by"] == "cell_type"
 
+    def test_prepare_sampling_tasks_skips_zero_count_cell_types(self):
+        g = object.__new__(SingleCellTypeGEPGenerator)
+        g.cell_subtype_used = []
+        g.cell_type_col_name = "cell_type"
+        g.subtype_col_name = "cell_subtype"
+        g.total_cell_number = 30
+
+        cell_frac = pd.DataFrame(
+            {"Endothelial Cells": [1.0], "CD4 T": [0.0]},
+            index=["sample_1"],
+        )
+
+        tasks = g._prepare_sampling_tasks(cell_frac)
+
+        assert tasks["cell_type"].tolist() == ["Endothelial Cells"]
+        assert tasks["n_cell"].tolist() == [30]
+
     def test_sampling_class_prefers_cell_type_column(self):
         obs = pd.DataFrame(
             [
