@@ -373,6 +373,26 @@ def worker_cleanup() -> None:
         _worker_data = None
 
 
+def resolve_sampling_class(
+    obs_df: pd.DataFrame,
+    requested_cell_type: str,
+) -> Tuple[str, str]:
+    """Resolve a requested label using parent type before subtype metadata."""
+    for class_by in ("cell_type", "cell_subtype"):
+        if class_by in obs_df.columns and requested_cell_type in set(obs_df[class_by].astype(str)):
+            return requested_cell_type, class_by
+
+    available = {
+        column: sorted(obs_df[column].dropna().astype(str).unique().tolist())
+        for column in ("cell_type", "cell_subtype")
+        if column in obs_df.columns
+    }
+    raise ValueError(
+        f"Unknown cell_type '{requested_cell_type}'. "
+        f"Not found in cell_type or cell_subtype columns. Available: {available}"
+    )
+
+
 def worker_sample(args: tuple) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
     """
     Worker function that uses shared memory to sample cells.
@@ -403,18 +423,26 @@ def worker_sample(args: tuple) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], 
 
     task = SampleTaskArgs.from_tuple(args)
 
-    if task.cell_type not in _worker_data.distance_dict:
+    resolved_cell_type, resolved_class_by = resolve_sampling_class(
+        _worker_data.obs_df,
+        task.cell_type,
+    )
+    if resolved_cell_type not in _worker_data.distance_dict:
         available = list(_worker_data.distance_dict.keys())
-        raise ValueError(f"Unknown cell_type '{task.cell_type}'. Available: {available}")
+        raise ValueError(
+            f"Resolved cell_type '{resolved_cell_type}' from column "
+            f"'{resolved_class_by}', but no distance matrix is available. "
+            f"Available: {available}"
+        )
 
     try:
         return get_sample_id_with_neighbors(
             obs_df=_worker_data.obs_df,
             n_samples=task.n_samples,
-            cell_type=task.cell_type,
+            cell_type=resolved_cell_type,
             n_base=task.n_base,
             distance_dict=_worker_data.distance_dict,
-            class_by=task.class_by,
+            class_by=resolved_class_by,
             sep_by_patient=task.sep_by_patient,
             sc_dataset=task.sc_dataset,
             minimum_n_base=task.minimum_n_base,

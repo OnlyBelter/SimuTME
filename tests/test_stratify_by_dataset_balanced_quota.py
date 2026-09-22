@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from simutme.workflow import SimuConfig, _resolve_stratify_by_dataset
 from simutme.simulation.simulator import BulkGEPGenerator
 from simutme.simulation.simulator_sct import SingleCellTypeGEPGenerator
+from simutme.simulation.nneighbors_shared_memory import resolve_sampling_class
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +193,34 @@ class TestStratifyByDatasetBalancedQuota:
         assert tasks.loc["sample_1", "class_by"] == "cell_subtype"
         assert tasks.loc["sample_2", "cell_type"] == "DC"
         assert tasks.loc["sample_2", "class_by"] == "cell_type"
+
+    def test_sampling_class_prefers_cell_type_column(self):
+        obs = pd.DataFrame(
+            [
+                {"cell_type": "DC", "cell_subtype": "pDC"},
+                {"cell_type": "DC", "cell_subtype": "mDC"},
+            ]
+        )
+
+        assert resolve_sampling_class(obs, "DC") == ("DC", "cell_type")
+
+    def test_sampling_class_falls_back_to_subtype_column(self):
+        obs = pd.DataFrame(
+            [
+                {"cell_type": "CD4 T", "cell_subtype": "CD4 T conv"},
+                {"cell_type": "CD4 T", "cell_subtype": "CD4 Treg"},
+            ]
+        )
+
+        assert resolve_sampling_class(obs, "CD4 Treg") == ("CD4 Treg", "cell_subtype")
+
+    def test_sampling_class_reports_missing_labels(self):
+        obs = pd.DataFrame(
+            [{"cell_type": "CD4 T", "cell_subtype": "CD4 T conv"}]
+        )
+
+        with pytest.raises(ValueError, match="cell_type or cell_subtype"):
+            resolve_sampling_class(obs, "CD8 T")
 
     def test_resolve_stratify_default_none(self):
         # Construct a dataclass with just the required subset of SimuConfig fields.

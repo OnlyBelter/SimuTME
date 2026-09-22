@@ -200,6 +200,16 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             n_jobs= min(max_cpu, 10),
             max_cells_per_class=max_cells_per_cell_type,
         )
+        if self.subtype_col_name in self.merged_sc_dataset_obs.columns:
+            subtype_distance_dict = get_distance_matrices_by_class(
+                adata_X=self.merged_sc_dataset.X.toarray(),
+                obs_df=self.merged_sc_dataset_obs,
+                class_by=self.subtype_col_name,
+                n_jobs=min(max_cpu, 10),
+                max_cells_per_class=max_cells_per_cell_type,
+            )
+            for cell_type, matrix in subtype_distance_dict.items():
+                self.cell_distance_dict.setdefault(cell_type, matrix)
 
     def _process_chunk(
             self,
