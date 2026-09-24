@@ -680,7 +680,7 @@ def _sample_single_neighbor_group(
 
     selected_dataset_id = None
     if 'dataset_id' in obs_df_filtered.columns:
-        dataset_counts = obs_df_filtered.groupby('dataset_id')[class_by].count()
+        dataset_counts = obs_df_filtered.groupby('dataset_id', observed=True)[class_by].count()
         candidate_datasets = dataset_counts.index.to_list()
         if required_dataset_id is not None:
             if required_dataset_id not in dataset_counts.index:
