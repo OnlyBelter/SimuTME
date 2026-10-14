@@ -136,6 +136,13 @@ These parameters control the optional SCT sample-diversity analysis step.
 - `sample_diversity_distance_metric`
 - `sample_diversity_min_samples_per_cell_type`
 
+### Dirichlet sampling
+
+- `dirichlet_sampling_seed`
+  Optional seed for Dirichlet cell-fraction draws. A Mixed dataset can override
+  the global value with its own `dirichlet_sampling_seed`. If neither value is
+  set, SimuTME keeps using the global NumPy random state.
+
 ### Optional sorted-bulk-guided SCT imputation parameters
 
 - `sorted_bulk_cell_type_col`
@@ -229,6 +236,7 @@ For SCT datasets:
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
 - `pred_cell_prop_file_path` (only when `sampling_method_prop: "dirichlet"`)
+- `dirichlet_sampling_seed` (only when `sampling_method_prop: "dirichlet"`)
 
 For Mixed datasets:
 

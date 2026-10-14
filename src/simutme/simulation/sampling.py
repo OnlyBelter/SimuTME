@@ -246,7 +246,8 @@ def uni_random_sampling(n_samples: int,
 def dirichlet_sampling(n_samples: int,
                        cell_types: List[str],
                        alpha: Union[float, Dict[str, float]] = 1.0,
-                       sample_prefix: str = 'dirichlet') -> pd.DataFrame:
+                       sample_prefix: str = 'dirichlet',
+                       rng: Optional[np.random.Generator] = None) -> pd.DataFrame:
     """
     Generate cell fractions using the Dirichlet distribution.
     This is the mathematically standard way to generate compositional data.
@@ -261,6 +262,7 @@ def dirichlet_sampling(n_samples: int,
                - If Dict: {'CellTypeA': 0.5, 'CellTypeB': 2.0}.
                  Missing keys default to 1.0.
         sample_prefix: Prefix for sample index.
+        rng: Optional generator reused across batches for seeded sampling.
 
     Returns:
         pd.DataFrame: Samples x Cell Types
@@ -283,7 +285,10 @@ def dirichlet_sampling(n_samples: int,
 
     # Generate data
     # frac shape: (n_samples, n_cell_types)
-    fracs = np.random.dirichlet(alpha_values, size=n_samples)
+    if rng is None:
+        fracs = np.random.dirichlet(alpha_values, size=n_samples)
+    else:
+        fracs = rng.dirichlet(alpha_values, size=n_samples)
 
     index = [f"{sample_prefix}_{i + 1}" for i in range(n_samples)]
     df = pd.DataFrame(fracs, index=index, columns=cell_types)
@@ -348,7 +353,8 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
                            cell_type2subtype: Dict[str, List[str]],
                            sample_prefix: str = 'sample',
                            cell_prop_prior: Optional[Dict] = None,
-                           dirichlet_alpha: Optional[Union[float, Dict[str, float]]] = None) -> pd.DataFrame:
+                           dirichlet_alpha: Optional[Union[float, Dict[str, float]]] = None,
+                           rng: Optional[np.random.Generator] = None) -> pd.DataFrame:
     """
     Generate cell proportions for simulated bulk GEPs using various sampling strategies.
 
@@ -366,6 +372,7 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
     :param sample_prefix: The prefix for the sample indices in the returned DataFrame.
     :param cell_prop_prior: (Optional) A dictionary defining prior proportions for specific cell types.
         Only used by the 'segment' method.
+    :param rng: (Optional) Generator used by the 'dirichlet' method.
 
     :return: pd.DataFrame
         A DataFrame where rows are samples and columns are cell types.
@@ -442,7 +449,8 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
             df = dirichlet_sampling(n_samples=n_count,
                                     cell_types=cell_type_with_subtype,
                                     alpha=1.0 if dirichlet_alpha is None else dirichlet_alpha,
-                                    sample_prefix=current_prefix)
+                                    sample_prefix=current_prefix,
+                                    rng=rng)
 
         if df is not None:
             generated_dfs.append(df)

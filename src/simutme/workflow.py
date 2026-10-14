@@ -364,6 +364,7 @@ class SimuConfig:
     sorted_bulk_cell_type_col: str = "Tumor_model_annot"
     sorted_bulk_imputation_eps: float = 1e-8
     sorted_bulk_imputation_seed: int = 123
+    dirichlet_sampling_seed: int | None = None
     sorted_bulk_imputation_batch_size: int = 128
     sorted_bulk_imputation_boxplot_sample_size: int = 1000
     sorted_bulk_imputation_y_frac_threshold: float = 0.15
@@ -919,7 +920,11 @@ def run_bulk_simulation(dataset_name: str,
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
     dataset_type = params.get('dataset_type', 'mixed').lower()
-    dirichlet_only_keys = {"dirichlet_alpha", "pred_cell_prop_file_path"}
+    dirichlet_only_keys = {
+        "dirichlet_alpha",
+        "pred_cell_prop_file_path",
+        "dirichlet_sampling_seed",
+    }
     if dataset_type != 'sct':
         if 'n_base' in params:
             raise ValueError(
@@ -1098,6 +1103,7 @@ def run_bulk_simulation(dataset_name: str,
                 )
             resolved_dirichlet_alpha = None
             pred_cell_prop_file_path = None
+            dirichlet_sampling_seed = None
         else:
             output_cell_type2subtypes = restrict_cell_type2subtype_to_output_types(
                 resolved_cell_type2subtypes,
@@ -1108,6 +1114,12 @@ def run_bulk_simulation(dataset_name: str,
                 get_default_dirichlet_alpha(output_cell_type2subtypes),
             )
             pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
+            dirichlet_sampling_seed = _resolve_dataset_override(
+                params,
+                config,
+                "dirichlet_sampling_seed",
+                config.dirichlet_sampling_seed,
+            )
         if 'sampling_method_gep' in params:
             logging.info(
                 '   > Mixed dataset %s ignores params["sampling_method_gep"]=%r and uses "random" '
@@ -1159,6 +1171,7 @@ def run_bulk_simulation(dataset_name: str,
                 cell_prop_prior=params.get('cell_prop_prior', None),
                 dirichlet_alpha=resolved_dirichlet_alpha,
                 pred_cell_prop_file_path=pred_cell_prop_file_path,
+                dirichlet_sampling_seed=dirichlet_sampling_seed,
                 high_corr_gene_list=resolved_gep_filtering.high_corr_gene_list,
                 filtering_by_gene_range=resolved_gep_filtering.filtering_by_gene_range,
                 min_percentage_within_gene_range=resolved_gep_filtering.min_percentage_within_gene_range,

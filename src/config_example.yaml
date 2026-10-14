@@ -111,6 +111,7 @@ parameters:
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
   sorted_bulk_imputation_seed: 123  # Optional: random seed for diagnostic sampling during sorted-bulk-guided SCT imputation
+  dirichlet_sampling_seed: 123  # Optional: seed for reproducible Dirichlet cell-fraction draws
   sorted_bulk_imputation_batch_size: 128  # Optional: batch size during SCT imputation
   sorted_bulk_imputation_boxplot_sample_size: 1000  # Optional: sample size for SCT boxplot rendering
   sorted_bulk_imputation_bulk_weight: 0.5  # Optional: sorted-bulk contribution for the included==1 averaging branch; 0.5 keeps the previous 50/50 blend

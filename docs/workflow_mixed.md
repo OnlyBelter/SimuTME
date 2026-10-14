@@ -76,6 +76,7 @@ The visual summary is shown below.
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
 - `pred_cell_prop_file_path` for `sampling_method_prop: "dirichlet"`
+- `dirichlet_sampling_seed` for `sampling_method_prop: "dirichlet"`
 
 The old Mixed-dataset key `filtering` is no longer supported. Use
 `gep_filtering` for GEP-level filtering instead.
@@ -183,6 +184,10 @@ For `sampling_method_prop: "dirichlet"`, the workflow also supports:
   An optional CSV containing predicted cell proportions across samples. When
   provided, SimuTME estimates `dirichlet_alpha` from the matched cell-type
   columns and uses the estimated values instead of the manual dictionary.
+- `dirichlet_sampling_seed`
+  An optional seed for reproducible Dirichlet cell-fraction draws. A dataset
+  value overrides `parameters.dirichlet_sampling_seed`; the seed does not
+  control other stochastic steps in Mixed generation.
 
 ## Main Outputs
 

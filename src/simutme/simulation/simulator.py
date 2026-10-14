@@ -75,6 +75,7 @@ class GEPGenerationConfig:
     norm_ord: int = 1
     dirichlet_alpha: Optional[Dict[str, float]] = None
     pred_cell_prop_file_path: Optional[Union[str, Path]] = None
+    dirichlet_sampling_seed: Optional[int] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -82,6 +83,14 @@ class GEPGenerationConfig:
             raise ValueError("n_samples must be positive")
         if self.simu_method not in ('ave', 'mul'):
             raise ValueError(f"Invalid simu_method: {self.simu_method}")
+        if self.dirichlet_sampling_seed is not None and (
+            isinstance(self.dirichlet_sampling_seed, bool)
+            or not isinstance(self.dirichlet_sampling_seed, (int, np.integer))
+            or self.dirichlet_sampling_seed < 0
+        ):
+            raise ValueError(
+                '"dirichlet_sampling_seed" must be a non-negative integer or None.'
+            )
         if self.pred_cell_prop_file_path not in (None, ""):
             self.pred_cell_prop_file_path = Path(self.pred_cell_prop_file_path)
             if not self.pred_cell_prop_file_path.exists():
@@ -409,6 +418,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             )
             logger.info('Estimated Dirichlet alpha for %d cell types.', len(dirichlet_alpha))
 
+        dirichlet_rng = None
+        if (
+            config.sampling_method_prop == 'dirichlet'
+            and config.dirichlet_sampling_seed is not None
+        ):
+            dirichlet_rng = np.random.default_rng(config.dirichlet_sampling_seed)
+
         with tqdm(total=self.n_samples) as pbar:
             if self.generated_bulk_gep_counter != 0:
                 pbar.update(self.generated_bulk_gep_counter)
@@ -422,6 +438,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     cell_prop_prior=config.cell_prop_prior if config.filtering else None,
                     cell_type2subtype=self.cell_fraction_type2subtype,
                     dirichlet_alpha=dirichlet_alpha,
+                    rng=dirichlet_rng,
                 )
 
                 # 2. Sample Cells (Multiprocessing)
