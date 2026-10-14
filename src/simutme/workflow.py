@@ -333,7 +333,7 @@ class SimuConfig:
     gene_quantile_range: List[float]
     gep_filtering_quantile: Tuple[float, float]
     pca_n_components: float
-    gene_list_type: str
+    gene_list_type: str = "high_corr_gene_and_quantile_range"
     gep_filtering_enabled_default: bool = False
     gep_filtering_reference_file: Path | None = None
     gep_filtering_ref_exp_type: str | None = None

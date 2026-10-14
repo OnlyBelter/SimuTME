@@ -134,6 +134,57 @@ def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path)
     assert config.mixed_sct_auto_eager_max_gb == 6.5
 
 
+@pytest.mark.parametrize(
+    ("specific_gene_filtering_type", "expected_gene_filtering_type"),
+    [
+        ("quantile_range", "quantile_range"),
+        (None, "high_corr_gene_and_quantile_range"),
+    ],
+)
+def test_simu_config_from_yaml_defaults_legacy_gene_list_type_when_omitted(
+    tmp_path: Path,
+    specific_gene_filtering_type: str | None,
+    expected_gene_filtering_type: str,
+):
+    config_path = tmp_path / "config.yaml"
+    parameters = {
+        "gene_quantile_range": [0.005, 0.5, 0.995],
+        "gep_filtering_quantile": [0.0, 0.95],
+        "pca_n_components": 0.9,
+    }
+    if specific_gene_filtering_type is not None:
+        parameters["gene_filtering_type"] = specific_gene_filtering_type
+
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {
+                    "simu_bulk_dir": "./datasets",
+                    "tcga2cancer_type_file_path": "./datasets/tcga_id.csv",
+                    "tcga_merged_tpm_file_path": "./datasets/merged_tpm.csv",
+                    "high_corr_gene_file_path": None,
+                    "merged_sc_dataset_file_path": "./datasets/merged_sc.h5ad",
+                },
+                "constants": {
+                    "sc_dataset_ids": ["ds1"],
+                    "cell_type2subtypes": {"B Cells": ["B Cells"]},
+                    "total_rna_coefficient": {"B Cells": 1.0},
+                    "n_base": 30,
+                    "output_types": ["B Cells"],
+                },
+                "parameters": parameters,
+                "datasets": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = SimuConfig.from_yaml(str(config_path))
+
+    assert config.gene_list_type == "high_corr_gene_and_quantile_range"
+    assert config.gene_filtering_type == expected_gene_filtering_type
+
+
 def test_simu_config_from_yaml_rejects_non_positive_mixed_sct_auto_eager_max_gb(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
