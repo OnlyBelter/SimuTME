@@ -71,7 +71,7 @@ The visual summary is shown below.
 - `gene_filtering_n_gene_max`
 - `gene_filtering_quantile_range`
 - `gene_filtering_q_col_name`
-- `gene_filtering_plot_pca`
+- `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
@@ -233,15 +233,19 @@ Mixed filtering is now split into two explicit stages:
 - Uses the `gene_filtering_*` parameter family
 - Reuses `paths.high_corr_gene_file_path` as the shared fallback high-corr gene list when needed
 
-When gene-level filtering is enabled, the workflow may generate:
+When `plot_pca_for_comparison` is enabled, the workflow generates a gene list
+for PCA, a PCA model, transformed coordinates, and a PCA plot, regardless of
+whether gene-level filtering is enabled. With gene-level filtering disabled,
+the PCA gene list contains all genes shared by the Mixed data and TCGA.
+Gene-filtered expression outputs are generated only when gene-level filtering
+is enabled.
 
-- filtered `.h5ad` files
-- filtered gene lists
-- gene/cell-fraction correlation tables
 - PCA model files
 - PCA-transformed data tables
 - PCA plots comparing simulated bulk data with TCGA reference samples
 - dataset-level summary JSON files
+- filtered `.h5ad` files, filtered gene lists, and gene/cell-fraction
+  correlation tables when gene-level filtering is enabled
 
 These artifacts are written under the dataset-local directory:
 
@@ -249,12 +253,17 @@ These artifacts are written under the dataset-local directory:
 
 Typical files include:
 
-- `gene_list_filtered_by_<gene_filtering_type>.csv`
+- `gene_list_filtered_by_<gene_filtering_type>.csv` when gene filtering is enabled
+- `gene_list_all_genes_for_pca.csv` when gene filtering is disabled
 - `gene_corr_with_cell_fraction.csv`
-- `both_TCGA_and_simu_<dataset_name>_PCA_<gene_filtering_type>.joblib`
-- `<dataset_name>_PCA_with_TCGA_<gene_filtering_type>.csv`
-- `<dataset_name>_PCA_with_TCGA_<gene_filtering_type>_PC0_PC1.png`
+- `both_TCGA_and_simu_<dataset_name>_PCA_<postfix>.joblib`
+- `<dataset_name>_PCA_with_TCGA_<postfix>.csv`
+- `<dataset_name>_PCA_with_TCGA_<postfix>_PC0_PC1.png`
 - `mixed_dataset_summary.json`
+
+The PCA postfix is the gene-filtering type when filtering is enabled and
+`all_genes_for_pca` otherwise. The summary records the plot path in
+`pca_plot_file`.
 
 The filtered `.h5ad` is written beside the original Mixed `.h5ad` using either
 the configured `gene_filtering_filtered_dataset_postfix` or the default
@@ -286,12 +295,15 @@ Global filtering defaults live under `parameters`:
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`
-- `gene_filtering_plot_pca`
+- `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 
 Mixed datasets may override these defaults with the flat dataset-level fields
 listed above.
+
+The legacy `gene_filtering_plot_pca` key remains supported as an alias for
+`plot_pca_for_comparison`; the new key takes precedence when both are set.
 
 For backward compatibility, older global fields still work:
 

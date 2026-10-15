@@ -104,9 +104,9 @@ parameters:
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
   gene_filtering_save_filtered_h5ad: true  # Optional switch for writing the filtered Mixed `.h5ad`
   gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming
-  gene_filtering_plot_pca: true  # Optional PCA plotting switch for post-generation filtering
-  gene_filtering_pca_n_components: 2  # Optional PCA component count for post-generation PCA plotting; must be >= 2 when plotting is enabled
-  gene_filtering_pca_figsize: [5, 5]  # Optional figure size for post-generation PCA plots
+  plot_pca_for_comparison: true  # Optional Mixed-versus-TCGA PCA plotting switch; works with or without gene filtering
+  gene_filtering_pca_n_components: 2  # Optional PCA component count for comparison plots; must be >= 2 when plotting is enabled
+  gene_filtering_pca_figsize: [5, 5]  # Optional figure size for comparison plots
   n_base: 100
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
@@ -198,7 +198,7 @@ datasets:
     gep_filtering_method: "mean_gep"  # Example Mixed override for GEP-level filtering
     gep_filtering_quantile: [0.0, 0.98]  # Example Mixed override for GEP-level distance thresholds
     gene_filtering_type: "high_corr_gene"  # Example Mixed override for post-generation filtering
-    gene_filtering_plot_pca: false  # Example Mixed override that skips PCA artifacts but still writes the filtered `.h5ad`
+    plot_pca_for_comparison: false  # Example Mixed override that skips PCA artifacts but still writes the filtered `.h5ad`
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

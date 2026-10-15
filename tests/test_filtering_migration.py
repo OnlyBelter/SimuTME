@@ -114,7 +114,7 @@ def test_resolve_gene_filtering_params_prefers_dataset_overrides_over_global_def
             "gene_filtering": True,
             "gene_filtering_corr_threshold": 0.15,
             "gene_filtering_n_gene_max": 2000,
-            "gene_filtering_plot_pca": True,
+            "plot_pca_for_comparison": True,
             "gene_filtering_pca_figsize": [6, 4],
         },
         config=config,
@@ -238,6 +238,69 @@ def test_run_gene_filtering_postprocess_generates_high_corr_on_the_fly_when_file
     assert Path(outputs["gene_list_file"]).exists()
 
 
+def test_run_pca_comparison_when_gene_filtering_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
+    generated_h5ad.write_text("placeholder", encoding="utf-8")
+    tcga_file = tmp_path / "tcga.csv"
+    config = _make_filtering_config(tmp_path)
+    captured = {}
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def get_df(self):
+            return pd.DataFrame({"G1": [1.0], "G2": [2.0], "G3": [3.0]}, index=["sample_1"])
+
+    class FakeReadExp:
+        def __init__(self, exp_file, exp_type=None):
+            self.exp_file = exp_file
+
+        def get_exp(self):
+            return pd.DataFrame({"G1": [1.0], "G2": [2.0], "G4": [4.0]}, index=["tcga_1"])
+
+    def fake_pca_plot(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    monkeypatch.setattr(workflow_module, "ReadExp", FakeReadExp)
+    monkeypatch.setattr(workflow_module, "filtering_by_gene_list_and_pca_plot", fake_pca_plot)
+
+    outputs = _run_gene_filtering_postprocess(
+        dataset_name="Mixed_Test",
+        generated_bulk_gep_fp=generated_h5ad,
+        params={},
+        config=config,
+        resolved_params=ResolvedGeneFilteringParams(
+            enabled=False,
+            reference_file=str(tcga_file),
+            filtering_type="high_corr_gene",
+            quantile_range=None,
+            q_col_name=None,
+            corr_threshold=0.3,
+            n_gene_max=1000,
+            high_corr_gene_file=None,
+            save_filtered_h5ad=True,
+            filtered_dataset_postfix=None,
+            plot_pca=True,
+            pca_n_components=2,
+            pca_figsize=(5.0, 5.0),
+        ),
+    )
+
+    assert pd.read_csv(outputs["gene_list_file"])["gene_name"].tolist() == ["G1", "G2"]
+    assert outputs["pca_model_file"].endswith("_PCA_all_genes_for_pca.joblib")
+    assert outputs["pca_data_file"].endswith("_PCA_with_TCGA_all_genes_for_pca.csv")
+    assert outputs["pca_plot_file"].endswith("_PCA_with_TCGA_all_genes_for_pca_PC0_PC1.png")
+    assert outputs["filtered_bulk_gep_file"] is None
+    assert captured["gene_list"] == ["G1", "G2"]
+    assert captured.get("h5ad_file_path") is None
+    assert captured["if_plot_pca"] is True
+
+
 def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
     filtered_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p_filtered_by_high_corr_gene.h5ad"
@@ -301,6 +364,7 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
             "gene_list_file": str(gene_list_file),
             "pca_model_file": str(result_dir / "pca.joblib"),
             "pca_data_file": str(result_dir / "pca.csv"),
+            "pca_plot_file": str(result_dir / "pca.png"),
         },
         gep_filtering_input_n_samples=14,
         gep_filtering_kept_n_samples=10,
@@ -317,12 +381,15 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
     assert summary["filtered_n_genes"] == 3
     assert summary["removed_n_genes"] == 2
     assert summary["filtered_gene_count"] == 3
+    assert summary["pca_plot_file"] == str(result_dir / "pca.png")
     assert summary["gene_filtering_type"] == "high_corr_gene"
 
 
 def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
     generated_h5ad.write_text("placeholder", encoding="utf-8")
+    all_gene_list = tmp_path / "gene_list_all_genes_for_pca.csv"
+    pd.DataFrame({"gene_name": ["G1", "G2", "G3"]}).to_csv(all_gene_list, index=False)
 
     class FakeReadH5AD:
         def __init__(self, file_path):
@@ -370,13 +437,15 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
             pca_n_components=2,
             pca_figsize=(5.0, 5.0),
         ),
-        postprocess_outputs={},
+        postprocess_outputs={"gene_list_file": str(all_gene_list)},
     )
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["gep_filtering_input_n_samples"] is None
     assert summary["gep_filtering_kept_n_samples"] is None
     assert summary["gep_filtering_removed_n_samples"] is None
+    assert summary["gene_list_file"] == str(all_gene_list)
+    assert summary["filtered_gene_count"] is None
     assert summary["removed_n_genes"] is None
 
 
@@ -402,12 +471,15 @@ def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(
 
     class FakePCAModel:
         explained_variance_ratio_ = np.array([0.6, 0.4])
+        mean_ = np.zeros(2)
+        components_ = np.eye(2)
 
         def transform(self, exp_df):
             return np.asarray(exp_df.iloc[:, :2], dtype=float)
 
-    def fake_do_pca_analysis(exp_df, n_components, pca_result_fp):
+    def fake_do_pca_analysis(exp_df, n_components, pca_result_fp, save_model=False):
         calls["do_pca_analysis"] += 1
+        calls["save_model"] = save_model
         return FakePCAModel()
 
     def fake_plot_pca(data, figsize, result_fp, color_code, explained_variance_ratio):
@@ -437,4 +509,5 @@ def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(
     )
 
     assert calls["do_pca_analysis"] == 1
+    assert calls["save_model"] is True
     assert calls["plot_pca"] == 1

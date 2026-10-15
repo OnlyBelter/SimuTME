@@ -355,7 +355,8 @@ class SimuConfig:
     gene_filtering_n_gene_max: int = 1000
     gene_filtering_save_filtered_h5ad: bool = True
     gene_filtering_filtered_dataset_postfix: str | None = None
-    gene_filtering_plot_pca: bool = True
+    plot_pca_for_comparison: bool | None = None
+    gene_filtering_plot_pca: bool | None = None  # Deprecated alias for plot_pca_for_comparison
     gene_filtering_pca_n_components: int = 2
     gene_filtering_pca_figsize: Tuple[float, float] = (5.0, 5.0)
     sorted_bulk_expr_file_path: Path | None = None
@@ -423,6 +424,12 @@ class SimuConfig:
     def __post_init__(self):
         if self.gep_pca_n_components in (None, ""):
             self.gep_pca_n_components = self.pca_n_components
+        if self.plot_pca_for_comparison is None:
+            self.plot_pca_for_comparison = (
+                True if self.gene_filtering_plot_pca is None else bool(self.gene_filtering_plot_pca)
+            )
+        if self.gene_filtering_plot_pca is None:
+            self.gene_filtering_plot_pca = bool(self.plot_pca_for_comparison)
         if self.gene_filtering_type in (None, ""):
             self.gene_filtering_type = self.gene_list_type
         if self.gene_filtering_quantile_range in (None, []):
@@ -770,6 +777,14 @@ def _resolve_gene_filtering_params(
             config.high_corr_gene_file_path,
             f'Mixed dataset "{dataset_name}" shared gene filtering fallback',
         )
+    plot_pca = params.get("plot_pca_for_comparison")
+    if plot_pca is None:
+        plot_pca = params.get("gene_filtering_plot_pca")
+    if plot_pca is None:
+        plot_pca = getattr(config, "plot_pca_for_comparison", None)
+    if plot_pca is None:
+        plot_pca = getattr(config, "gene_filtering_plot_pca", True)
+
     resolved = ResolvedGeneFilteringParams(
         enabled=enabled,
         reference_file=_resolve_optional_path_value(
@@ -790,7 +805,7 @@ def _resolve_gene_filtering_params(
             "gene_filtering_filtered_dataset_postfix",
             config.gene_filtering_filtered_dataset_postfix,
         ),
-        plot_pca=bool(_resolve_dataset_override(params, config, "gene_filtering_plot_pca", config.gene_filtering_plot_pca)),
+        plot_pca=bool(plot_pca),
         pca_n_components=int(
             _resolve_dataset_override(params, config, "gene_filtering_pca_n_components", config.gene_filtering_pca_n_components)
         ),
@@ -801,11 +816,15 @@ def _resolve_gene_filtering_params(
     )
     if len(resolved.pca_figsize) != 2:
         raise ValueError('"gene_filtering_pca_figsize" must contain exactly two values.')
+    if resolved.enabled and not resolved.reference_file:
+        raise ValueError(
+            f'"gene_filtering_reference_file" must be set when gene filtering is enabled for Mixed dataset "{dataset_name}".'
+        )
+    if resolved.plot_pca and not resolved.reference_file:
+        raise ValueError(
+            f'"gene_filtering_reference_file" must be set when PCA comparison is enabled for Mixed dataset "{dataset_name}".'
+        )
     if resolved.enabled:
-        if not resolved.reference_file:
-            raise ValueError(
-                f'"gene_filtering_reference_file" must be set when gene filtering is enabled for Mixed dataset "{dataset_name}".'
-            )
         if "quantile_range" in resolved.filtering_type and resolved.quantile_range is None:
             raise ValueError(
                 f'"gene_filtering_quantile_range" must be set when the filtering type uses quantile_range for Mixed dataset "{dataset_name}".'
@@ -815,10 +834,10 @@ def _resolve_gene_filtering_params(
                 raise ValueError(
                     f'"gene_filtering_q_col_name" must match the length of the quantile range for Mixed dataset "{dataset_name}".'
                 )
-        if resolved.plot_pca and resolved.pca_n_components < 2:
-            raise ValueError(
-                f'"gene_filtering_pca_n_components" must be >= 2 when PCA plotting is enabled for Mixed dataset "{dataset_name}".'
-            )
+    if resolved.plot_pca and resolved.pca_n_components < 2:
+        raise ValueError(
+            f'"gene_filtering_pca_n_components" must be >= 2 when plot_pca_for_comparison is enabled for Mixed dataset "{dataset_name}".'
+        )
     return resolved
 
 
@@ -1377,9 +1396,49 @@ def _run_gene_filtering_postprocess(
         "corr_result_file": None,
         "pca_model_file": None,
         "pca_data_file": None,
+        "pca_plot_file": None,
     }
+    current_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     if not resolved_params.enabled:
         logging.info("   > Gene-level filtering disabled for %s.", dataset_name)
+        if not resolved_params.plot_pca:
+            return outputs
+
+        check_dir(current_result_dir)
+        bulk_exp = ReadH5AD(generated_bulk_gep_fp).get_df()
+        tcga_exp = ReadExp(resolved_params.reference_file, exp_type="TPM").get_exp()
+        gene_list = [gene for gene in bulk_exp.columns if gene in tcga_exp.columns]
+        if not gene_list:
+            raise ValueError(
+                f'No genes are shared between Mixed dataset "{dataset_name}" and the PCA reference.'
+            )
+
+        gene_list_file_path = current_result_dir / "gene_list_all_genes_for_pca.csv"
+        pca_model_fp = current_result_dir / f"both_TCGA_and_simu_{dataset_name}_PCA_all_genes_for_pca.joblib"
+        pca_data_fp = current_result_dir / f"{dataset_name}_PCA_with_TCGA_all_genes_for_pca.csv"
+        pca_plot_fp = current_result_dir / f"{dataset_name}_PCA_with_TCGA_all_genes_for_pca_PC0_PC1.png"
+        pd.DataFrame({"gene_name": gene_list}).to_csv(gene_list_file_path, index=False)
+        filtering_by_gene_list_and_pca_plot(
+            bulk_exp=bulk_exp,
+            tcga_exp=tcga_exp,
+            gene_list=gene_list,
+            result_dir=str(current_result_dir),
+            simu_dataset_name=dataset_name,
+            n_components=resolved_params.pca_n_components,
+            pca_model_name_postfix="all_genes_for_pca",
+            pca_model_file_path=str(pca_model_fp),
+            pca_data_file_path=str(pca_data_fp),
+            figsize=resolved_params.pca_figsize,
+            if_plot_pca=True,
+        )
+        outputs.update(
+            {
+                "gene_list_file": str(gene_list_file_path),
+                "pca_model_file": str(pca_model_fp),
+                "pca_data_file": str(pca_data_fp),
+                "pca_plot_file": str(pca_plot_fp),
+            }
+        )
         return outputs
 
     logging.info(
@@ -1387,7 +1446,6 @@ def _run_gene_filtering_postprocess(
         resolved_params.filtering_type,
         dataset_name,
     )
-    current_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(current_result_dir)
 
     gene_list_file_path = current_result_dir / f"gene_list_filtered_by_{resolved_params.filtering_type}.csv"
@@ -1477,6 +1535,11 @@ def _run_gene_filtering_postprocess(
             "corr_result_file": str(corr_result_fp),
             "pca_model_file": str(pca_model_fp) if resolved_params.plot_pca else None,
             "pca_data_file": str(pca_data_fp) if resolved_params.plot_pca else None,
+            "pca_plot_file": (
+                str(current_result_dir / f"{dataset_name}_PCA_with_TCGA_{resolved_params.filtering_type}_PC0_PC1.png")
+                if resolved_params.plot_pca
+                else None
+            ),
         }
     )
     return outputs
@@ -1509,11 +1572,11 @@ def _build_mixed_dataset_summary(
     filtered_shape = _get_h5ad_shape(postprocess_outputs.get("filtered_bulk_gep_file"))
     gene_list_file = postprocess_outputs.get("gene_list_file")
     filtered_gene_count = None
-    if gene_list_file and Path(gene_list_file).exists():
+    if gene_filtering.enabled and gene_list_file and Path(gene_list_file).exists():
         filtered_gene_count = len(_read_gene_list_file(gene_list_file))
     filtered_n_genes = filtered_shape[1] if filtered_shape else None
     removed_n_genes = None
-    if generated_shape:
+    if gene_filtering.enabled and generated_shape:
         filtered_gene_count_for_summary = (
             filtered_n_genes if filtered_n_genes is not None else filtered_gene_count
         )
@@ -1541,6 +1604,7 @@ def _build_mixed_dataset_summary(
         "gene_list_file": gene_list_file,
         "pca_model_file": postprocess_outputs.get("pca_model_file"),
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
+        "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
     }
     summary_path = summary_dir / "mixed_dataset_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -1748,7 +1812,8 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
             # combine both simulated bulk cell GEPs and TCGA dataset together
             simu_bulk_with_tcga = pd.concat([bulk_exp, tcga_exp])
             pca_model = do_pca_analysis(exp_df=simu_bulk_with_tcga, n_components=n_components,
-                                        pca_result_fp=pca_model_file_path)
+                                        pca_result_fp=pca_model_file_path,
+                                        save_model=pca_model_file_path is not None)
             pcs = safe_pca_transform(
                 pca_model,
                 simu_bulk_with_tcga,

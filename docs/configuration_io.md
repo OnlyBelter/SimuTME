@@ -110,7 +110,7 @@ Dataset-level Mixed fields can override them.
 - `gep_pca_n_components`
 - `gep_norm_ord`
 
-#### Gene-level filtering defaults
+#### Gene-level filtering and PCA comparison defaults
 
 - `gene_filtering_enabled_default`
 - `gene_filtering_reference_file`
@@ -121,9 +121,14 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`
-- `gene_filtering_plot_pca`
+- `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+
+`plot_pca_for_comparison` is independent of `gene_filtering`: when enabled
+without gene filtering, the PCA comparison uses all genes shared by the Mixed
+dataset and TCGA. The legacy `gene_filtering_plot_pca` key remains supported;
+the new key takes precedence if both are set.
 
 ### SCT sample-diversity parameters
 
@@ -231,7 +236,7 @@ For SCT datasets:
 - `gene_filtering_n_gene_max`
 - `gene_filtering_quantile_range`
 - `gene_filtering_q_col_name`
-- `gene_filtering_plot_pca`
+- `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
