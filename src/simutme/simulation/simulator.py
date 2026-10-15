@@ -695,6 +695,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 logger.info(f'{np.sum(valid_gep_list)} were kept after filtering by gene range.')
             simulated_gep = simulated_gep.loc[valid_gep_list, :].copy()
 
+        if simulated_gep is None or simulated_gep.empty:
+            return None
+
             # 4. Distance / PCA Filtering
         if (filtering_method in ['median_gep', 'mean_gep', 'linear_mmd']) and (simulated_gep is not None):
 
@@ -782,8 +785,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 simulated_gep = simulated_gep_obj.get_exp()  # TPM
                 assert np.all(simulated_gep.columns == gene_list_in_pca)
                 simulated_gep = log2_transform(simulated_gep)
+                surviving_sample_ids = simulated_gep.index.copy()
                 simulated_gep = safe_pca_transform(pca_model, simulated_gep, label='Simulated expression matrix')
-                simulated_gep = pd.DataFrame(simulated_gep, index=simulated_gep_bak.index,
+                simulated_gep = pd.DataFrame(simulated_gep, index=surviving_sample_ids,
                                              columns=range(simulated_gep.shape[1]))
                 # simulated_gep = simulated_gep.iloc[:, :d].copy()
             assert np.all(exp_ref_df.columns == simulated_gep.columns)

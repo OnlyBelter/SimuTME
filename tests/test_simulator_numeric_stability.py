@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from joblib import dump
 from sklearn.decomposition import PCA
 
@@ -277,6 +278,74 @@ def test_filter_simulated_geps_reloads_reference_for_cached_pca_state():
     assert not filtered.empty
     assert generator.gep_filtering_pca_target == 1
     assert generator.gep_filtering_n_pcs == 1
+
+
+@pytest.mark.parametrize("survivors", [[], ["sim_2"], ["sim_3", "sim_1"]])
+def test_gene_range_filter_preserves_survivors_before_pca(tmp_path, monkeypatch, survivors):
+    import simutme.simulation.simulator as simulator_module
+
+    generator = object.__new__(BulkGEPGenerator)
+    generator.m_gep_ref = np.array([[0.0]])
+    generator.q_dis_nn_ref_upper = 1.0e9
+    generator.q_dis_nn_ref_lower = 0.0
+    generator.filtering_quantile_upper = 1.0
+    generator.filtering_quantile_lower = None
+    simulated = pd.DataFrame(
+        {"gene_a": [160.0, 140.0, 150.0], "gene_b": [340.0, 360.0, 350.0]},
+        index=["sim_3", "sim_1", "sim_2"],
+    )
+    reference = pd.DataFrame(
+        {"gene_a": [100.0, 150.0, 200.0], "gene_b": [400.0, 350.0, 300.0]},
+        index=["ref_1", "ref_2", "ref_3"],
+    )
+
+    class FakeExpObj:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_exp(self):
+            return reference.copy()
+
+    monkeypatch.setattr(simulator_module, "ExpObj", FakeExpObj)
+    monkeypatch.setattr(
+        simulator_module,
+        "get_gene_list_filtered_by_quantile_range",
+        lambda bulk_exp, **kwargs: list(reference.columns) if bulk_exp.name in survivors else [],
+    )
+    transform_labels = []
+    original_transform = simulator_module.safe_pca_transform
+
+    def recording_transform(pca, exp, label):
+        transform_labels.append(label)
+        return original_transform(pca, exp, label=label)
+
+    monkeypatch.setattr(simulator_module, "safe_pca_transform", recording_transform)
+    filtered = generator._filter_simulated_geps(
+        simulated_gep=simulated,
+        simulated_gep_bak=simulated.copy(),
+        reference_file=str(tmp_path / "TCGA" / "tpm" / "reference.csv"),
+        ref_exp_type="TPM",
+        filtering_method="mean_gep",
+        sample_id_for_filtering=[],
+        gene_list_in_sc_ds=list(simulated.columns),
+        high_corr_gene_list=None,
+        filtering_by_gene_range=True,
+        min_percentage_within_gene_range=0.95,
+        gene_quantile_range=[0.01, 0.5, 0.99],
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        norm_ord=1,
+        n_top=5,
+        show_filtering_info=False,
+    )
+
+    if not survivors:
+        assert filtered is None
+        assert transform_labels == []
+        assert not (tmp_path / "TCGA" / "pca_model_1").exists()
+    else:
+        pd.testing.assert_frame_equal(filtered, simulated.loc[survivors])
+        assert "Simulated expression matrix" in transform_labels
 
 
 def test_safe_pca_transform_handles_large_values_without_sklearn_matmul():
