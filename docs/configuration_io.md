@@ -115,6 +115,8 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_enabled_default`
 - `gene_filtering_reference_file`
 - `gene_filtering_type`
+- `calculate_gene_cell_prop_correlation`
+- `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_quantile_range`
 - `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
@@ -129,6 +131,14 @@ Dataset-level Mixed fields can override them.
 without gene filtering, the PCA comparison uses all genes shared by the Mixed
 dataset and TCGA. The legacy `gene_filtering_plot_pca` key remains supported;
 the new key takes precedence if both are set.
+
+`calculate_gene_cell_prop_correlation` writes the complete, unfiltered
+gene-by-cell-type correlation table for a Mixed dataset. A target can name an
+earlier segment-sampled, unfiltered Mixed dataset with
+`gene_filtering_correlation_reference_dataset`; its own correlation threshold
+and maximum genes per cell type are applied without changing the source table.
+An explicit `gene_filtering_high_corr_gene_file` or
+`paths.high_corr_gene_file_path` gene list takes precedence.
 
 ### SCT sample-diversity parameters
 
@@ -232,6 +242,8 @@ For SCT datasets:
 - `gene_filtering_type`
 - `gene_filtering_reference_file`
 - `gene_filtering_high_corr_gene_file`
+- `calculate_gene_cell_prop_correlation`
+- `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_quantile_range`

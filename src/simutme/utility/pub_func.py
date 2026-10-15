@@ -611,7 +611,9 @@ def get_core_zone_of_pca(pca_data: pd.DataFrame, col_x, col_y, q_lower, q_upper)
 
 def cal_corr_gene_exp_with_cell_frac(gene_exp: pd.DataFrame, cell_frac: pd.DataFrame,
                                      result_file_path=None, filtered_by_corr: float = None,
-                                     filter_by_num: int = None):
+                                     filter_by_num: int = None,
+                                     full_correlation_file_path=None,
+                                     correlation_df: pd.DataFrame | None = None):
     """
     calculate correlation between gene expression values and cell fractions for each cell type
     :param gene_exp: non-log space, tpm/cpm, samples by genes
@@ -619,16 +621,27 @@ def cal_corr_gene_exp_with_cell_frac(gene_exp: pd.DataFrame, cell_frac: pd.DataF
     :param result_file_path:
     :param filtered_by_corr: threshold of correlation, only keep genes with higher corr than this value
     :param filter_by_num: the max number of genes to keep for each cell type
+    :param full_correlation_file_path: optional path for the unfiltered correlation cache
+    :param correlation_df: optional precomputed unfiltered matrix to filter in memory
     :return: correlation, genes by cell types, filtered or all gene list
     """
-    if not os.path.exists(result_file_path):
+    if correlation_df is not None:
+        corr_df = correlation_df.copy()
+    elif full_correlation_file_path and os.path.exists(full_correlation_file_path):
+        corr_df = pd.read_csv(full_correlation_file_path, index_col=0)
+    elif not os.path.exists(result_file_path) or full_correlation_file_path:
+        if gene_exp is None or cell_frac is None:
+            raise ValueError(
+                'Gene expression and cell fractions are required to calculate a new correlation matrix.'
+            )
         _, n_cell_type = cell_frac.shape
-        _, n_gene = gene_exp.shape
         print(f'The shape of cell_frac: {cell_frac.shape}')
         print(f'The shape of gene_exp: {gene_exp.shape}')
         corr = np.corrcoef(cell_frac.values, gene_exp.values, rowvar=False)
         corr_df = pd.DataFrame(data=corr[:n_cell_type, n_cell_type:].T,
                                columns=cell_frac.columns, index=gene_exp.columns)
+        if full_correlation_file_path:
+            corr_df.to_csv(full_correlation_file_path, float_format='%g')
     else:
         print(f'Previous correlation file will be used: {result_file_path}')
         corr_df = pd.read_csv(result_file_path, index_col=0)

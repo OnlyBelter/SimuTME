@@ -100,6 +100,8 @@ parameters:
   gene_filtering_type: "high_corr_gene_and_quantile_range"  # Optional post-generation gene filtering mode; defaults to the legacy `gene_list_type`
   gene_filtering_quantile_range: [0.005, 0.5, 0.995]  # Optional TCGA quantile triplet for quantile-based gene filtering
   gene_filtering_q_col_name: ["q_0.5", "q_50", "q_99.5"]  # Optional column names paired with the quantile triplet
+  calculate_gene_cell_prop_correlation: false  # Optional switch for saving a full, unfiltered Mixed gene/cell-fraction correlation matrix
+  gene_filtering_correlation_reference_dataset: null  # Optional source Mixed dataset name for reusable high-correlation filtering
   gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
   gene_filtering_save_filtered_h5ad: true  # Optional switch for writing the filtered Mixed `.h5ad`

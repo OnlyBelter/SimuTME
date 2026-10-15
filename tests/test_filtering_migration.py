@@ -53,9 +53,14 @@ def _make_filtering_config(tmp_path: Path):
         gene_filtering_n_gene_max=1000,
         gene_filtering_save_filtered_h5ad=True,
         gene_filtering_filtered_dataset_postfix=None,
+        calculate_gene_cell_prop_correlation=False,
+        gene_filtering_correlation_reference_dataset=None,
         gene_filtering_plot_pca=True,
         gene_filtering_pca_n_components=2,
         gene_filtering_pca_figsize=(5.0, 5.0),
+        _dataset_definitions={},
+        _dataset_order=[],
+        _generated_mixed_outputs={},
     )
 
 
@@ -170,6 +175,247 @@ def test_resolve_gene_filtering_params_allows_missing_optional_high_corr_file(tm
 
     assert resolved.enabled is True
     assert resolved.high_corr_gene_file is None
+
+
+def test_resolve_gene_filtering_params_accepts_segment_correlation_reference(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.high_corr_gene_file_path = None
+    config._dataset_order = ["Mixed_Correlation_Source", "Mixed_Target"]
+    config._dataset_definitions = {
+        "Mixed_Correlation_Source": {
+            "dataset_type": "Mixed",
+            "sampling_method_prop": "segment",
+            "gep_filtering": False,
+            "gene_filtering": False,
+            "calculate_gene_cell_prop_correlation": True,
+        },
+        "Mixed_Target": {"dataset_type": "Mixed"},
+    }
+
+    resolved = _resolve_gene_filtering_params(
+        dataset_name="Mixed_Target",
+        params={
+            "gene_filtering": True,
+            "gene_filtering_type": "high_corr_gene",
+            "gene_filtering_correlation_reference_dataset": "Mixed_Correlation_Source",
+        },
+        config=config,
+    )
+
+    assert resolved.correlation_reference_dataset == "Mixed_Correlation_Source"
+
+
+def test_resolve_gene_filtering_params_rejects_non_segment_correlation_reference(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.high_corr_gene_file_path = None
+    config._dataset_order = ["Mixed_Correlation_Source", "Mixed_Target"]
+    config._dataset_definitions = {
+        "Mixed_Correlation_Source": {
+            "dataset_type": "Mixed",
+            "sampling_method_prop": "dirichlet",
+            "gep_filtering": False,
+            "gene_filtering": False,
+        },
+        "Mixed_Target": {"dataset_type": "Mixed"},
+    }
+
+    with pytest.raises(ValueError, match="sampling_method_prop: segment"):
+        _resolve_gene_filtering_params(
+            dataset_name="Mixed_Target",
+            params={
+                "gene_filtering": True,
+                "gene_filtering_type": "high_corr_gene",
+                "gene_filtering_correlation_reference_dataset": "Mixed_Correlation_Source",
+            },
+            config=config,
+        )
+
+
+def test_full_gene_correlation_file_contains_unfiltered_genes_and_cell_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "source.h5ad"
+    gene_exp = pd.DataFrame(
+        {"G1": [1.0, 2.0, 3.0, 4.0], "G2": [4.0, 3.0, 2.0, 1.0]},
+        index=["s1", "s2", "s3", "s4"],
+    )
+    cell_frac = pd.DataFrame(
+        {"A": [0.0, 0.25, 0.5, 0.75], "B": [0.75, 0.5, 0.25, 0.0]},
+        index=gene_exp.index,
+    )
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def get_df(self, convert_to_tpm=False):
+            return gene_exp
+
+        def get_cell_fraction(self):
+            return cell_frac
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    correlation_file = workflow_module._calculate_full_gene_cell_prop_correlation(
+        generated_bulk_gep_fp=generated_h5ad,
+        result_file_path=tmp_path / "full_gene_corr_with_cell_fraction.csv",
+    )
+
+    result = pd.read_csv(correlation_file, index_col=0)
+    assert result.index.tolist() == ["G1", "G2"]
+    assert result.columns.tolist() == ["A", "B"]
+    assert "n_at_least_one" not in result.columns
+
+
+def test_gene_filtering_reuses_full_correlation_with_new_thresholds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "target.h5ad"
+    genes = ["G1", "G2", "G3", "G4"]
+    bulk_exp = pd.DataFrame(
+        {gene: [1.0, 2.0, 3.0, 4.0] for gene in genes},
+        index=["s1", "s2", "s3", "s4"],
+    )
+    target_cell_frac = pd.DataFrame(
+        {"A": [0.0, 0.3, 0.6, 0.9], "B": [0.9, 0.6, 0.3, 0.0]},
+        index=bulk_exp.index,
+    )
+    tcga_exp = pd.DataFrame({gene: [1.0, 2.0, 4.0] for gene in genes}, index=["t1", "t2", "t3"])
+    raw_corr = pd.DataFrame(
+        {
+            "A": [0.95, 0.82, 0.75, 0.20],
+            "B": [0.10, 0.90, 0.40, 0.85],
+        },
+        index=genes,
+    )
+    raw_corr_file = tmp_path / "full_gene_corr_with_cell_fraction.csv"
+    raw_corr.to_csv(raw_corr_file)
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def get_df(self, convert_to_tpm=False):
+            return bulk_exp
+
+        def get_cell_fraction(self):
+            return target_cell_frac
+
+    class FakeReadExp:
+        def __init__(self, exp_file, exp_type=None):
+            self._df = tcga_exp.copy()
+
+        def align_with_gene_list(self, gene_list, fill_not_exist=False):
+            self._df = self._df.loc[:, [gene for gene in gene_list if gene in self._df.columns]]
+
+        def to_log2cpm1p(self):
+            self._df = np.log2(self._df + 1.0)
+
+        def get_exp(self):
+            return self._df
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    monkeypatch.setattr(workflow_module, "ReadExp", FakeReadExp)
+
+    low_threshold_genes = workflow_module.get_gene_list_for_filtering(
+        bulk_exp_file=generated_h5ad,
+        tcga_file=tmp_path / "tcga.csv",
+        result_file_path=tmp_path / "low_threshold_genes.csv",
+        filtering_type="high_corr_gene",
+        corr_threshold=0.5,
+        n_gene_max=2,
+        corr_result_fp=str(tmp_path / "low_threshold_correlations.csv"),
+        correlation_reference_file=raw_corr_file,
+        force_recompute=True,
+    )
+    high_threshold_genes = workflow_module.get_gene_list_for_filtering(
+        bulk_exp_file=generated_h5ad,
+        tcga_file=tmp_path / "tcga.csv",
+        result_file_path=tmp_path / "high_threshold_genes.csv",
+        filtering_type="high_corr_gene",
+        corr_threshold=0.9,
+        n_gene_max=2,
+        corr_result_fp=str(tmp_path / "high_threshold_correlations.csv"),
+        correlation_reference_file=raw_corr_file,
+        force_recompute=True,
+    )
+
+    assert set(low_threshold_genes) == {"G1", "G2", "G4"}
+    assert set(high_threshold_genes) == {"G1", "G2"}
+    pd.testing.assert_frame_equal(pd.read_csv(raw_corr_file, index_col=0), raw_corr)
+
+
+def test_gene_filtering_postprocess_passes_configured_correlation_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "target.h5ad"
+    generated_h5ad.write_text("placeholder", encoding="utf-8")
+    source_corr_file = tmp_path / "full_gene_corr_with_cell_fraction.csv"
+    pd.DataFrame({"B Cells": [0.8]}, index=["G1"]).to_csv(source_corr_file)
+    config = _make_filtering_config(tmp_path)
+    config._generated_mixed_outputs = {
+        "Mixed_Correlation_Source": {
+            "full_gene_corr_with_cell_fraction_file": source_corr_file,
+        }
+    }
+    captured = {}
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def get_df(self):
+            return pd.DataFrame({"G1": [1.0, 2.0]}, index=["s1", "s2"])
+
+        def get_cell_fraction(self):
+            return pd.DataFrame({"B Cells": [0.4, 0.6]}, index=["s1", "s2"])
+
+    class FakeReadExp:
+        def __init__(self, exp_file, exp_type=None):
+            pass
+
+        def get_exp(self):
+            return pd.DataFrame({"G1": [1.0, 2.0]}, index=["t1", "t2"])
+
+    def fake_get_gene_list_for_filtering(**kwargs):
+        captured.update(kwargs)
+        pd.DataFrame({"gene_name": ["G1"]}).to_csv(kwargs["result_file_path"], index=False)
+        return ["G1"]
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    monkeypatch.setattr(workflow_module, "ReadExp", FakeReadExp)
+    monkeypatch.setattr(workflow_module, "get_gene_list_for_filtering", fake_get_gene_list_for_filtering)
+    monkeypatch.setattr(workflow_module, "filtering_by_gene_list_and_pca_plot", lambda **kwargs: None)
+
+    outputs = _run_gene_filtering_postprocess(
+        dataset_name="Mixed_Target",
+        generated_bulk_gep_fp=generated_h5ad,
+        params={},
+        config=config,
+        resolved_params=ResolvedGeneFilteringParams(
+            enabled=True,
+            reference_file=str(tmp_path / "tcga.csv"),
+            filtering_type="high_corr_gene",
+            quantile_range=None,
+            q_col_name=None,
+            corr_threshold=0.2,
+            n_gene_max=1,
+            high_corr_gene_file=None,
+            save_filtered_h5ad=False,
+            filtered_dataset_postfix=None,
+            plot_pca=False,
+            pca_n_components=2,
+            pca_figsize=(5.0, 5.0),
+            correlation_reference_dataset="Mixed_Correlation_Source",
+        ),
+    )
+
+    assert captured["correlation_reference_file"] == source_corr_file
+    assert captured["full_corr_result_fp"] is None
+    assert captured["force_recompute"] is True
+    assert outputs["full_gene_corr_with_cell_fraction_file"] == str(source_corr_file)
 
 
 def test_run_gene_filtering_postprocess_generates_high_corr_on_the_fly_when_file_missing(
@@ -358,6 +604,7 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
             plot_pca=True,
             pca_n_components=2,
             pca_figsize=(5.0, 5.0),
+            correlation_reference_dataset="Mixed_Correlation_Source",
         ),
         postprocess_outputs={
             "filtered_bulk_gep_file": str(filtered_h5ad),
@@ -365,6 +612,9 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
             "pca_model_file": str(result_dir / "pca.joblib"),
             "pca_data_file": str(result_dir / "pca.csv"),
             "pca_plot_file": str(result_dir / "pca.png"),
+            "full_gene_corr_with_cell_fraction_file": str(
+                result_dir / "full_gene_corr_with_cell_fraction.csv"
+            ),
         },
         gep_filtering_input_n_samples=14,
         gep_filtering_kept_n_samples=10,
@@ -382,6 +632,10 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
     assert summary["removed_n_genes"] == 2
     assert summary["filtered_gene_count"] == 3
     assert summary["pca_plot_file"] == str(result_dir / "pca.png")
+    assert summary["gene_filtering_correlation_reference_dataset"] == "Mixed_Correlation_Source"
+    assert summary["full_gene_corr_with_cell_fraction_file"] == str(
+        result_dir / "full_gene_corr_with_cell_fraction.csv"
+    )
     assert summary["gene_filtering_type"] == "high_corr_gene"
 
 
@@ -436,8 +690,14 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
             plot_pca=True,
             pca_n_components=2,
             pca_figsize=(5.0, 5.0),
+            correlation_reference_dataset="Mixed_Correlation_Source",
         ),
-        postprocess_outputs={"gene_list_file": str(all_gene_list)},
+        postprocess_outputs={
+            "gene_list_file": str(all_gene_list),
+            "full_gene_corr_with_cell_fraction_file": str(
+                tmp_path / "full_gene_corr_with_cell_fraction.csv"
+            ),
+        },
     )
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -447,6 +707,10 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
     assert summary["gene_list_file"] == str(all_gene_list)
     assert summary["filtered_gene_count"] is None
     assert summary["removed_n_genes"] is None
+    assert summary["gene_filtering_correlation_reference_dataset"] == "Mixed_Correlation_Source"
+    assert summary["full_gene_corr_with_cell_fraction_file"].endswith(
+        "full_gene_corr_with_cell_fraction.csv"
+    )
 
 
 def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(

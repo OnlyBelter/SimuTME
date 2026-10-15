@@ -355,6 +355,8 @@ class SimuConfig:
     gene_filtering_n_gene_max: int = 1000
     gene_filtering_save_filtered_h5ad: bool = True
     gene_filtering_filtered_dataset_postfix: str | None = None
+    calculate_gene_cell_prop_correlation: bool = False
+    gene_filtering_correlation_reference_dataset: str | None = None
     plot_pca_for_comparison: bool | None = None
     gene_filtering_plot_pca: bool | None = None  # Deprecated alias for plot_pca_for_comparison
     gene_filtering_pca_n_components: int = 2
@@ -386,6 +388,7 @@ class SimuConfig:
     _dataset_definitions: Dict[str, Dict[str, Any]] = field(init=False, default_factory=dict)
     _dataset_order: List[str] = field(init=False, default_factory=list)
     _generated_sct_outputs: Dict[str, Dict[str, Path | None]] = field(init=False, default_factory=dict)
+    _generated_mixed_outputs: Dict[str, Dict[str, Path | None]] = field(init=False, default_factory=dict)
 
     @classmethod
     def from_yaml(cls, yaml_path: str):
@@ -522,6 +525,7 @@ class ResolvedGeneFilteringParams:
     plot_pca: bool
     pca_n_components: int
     pca_figsize: Tuple[float, float]
+    correlation_reference_dataset: str | None = None
 
 
 def _resolve_optional_path_value(value: Any) -> str | None:
@@ -777,6 +781,72 @@ def _resolve_gene_filtering_params(
             config.high_corr_gene_file_path,
             f'Mixed dataset "{dataset_name}" shared gene filtering fallback',
         )
+    correlation_reference_dataset = None
+    if high_corr_gene_file is None and "high_corr_gene" in filtering_type:
+        if "gene_filtering_correlation_reference_dataset" in params:
+            correlation_reference_dataset = params["gene_filtering_correlation_reference_dataset"]
+        else:
+            correlation_reference_dataset = getattr(
+                config,
+                "gene_filtering_correlation_reference_dataset",
+                None,
+            )
+    if correlation_reference_dataset not in (None, ""):
+        correlation_reference_dataset = str(correlation_reference_dataset).strip() or None
+    if correlation_reference_dataset == dataset_name:
+        if enabled:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" cannot use itself as a gene-correlation reference.'
+            )
+        correlation_reference_dataset = None
+    if correlation_reference_dataset:
+        dataset_definitions = getattr(config, "_dataset_definitions", {})
+        dataset_order = getattr(config, "_dataset_order", [])
+        source_params = dataset_definitions.get(correlation_reference_dataset)
+        if source_params is None:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" references unknown '
+                f'gene-correlation source dataset "{correlation_reference_dataset}".'
+            )
+        if dataset_name not in dataset_order or correlation_reference_dataset not in dataset_order:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" and its gene-correlation source must be loaded '
+                'through SimuConfig.from_yaml so their YAML order is available.'
+            )
+        if dataset_order.index(correlation_reference_dataset) >= dataset_order.index(dataset_name):
+            raise ValueError(
+                f'Gene-correlation source dataset "{correlation_reference_dataset}" must appear '
+                f'before Mixed dataset "{dataset_name}" in the configuration.'
+            )
+        source_type = str(source_params.get("dataset_type", "")).strip().lower()
+        if source_type != "mixed":
+            raise ValueError(
+                f'Gene-correlation source dataset "{correlation_reference_dataset}" must have '
+                '"dataset_type: Mixed".'
+            )
+        source_sampling_method = str(source_params.get("sampling_method_prop", "segment")).strip().lower()
+        if source_sampling_method != "segment":
+            raise ValueError(
+                f'Gene-correlation source dataset "{correlation_reference_dataset}" must use '
+                '"sampling_method_prop: segment".'
+            )
+        source_gep_filtering = bool(
+            source_params.get("gep_filtering", config.gep_filtering_enabled_default)
+        )
+        if source_gep_filtering:
+            raise ValueError(
+                f'Gene-correlation source dataset "{correlation_reference_dataset}" must set '
+                '"gep_filtering: false".'
+            )
+        source_gene_filtering = bool(
+            source_params.get("gene_filtering", config.gene_filtering_enabled_default)
+        )
+        if source_gene_filtering:
+            raise ValueError(
+                f'Gene-correlation source dataset "{correlation_reference_dataset}" must set '
+                '"gene_filtering: false".'
+            )
+
     plot_pca = params.get("plot_pca_for_comparison")
     if plot_pca is None:
         plot_pca = params.get("gene_filtering_plot_pca")
@@ -813,6 +883,7 @@ def _resolve_gene_filtering_params(
             float(v)
             for v in _resolve_dataset_override(params, config, "gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
         ),
+        correlation_reference_dataset=correlation_reference_dataset or None,
     )
     if len(resolved.pca_figsize) != 2:
         raise ValueError('"gene_filtering_pca_figsize" must contain exactly two values.')
@@ -1110,6 +1181,30 @@ def run_bulk_simulation(dataset_name: str,
             sampling_method_prop = 'segment'
         else:
             sampling_method_prop = params.get('sampling_method_prop')
+        calculate_gene_cell_prop_correlation = bool(
+            _resolve_dataset_override(
+                params,
+                config,
+                "calculate_gene_cell_prop_correlation",
+                getattr(config, "calculate_gene_cell_prop_correlation", False),
+            )
+        )
+        if calculate_gene_cell_prop_correlation:
+            if sampling_method_prop != "segment":
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" can calculate a reusable gene/cell-fraction '
+                    'correlation file only with "sampling_method_prop: segment".'
+                )
+            if resolved_gep_filtering.enabled:
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" must set "gep_filtering: false" when '
+                    "calculating a reusable gene/cell-fraction correlation file."
+                )
+            if resolved_gene_filtering.enabled:
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" must set "gene_filtering: false" when '
+                    "calculating a reusable gene/cell-fraction correlation file."
+                )
         if sampling_method_prop != 'dirichlet':
             invalid_keys = [
                 key for key in dirichlet_only_keys
@@ -1203,6 +1298,24 @@ def run_bulk_simulation(dataset_name: str,
         else:
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
 
+        mixed_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+        full_gene_corr_file = mixed_result_dir / "full_gene_corr_with_cell_fraction.csv"
+        if calculate_gene_cell_prop_correlation:
+            _calculate_full_gene_cell_prop_correlation(
+                generated_bulk_gep_fp=generated_bulk_gep_fp,
+                result_file_path=full_gene_corr_file,
+            )
+        elif not full_gene_corr_file.exists():
+            full_gene_corr_file = None
+        if not hasattr(config, "_generated_mixed_outputs"):
+            config._generated_mixed_outputs = {}
+        config._generated_mixed_outputs[dataset_name] = {
+            "generated_bulk_gep_file": Path(generated_bulk_gep_fp),
+            "generated_cell_fraction_file": Path(bulk_generator.generated_cell_fraction_fp),
+            "result_dir": mixed_result_dir,
+            "full_gene_corr_with_cell_fraction_file": full_gene_corr_file,
+        }
+
         _save_cancer_cell_fraction_distribution(
             dataset_name=dataset_name,
             cell_fraction_file_path=bulk_generator.generated_cell_fraction_fp,
@@ -1223,6 +1336,8 @@ def run_bulk_simulation(dataset_name: str,
             config=config,
             resolved_params=resolved_gene_filtering,
         )
+        if full_gene_corr_file is not None:
+            postprocess_outputs["full_gene_corr_with_cell_fraction_file"] = str(full_gene_corr_file)
         _build_mixed_dataset_summary(
             dataset_name=dataset_name,
             generated_bulk_gep_fp=generated_bulk_gep_fp,
@@ -1370,6 +1485,33 @@ def _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp: str | Path, dataset
     return Path(generated_bulk_gep_fp).parent / dataset_name
 
 
+def _calculate_full_gene_cell_prop_correlation(
+    generated_bulk_gep_fp: str | Path,
+    result_file_path: str | Path,
+) -> Path:
+    result_file_path = Path(result_file_path)
+    if result_file_path.exists():
+        return result_file_path
+    check_dir(result_file_path.parent)
+
+    bulk_obj = ReadH5AD(generated_bulk_gep_fp)
+    gene_exp = bulk_obj.get_df(convert_to_tpm=True)
+    cell_frac = bulk_obj.get_cell_fraction()
+    if gene_exp.shape[0] < 2 or gene_exp.shape[1] == 0:
+        raise ValueError("At least two Mixed samples and one gene are required to calculate correlations.")
+    if cell_frac.shape[1] == 0:
+        raise ValueError("At least one cell type is required to calculate gene/cell-fraction correlations.")
+    if not gene_exp.index.isin(cell_frac.index).all():
+        raise ValueError("Mixed expression samples and cell-fraction samples do not match.")
+    cell_frac = cell_frac.loc[gene_exp.index]
+    cal_corr_gene_exp_with_cell_frac(
+        gene_exp=gene_exp,
+        cell_frac=cell_frac,
+        result_file_path=result_file_path,
+    )
+    return result_file_path
+
+
 def _build_filtered_h5ad_path(
     generated_bulk_gep_fp: str | Path,
     filtering_type: str,
@@ -1397,8 +1539,30 @@ def _run_gene_filtering_postprocess(
         "pca_model_file": None,
         "pca_data_file": None,
         "pca_plot_file": None,
+        "full_gene_corr_with_cell_fraction_file": None,
     }
     current_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+    correlation_reference_file = None
+    if resolved_params.correlation_reference_dataset:
+        source_outputs = getattr(config, "_generated_mixed_outputs", {}).get(
+            resolved_params.correlation_reference_dataset
+        )
+        if source_outputs is None:
+            raise ValueError(
+                f'Gene-correlation source dataset "{resolved_params.correlation_reference_dataset}" '
+                "has not been generated before its target."
+            )
+        correlation_reference_file = source_outputs.get(
+            "full_gene_corr_with_cell_fraction_file"
+        )
+        if correlation_reference_file is None or not Path(correlation_reference_file).exists():
+            raise ValueError(
+                f'Gene-correlation source dataset "{resolved_params.correlation_reference_dataset}" '
+                'has no "full_gene_corr_with_cell_fraction.csv". Set '
+                '"calculate_gene_cell_prop_correlation: true" on the source dataset and run it first.'
+            )
+        outputs["full_gene_corr_with_cell_fraction_file"] = str(correlation_reference_file)
+
     if not resolved_params.enabled:
         logging.info("   > Gene-level filtering disabled for %s.", dataset_name)
         if not resolved_params.plot_pca:
@@ -1450,6 +1614,7 @@ def _run_gene_filtering_postprocess(
 
     gene_list_file_path = current_result_dir / f"gene_list_filtered_by_{resolved_params.filtering_type}.csv"
     corr_result_fp = current_result_dir / "gene_corr_with_cell_fraction.csv"
+    full_corr_result_fp = current_result_dir / "full_gene_corr_with_cell_fraction.csv"
     pca_model_fp = current_result_dir / f"both_TCGA_and_simu_{dataset_name}_PCA_{resolved_params.filtering_type}.joblib"
     pca_data_fp = current_result_dir / f"{dataset_name}_PCA_with_TCGA_{resolved_params.filtering_type}.csv"
     filtered_h5ad_file = None
@@ -1462,6 +1627,13 @@ def _run_gene_filtering_postprocess(
 
     gene_list: List[str]
     high_corr_file = resolved_params.high_corr_gene_file
+    full_corr_file_for_summary = None
+    if high_corr_file is None and "high_corr_gene" in resolved_params.filtering_type:
+        if correlation_reference_file is not None:
+            full_corr_file_for_summary = str(correlation_reference_file)
+        else:
+            full_corr_file_for_summary = str(full_corr_result_fp)
+
     if high_corr_file and "high_corr_gene" in resolved_params.filtering_type:
         high_corr_gene_list = _read_gene_list_file(high_corr_file)
         if resolved_params.filtering_type == "high_corr_gene":
@@ -1507,6 +1679,11 @@ def _run_gene_filtering_postprocess(
             n_gene_max=resolved_params.n_gene_max,
             corr_result_fp=str(corr_result_fp),
             quantile_range=resolved_params.quantile_range,
+            correlation_reference_file=correlation_reference_file,
+            full_corr_result_fp=(
+                str(full_corr_result_fp) if correlation_reference_file is None else None
+            ),
+            force_recompute="high_corr_gene" in resolved_params.filtering_type,
         )
 
     bulk_exp_obj = ReadH5AD(generated_bulk_gep_fp)
@@ -1540,6 +1717,7 @@ def _run_gene_filtering_postprocess(
                 if resolved_params.plot_pca
                 else None
             ),
+            "full_gene_corr_with_cell_fraction_file": full_corr_file_for_summary,
         }
     )
     return outputs
@@ -1596,12 +1774,16 @@ def _build_mixed_dataset_summary(
         "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
         "gene_filtering_enabled": gene_filtering.enabled,
         "gene_filtering_type": gene_filtering.filtering_type if gene_filtering.enabled else None,
+        "gene_filtering_correlation_reference_dataset": gene_filtering.correlation_reference_dataset,
         "filtered_bulk_gep_file": postprocess_outputs.get("filtered_bulk_gep_file"),
         "filtered_n_samples": filtered_shape[0] if filtered_shape else None,
         "filtered_n_genes": filtered_n_genes,
         "removed_n_genes": removed_n_genes,
         "filtered_gene_count": filtered_gene_count,
         "gene_list_file": gene_list_file,
+        "full_gene_corr_with_cell_fraction_file": postprocess_outputs.get(
+            "full_gene_corr_with_cell_fraction_file"
+        ),
         "pca_model_file": postprocess_outputs.get("pca_model_file"),
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
@@ -1685,7 +1867,10 @@ def _run_sample_diversity_for_sct_dataset(
 def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path, result_file_path: str | Path, q_col_name: list = None,
                                 filtering_type: str = 'quantile_range',
                                 corr_threshold: float = 0.3, n_gene_max: int = 1000,
-                                corr_result_fp: str = None, quantile_range: list = None) -> list:
+                                corr_result_fp: str = None, quantile_range: list = None,
+                                correlation_reference_file: str | Path | None = None,
+                                full_corr_result_fp: str | Path | None = None,
+                                force_recompute: bool = False) -> list:
     """
     Perform gene-level filtering based on the specific filtering type.
 
@@ -1697,6 +1882,9 @@ def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path
       - 'high_corr_gene': Select genes that their expression values have high correlation with the cell proportions of any cell type
       - 'quantile_range': Select genes with their median of expression values within the [q_5, q_95] quantile range of their counterparts in TCGA (default)
     :param corr_result_fp: str, path to the result file after 'high_corr_gene' filtering
+    :param correlation_reference_file: optional full gene/cell-type correlation matrix to reuse
+    :param full_corr_result_fp: optional path for the unfiltered correlation matrix
+    :param force_recompute: recompute the selected gene list using current thresholds
     :param quantile_range: tuple,  (lower_quantile, median_quantile, upper_quantile). Genes are removed if their median expression in simulated bulk GEPs is outside this range in TCGA data
         of the corresponding gene in TCGA dataset will be removed
 
@@ -1709,7 +1897,7 @@ def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path
     assert filtering_type in ['high_corr_gene', 'quantile_range', 'all_genes', 'high_corr_gene_and_quantile_range'], \
         f'filtering_type: {filtering_type} is not supported, only support high_corr_gene, quantile_range, all_genes, ' \
         f'high_corr_gene_and_quantile_range'
-    if not os.path.exists(result_file_path):
+    if force_recompute or not os.path.exists(result_file_path):
         bulk_exp = ReadH5AD(bulk_exp_file).get_df(convert_to_tpm=True)
         tcga_obj = ReadExp(tcga_file, exp_type='TPM')
         tcga_obj.align_with_gene_list(gene_list=bulk_exp.columns.to_list())  # common genes will be kept
@@ -1725,9 +1913,37 @@ def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path
             h5_obj = ReadH5AD(bulk_exp_file)
             gene_exp = h5_obj.get_df(convert_to_tpm=True)
             cell_frac = h5_obj.get_cell_fraction()
+            correlation_df = None
+            if correlation_reference_file:
+                correlation_df = pd.read_csv(correlation_reference_file, index_col=0)
+                missing_cell_types = [
+                    cell_type
+                    for cell_type in cell_frac.columns
+                    if cell_type not in correlation_df.columns
+                ]
+                if missing_cell_types:
+                    raise ValueError(
+                        f'Correlation reference "{correlation_reference_file}" is missing target cell types: '
+                        f'{missing_cell_types}.'
+                    )
+                correlation_df = correlation_df.loc[
+                    correlation_df.index.isin(bulk_exp.columns),
+                    cell_frac.columns,
+                ]
+                if correlation_df.empty:
+                    raise ValueError(
+                        f'Correlation reference "{correlation_reference_file}" has no genes shared '
+                        "with the target Mixed dataset and TCGA reference."
+                    )
             corr_df = cal_corr_gene_exp_with_cell_frac(gene_exp=gene_exp, cell_frac=cell_frac,
                                                        result_file_path=corr_result_fp, filtered_by_corr=corr_threshold,
-                                                       filter_by_num=n_gene_max)
+                                                       filter_by_num=n_gene_max,
+                                                       full_correlation_file_path=(
+                                                           full_corr_result_fp
+                                                           if correlation_df is None
+                                                           else None
+                                                       ),
+                                                       correlation_df=correlation_df)
             del gene_exp
             gene_list = corr_df.index.to_list()
             logging.info(f'{len(gene_list)} genes are selected by high correlation')

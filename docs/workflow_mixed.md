@@ -67,6 +67,8 @@ The visual summary is shown below.
 - `gene_filtering_type`
 - `gene_filtering_reference_file`
 - `gene_filtering_high_corr_gene_file`
+- `calculate_gene_cell_prop_correlation`
+- `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_quantile_range`
@@ -256,6 +258,7 @@ Typical files include:
 - `gene_list_filtered_by_<gene_filtering_type>.csv` when gene filtering is enabled
 - `gene_list_all_genes_for_pca.csv` when gene filtering is disabled
 - `gene_corr_with_cell_fraction.csv`
+- `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
 - `both_TCGA_and_simu_<dataset_name>_PCA_<postfix>.joblib`
 - `<dataset_name>_PCA_with_TCGA_<postfix>.csv`
 - `<dataset_name>_PCA_with_TCGA_<postfix>_PC0_PC1.png`
@@ -264,6 +267,16 @@ Typical files include:
 The PCA postfix is the gene-filtering type when filtering is enabled and
 `all_genes_for_pca` otherwise. The summary records the plot path in
 `pca_plot_file`.
+
+For correlation-based gene selection, `calculate_gene_cell_prop_correlation`
+creates `full_gene_corr_with_cell_fraction.csv` without applying a threshold
+or top-N limit. A target can reuse that matrix by naming an earlier Mixed
+dataset with `gene_filtering_correlation_reference_dataset`. The source must
+use segment sampling with GEP- and gene-level filtering disabled. Each target
+applies its own `gene_filtering_corr_threshold` and
+`gene_filtering_n_gene_max`; those selections do not alter the reusable
+matrix. Without a configured source, correlations are calculated from the
+target dataset. A supplied high-correlation gene list takes precedence.
 
 The filtered `.h5ad` is written beside the original Mixed `.h5ad` using either
 the configured `gene_filtering_filtered_dataset_postfix` or the default
@@ -289,6 +302,8 @@ Global filtering defaults live under `parameters`:
 - `gene_filtering_enabled_default`
 - `gene_filtering_reference_file`
 - `gene_filtering_type`
+- `calculate_gene_cell_prop_correlation`
+- `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_quantile_range`
 - `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
