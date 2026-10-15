@@ -77,13 +77,14 @@ These parameters affect shared simulation behavior across workflows.
 
 - `gene_quantile_range`
   Legacy global quantile triplet still reused by some quantile-based
-  filtering paths.
+  filtering paths. Defaults to `[0.005, 0.5, 0.995]` when omitted.
 
 - `gep_filtering_quantile`
   Legacy global quantile pair still reused by some GEP-level filtering paths.
 
 - `pca_n_components`
-  Legacy global PCA default still reused by some filtering paths.
+  Legacy global PCA default still reused by some filtering paths. Defaults to
+  `0.9` when omitted.
 
 - `gene_list_type`
   Legacy global gene-filtering mode. It still maps to

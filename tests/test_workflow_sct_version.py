@@ -96,7 +96,7 @@ def test_resolve_selected_subtypes_by_cell_type_validates_and_deduplicates():
         )
 
 
-def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path):
+def test_simu_config_from_yaml_defaults_shared_filtering_params(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -115,9 +115,7 @@ def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path)
                     "output_types": ["B Cells"],
                 },
                 "parameters": {
-                    "gene_quantile_range": [0.005, 0.5, 0.995],
                     "gep_filtering_quantile": [0.0, 0.95],
-                    "pca_n_components": 0.9,
                     "gene_list_type": "all_genes",
                     "n_base": 30,
                     "mixed_sct_loading_mode": "auto",
@@ -131,6 +129,8 @@ def test_simu_config_from_yaml_reads_mixed_sct_auto_eager_max_gb(tmp_path: Path)
 
     config = SimuConfig.from_yaml(str(config_path))
 
+    assert config.gene_quantile_range == [0.005, 0.5, 0.995]
+    assert config.pca_n_components == 0.9
     assert config.mixed_sct_auto_eager_max_gb == 6.5
 
 

@@ -330,9 +330,9 @@ class SimuConfig:
     output_types: List[str]
 
     # Filtering parameters
-    gene_quantile_range: List[float]
     gep_filtering_quantile: Tuple[float, float]
-    pca_n_components: float
+    gene_quantile_range: List[float] = field(default_factory=lambda: [0.005, 0.5, 0.995])
+    pca_n_components: float = 0.9
     gene_list_type: str = "high_corr_gene_and_quantile_range"
     gep_filtering_enabled_default: bool = False
     gep_filtering_reference_file: Path | None = None
