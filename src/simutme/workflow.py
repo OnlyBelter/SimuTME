@@ -1267,7 +1267,8 @@ def run_bulk_simulation(dataset_name: str,
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
 
         # 2. Generate GEP (if it doesn't exist)
-        if not os.path.exists(generated_bulk_gep_fp):
+        generated_bulk_gep_was_cached = os.path.exists(generated_bulk_gep_fp)
+        if not generated_bulk_gep_was_cached:
             gep_gen_config = GEPGenerationConfig(
                 n_samples=params['n_samples'],
                 simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
@@ -1348,6 +1349,9 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering_input_n_samples=bulk_generator.gep_filtering_input_n_samples,
             gep_filtering_kept_n_samples=bulk_generator.gep_filtering_kept_n_samples,
             gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
+            gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
+            gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
+            preserve_existing_gep_pca_metadata=generated_bulk_gep_was_cached,
         )
 
         return str(generated_bulk_gep_fp)
@@ -1733,6 +1737,27 @@ def _get_h5ad_shape(file_path: str | Path | None) -> tuple[int, int] | None:
     return int(h5ad_obj.shape[0]), int(h5ad_obj.shape[1])
 
 
+def _load_gep_filtering_pca_metadata(
+    reference_file: str | Path | None,
+    pca_target: int | float | None,
+) -> tuple[int | float | None, int | None]:
+    if reference_file in (None, "") or pca_target is None:
+        return None, None
+    pca_model_path = (
+        Path(reference_file).parent.parent
+        / f"pca_model_{pca_target}"
+        / "tcga_pca_model_for_gep_filtering.pkl"
+    )
+    if not pca_model_path.exists():
+        return None, None
+    try:
+        pca_model = load(pca_model_path)
+        return pca_model.n_components, int(pca_model.n_components_)
+    except Exception as exc:
+        logging.warning("Could not read GEP-filtering PCA metadata from %s: %s", pca_model_path, exc)
+        return None, None
+
+
 def _build_mixed_dataset_summary(
     dataset_name: str,
     generated_bulk_gep_fp: str | Path,
@@ -1743,9 +1768,40 @@ def _build_mixed_dataset_summary(
     gep_filtering_input_n_samples: int | None = None,
     gep_filtering_kept_n_samples: int | None = None,
     gep_filtering_removed_n_samples: int | None = None,
+    gep_filtering_pca_target: int | float | None = None,
+    gep_filtering_n_pcs: int | None = None,
+    preserve_existing_gep_pca_metadata: bool = False,
 ) -> Path:
     summary_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(summary_dir)
+    summary_path = summary_dir / "mixed_dataset_summary.json"
+    if preserve_existing_gep_pca_metadata and summary_path.exists():
+        with open(summary_path, encoding="utf-8") as f:
+            existing_summary = json.load(f)
+        if existing_summary.get("generated_bulk_gep_file") == str(generated_bulk_gep_fp):
+            if gep_filtering_pca_target is None:
+                gep_filtering_pca_target = existing_summary.get("gep_pca_n_components")
+            if gep_filtering_n_pcs is None:
+                gep_filtering_n_pcs = existing_summary.get("gep_filtering_n_pcs")
+    if (
+        preserve_existing_gep_pca_metadata
+        and gep_filtering.enabled
+        and gep_filtering.filtering_in_pca_space
+        and (gep_filtering_pca_target is None or gep_filtering_n_pcs is None)
+    ):
+        cache_target = (
+            gep_filtering_pca_target
+            if gep_filtering_pca_target is not None
+            else gep_filtering.pca_n_components
+        )
+        cached_target, cached_n_pcs = _load_gep_filtering_pca_metadata(
+            gep_filtering.reference_file,
+            cache_target,
+        )
+        if gep_filtering_pca_target is None:
+            gep_filtering_pca_target = cached_target
+        if gep_filtering_n_pcs is None:
+            gep_filtering_n_pcs = cached_n_pcs
     generated_shape = _get_h5ad_shape(generated_bulk_gep_fp)
     filtered_shape = _get_h5ad_shape(postprocess_outputs.get("filtered_bulk_gep_file"))
     gene_list_file = postprocess_outputs.get("gene_list_file")
@@ -1769,6 +1825,8 @@ def _build_mixed_dataset_summary(
         "generated_n_genes": generated_shape[1] if generated_shape else None,
         "gep_filtering_enabled": gep_filtering.enabled,
         "gep_filtering_method": gep_filtering.filtering_method if gep_filtering.enabled else None,
+        "gep_pca_n_components": gep_filtering_pca_target,
+        "gep_filtering_n_pcs": gep_filtering_n_pcs,
         "gep_filtering_input_n_samples": gep_filtering_input_n_samples,
         "gep_filtering_kept_n_samples": gep_filtering_kept_n_samples,
         "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
@@ -1788,7 +1846,6 @@ def _build_mixed_dataset_summary(
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
     }
-    summary_path = summary_dir / "mixed_dataset_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     return summary_path

@@ -211,6 +211,8 @@ def test_filter_simulated_geps_keeps_full_reference_when_filter_subset_is_empty(
 
     assert filtered is not None
     assert not filtered.empty
+    assert generator.gep_filtering_pca_target == 1
+    assert generator.gep_filtering_n_pcs == 1
 
 
 def test_filter_simulated_geps_reloads_reference_for_cached_pca_state():
@@ -273,6 +275,8 @@ def test_filter_simulated_geps_reloads_reference_for_cached_pca_state():
 
     assert filtered is not None
     assert not filtered.empty
+    assert generator.gep_filtering_pca_target == 1
+    assert generator.gep_filtering_n_pcs == 1
 
 
 def test_safe_pca_transform_handles_large_values_without_sklearn_matmul():
@@ -345,6 +349,8 @@ def test_gep_filtering_counters_stay_null_when_disabled():
     assert generator.gep_filtering_input_n_samples is None
     assert generator.gep_filtering_kept_n_samples is None
     assert generator.gep_filtering_removed_n_samples is None
+    assert generator.gep_filtering_pca_target is None
+    assert generator.gep_filtering_n_pcs is None
 
 
 def test_resolve_sct_loading_mode_uses_eager_for_smaller_auto_sct_matrix():

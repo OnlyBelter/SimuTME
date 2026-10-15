@@ -243,6 +243,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_input_n_samples = None
         self.gep_filtering_kept_n_samples = None
         self.gep_filtering_removed_n_samples = None
+        self.gep_filtering_pca_target = None
+        self.gep_filtering_n_pcs = None
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
@@ -292,6 +294,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             file_manager.close()
 
     def _reset_gep_filtering_stats(self, enabled: bool) -> None:
+        self.gep_filtering_pca_target = None
+        self.gep_filtering_n_pcs = None
         if enabled:
             self.gep_filtering_input_n_samples = 0
             self.gep_filtering_kept_n_samples = 0
@@ -753,6 +757,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     dump(pca_model, pca_model_path)
                     # save the gene list for PCA
                     pd.DataFrame(gene_list_in_pca).to_csv(gene_list_in_pca_file_path)
+                self.gep_filtering_pca_target = pca_model.n_components
+                self.gep_filtering_n_pcs = int(pca_model.n_components_)
                 if exp_ref_df.shape[0] == 0:
                     raise ValueError('Reference expression matrix is empty after filtering and cannot be used for PCA.')
                 assert np.all(exp_ref_df.columns == gene_list_in_pca)

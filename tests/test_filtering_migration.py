@@ -619,6 +619,8 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
         gep_filtering_input_n_samples=14,
         gep_filtering_kept_n_samples=10,
         gep_filtering_removed_n_samples=4,
+        gep_filtering_pca_target=0.9,
+        gep_filtering_n_pcs=576,
     )
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -627,6 +629,8 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
     assert summary["gep_filtering_input_n_samples"] == 14
     assert summary["gep_filtering_kept_n_samples"] == 10
     assert summary["gep_filtering_removed_n_samples"] == 4
+    assert summary["gep_pca_n_components"] == 0.9
+    assert summary["gep_filtering_n_pcs"] == 576
     assert summary["filtered_n_samples"] == 8
     assert summary["filtered_n_genes"] == 3
     assert summary["removed_n_genes"] == 2
@@ -707,10 +711,94 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
     assert summary["gene_list_file"] == str(all_gene_list)
     assert summary["filtered_gene_count"] is None
     assert summary["removed_n_genes"] is None
+    assert summary["gep_pca_n_components"] is None
+    assert summary["gep_filtering_n_pcs"] is None
     assert summary["gene_filtering_correlation_reference_dataset"] == "Mixed_Correlation_Source"
     assert summary["full_gene_corr_with_cell_fraction_file"].endswith(
         "full_gene_corr_with_cell_fraction.csv"
     )
+
+
+def test_build_mixed_dataset_summary_recovers_pca_metadata_from_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generated_h5ad = tmp_path / "simu_gep_Mixed_Cached_log2cpm1p.h5ad"
+    generated_h5ad.write_text("placeholder", encoding="utf-8")
+    reference_file = tmp_path / "datasets" / "TCGA" / "tpm" / "reference.csv"
+    pca_model_file = (
+        reference_file.parent.parent
+        / "pca_model_0.9"
+        / "tcga_pca_model_for_gep_filtering.pkl"
+    )
+    pca_model_file.parent.mkdir(parents=True)
+    pca_model_file.touch()
+
+    class FakeReadH5AD:
+        def __init__(self, file_path):
+            self.file_path = str(file_path)
+
+        def get_h5ad(self):
+            return SimpleNamespace(shape=(10, 5))
+
+    monkeypatch.setattr(workflow_module, "ReadH5AD", FakeReadH5AD)
+    monkeypatch.setattr(
+        workflow_module,
+        "load",
+        lambda _: SimpleNamespace(n_components=0.9, n_components_=576),
+    )
+
+    result_dir = generated_h5ad.parent / "Mixed_Cached"
+    result_dir.mkdir()
+    (result_dir / "mixed_dataset_summary.json").write_text(
+        json.dumps({"generated_bulk_gep_file": str(generated_h5ad)}),
+        encoding="utf-8",
+    )
+    summary_path = _build_mixed_dataset_summary(
+        dataset_name="Mixed_Cached",
+        generated_bulk_gep_fp=generated_h5ad,
+        generated_cell_fraction_fp=tmp_path / "cell_fractions.csv",
+        gep_filtering=ResolvedGEPFilteringParams(
+            enabled=True,
+            reference_file=str(reference_file),
+            ref_exp_type="TPM",
+            filtering_method="median_gep",
+            filtering_ref_types=None,
+            gep_filtering_quantile=(0.0, 0.95),
+            n_top=20,
+            show_filtering_info=False,
+            filtering_by_gene_range=False,
+            min_percentage_within_gene_range=0.95,
+            gene_quantile_range=None,
+            filtering_in_pca_space=True,
+            pca_n_components=0.9,
+            norm_ord=1,
+            high_corr_gene_list_file=None,
+            high_corr_gene_list=None,
+        ),
+        gene_filtering=ResolvedGeneFilteringParams(
+            enabled=False,
+            reference_file=None,
+            filtering_type="all_genes",
+            quantile_range=None,
+            q_col_name=None,
+            corr_threshold=0.3,
+            n_gene_max=1000,
+            high_corr_gene_file=None,
+            save_filtered_h5ad=True,
+            filtered_dataset_postfix=None,
+            plot_pca=False,
+            pca_n_components=2,
+            pca_figsize=(5.0, 5.0),
+            correlation_reference_dataset=None,
+        ),
+        postprocess_outputs={},
+        preserve_existing_gep_pca_metadata=True,
+    )
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["gep_pca_n_components"] == 0.9
+    assert summary["gep_filtering_n_pcs"] == 576
 
 
 def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(

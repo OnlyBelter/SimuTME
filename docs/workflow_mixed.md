@@ -266,7 +266,10 @@ Typical files include:
 
 The PCA postfix is the gene-filtering type when filtering is enabled and
 `all_genes_for_pca` otherwise. The summary records the plot path in
-`pca_plot_file`.
+`pca_plot_file`. It also records `gep_pca_n_components`, the variance target
+used for GEP-filtering PCA, and `gep_filtering_n_pcs`, the actual number of
+components retained by the fitted or cached PCA model. Both fields are null
+when GEP filtering does not use PCA space.
 
 For correlation-based gene selection, `calculate_gene_cell_prop_correlation`
 creates `full_gene_corr_with_cell_fraction.csv` without applying a threshold
