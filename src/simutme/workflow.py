@@ -1511,6 +1511,14 @@ def _build_mixed_dataset_summary(
     filtered_gene_count = None
     if gene_list_file and Path(gene_list_file).exists():
         filtered_gene_count = len(_read_gene_list_file(gene_list_file))
+    filtered_n_genes = filtered_shape[1] if filtered_shape else None
+    removed_n_genes = None
+    if generated_shape:
+        filtered_gene_count_for_summary = (
+            filtered_n_genes if filtered_n_genes is not None else filtered_gene_count
+        )
+        if filtered_gene_count_for_summary is not None:
+            removed_n_genes = generated_shape[1] - filtered_gene_count_for_summary
     summary = {
         "dataset_name": dataset_name,
         "dataset_type": "Mixed",
@@ -1527,7 +1535,8 @@ def _build_mixed_dataset_summary(
         "gene_filtering_type": gene_filtering.filtering_type if gene_filtering.enabled else None,
         "filtered_bulk_gep_file": postprocess_outputs.get("filtered_bulk_gep_file"),
         "filtered_n_samples": filtered_shape[0] if filtered_shape else None,
-        "filtered_n_genes": filtered_shape[1] if filtered_shape else None,
+        "filtered_n_genes": filtered_n_genes,
+        "removed_n_genes": removed_n_genes,
         "filtered_gene_count": filtered_gene_count,
         "gene_list_file": gene_list_file,
         "pca_model_file": postprocess_outputs.get("pca_model_file"),

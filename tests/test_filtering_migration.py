@@ -315,6 +315,7 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
     assert summary["gep_filtering_removed_n_samples"] == 4
     assert summary["filtered_n_samples"] == 8
     assert summary["filtered_n_genes"] == 3
+    assert summary["removed_n_genes"] == 2
     assert summary["filtered_gene_count"] == 3
     assert summary["gene_filtering_type"] == "high_corr_gene"
 
@@ -376,6 +377,7 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
     assert summary["gep_filtering_input_n_samples"] is None
     assert summary["gep_filtering_kept_n_samples"] is None
     assert summary["gep_filtering_removed_n_samples"] is None
+    assert summary["removed_n_genes"] is None
 
 
 def test_filtering_by_gene_list_and_pca_plot_recomputes_when_model_missing(
