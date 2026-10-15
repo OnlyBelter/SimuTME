@@ -16,6 +16,7 @@ from simutme.workflow import (
     _run_gene_filtering_postprocess,
     filtering_by_gene_list_and_pca_plot,
 )
+from simutme.utility.pub_func import get_gene_list_filtered_by_quantile_range
 
 
 def _make_filtering_config(tmp_path: Path):
@@ -62,6 +63,45 @@ def _make_filtering_config(tmp_path: Path):
         _dataset_order=[],
         _generated_mixed_outputs={},
     )
+
+
+def test_gene_range_filter_aligns_reference_quantiles_by_gene_label():
+    reference = pd.DataFrame(
+        {
+            "G1": [10.0, 20.0, 30.0, 40.0],
+            "G2": [100.0, 200.0, 300.0, 400.0],
+        },
+        index=["ref_1", "ref_2", "ref_3", "ref_4"],
+    )
+    quantile_range = [0.05, 0.5, 0.95]
+    quantile_columns = ["q_5.0", "q_50.0", "q_95.0"]
+    simulated_profile = pd.Series(
+        [250.0, 25.0, 5.0],
+        index=["G2", "G1", "G3"],
+    )
+    simulated_profiles = pd.DataFrame(
+        [
+            [250.0, 5.0, 25.0],
+            [260.0, 7.0, 27.0],
+        ],
+        columns=["G2", "G3", "G1"],
+    )
+
+    filtered_profile_genes = get_gene_list_filtered_by_quantile_range(
+        bulk_exp=simulated_profile,
+        tcga_exp=reference,
+        quantile_range=quantile_range,
+        q_col_name=quantile_columns,
+    )
+    filtered_dataset_genes = get_gene_list_filtered_by_quantile_range(
+        bulk_exp=simulated_profiles,
+        tcga_exp=reference,
+        quantile_range=quantile_range,
+        q_col_name=quantile_columns,
+    )
+
+    assert filtered_profile_genes == ["G2", "G1"]
+    assert filtered_dataset_genes == ["G2", "G1"]
 
 
 def test_resolve_gep_filtering_params_uses_dataset_overrides_and_legacy_gene_range(tmp_path: Path):

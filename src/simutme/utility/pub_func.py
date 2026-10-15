@@ -465,10 +465,12 @@ def get_gene_list_filtered_by_quantile_range(bulk_exp, tcga_exp, quantile_range:
         tcga_gene_info = get_quantile(tcga_exp, quantile_range=quantile_range, col_name=q_col_name)
     if type(bulk_exp) is pd.DataFrame and bulk_exp.shape[0] > 1:
         bulk_gene_info = get_quantile(bulk_exp, quantile_range=quantile_range, col_name=q_col_name)
+        tcga_gene_info = tcga_gene_info.reindex(bulk_gene_info.index)
         gene_inx = (bulk_gene_info[q_col_name[1]] >= tcga_gene_info[q_col_name[0]]) & \
                    (bulk_gene_info[q_col_name[1]] <= tcga_gene_info[q_col_name[2]])
         gene_list_qr = bulk_exp.loc[:, gene_inx].columns.to_list()
     else:  # if bulk_exp is a series
+        tcga_gene_info = tcga_gene_info.reindex(bulk_exp.index)
         gene_inx = (bulk_exp >= tcga_gene_info[q_col_name[0]]) & (bulk_exp <= tcga_gene_info[q_col_name[2]])
         gene_list_qr = bulk_exp.loc[gene_inx].index.to_list()
     return gene_list_qr
