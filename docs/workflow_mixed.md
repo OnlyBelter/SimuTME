@@ -194,6 +194,11 @@ For a dataset named `<dataset_name>`, the Mixed workflow writes files under:
 
 `paths.simu_bulk_dir/<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_median_gep/`
 
+The `knn_residual` method uses
+`<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_with_filtering_knn_residual/`
+instead, so new local-filter outputs are not labeled as centroid-filtered
+datasets. Existing centroid and unfiltered-source locations are unchanged.
+
 Main files:
 
 - `cell_fractions_<dataset_name>_gepsamp-random.csv`
@@ -231,7 +236,8 @@ profile rejection.
 
 `gep_filtering` gates profile rejection. `gep_filtering_by_gene_range`
 enables the range acceptance check; it does not remove genes. The supported
-reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`.
+reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`;
+`knn_residual` adds held-out calibration for local TCGA proximity.
 PCA fit and transform both use `log2(TPM + 1)` normalized over G.
 
 `plot_pca_for_comparison` independently enables a diagnostic joint PCA on
@@ -278,6 +284,48 @@ Existing targets or resumable batches with missing or incompatible filtering
 metadata fail before reuse. Use a new dataset name/output location; SimuTME
 does not delete old artifacts or relabel historical summaries. The independent
 unfiltered correlation source remains reusable.
+
+### Cancer-stratified local filtering
+
+Opt into `gep_filtering_method: knn_residual` when you need candidates
+near actual TCGA profiles rather than only near a global reference center.
+
+1. Match TCGA expression sample IDs to `paths.tcga2cancer_type_file_path`.
+2. Reserve `ceil(0.2 * n)` individual samples within each cancer type,
+   using dedicated split seed 42 by default.
+3. Fit PCA, the neighbor database, and gene-range bounds on fitting samples
+   only. Transform held-out samples using the same PCA and normalization.
+4. Set upper thresholds from held-out neighbor distances and L2
+   reconstruction residuals, using the 95th percentile of each by default.
+5. Retain candidates that pass the optional range check and both score
+   thresholds. There is no minimum distance cutoff.
+
+Use `gep_pca_n_components: 0.9` for a 90% variance target and
+`gep_norm_ord: 2` for Euclidean neighbor distance. The default neighbor count
+is 10. All held-out samples contribute to calibration; they are not added
+to the fitting PCA or neighbor database.
+
+The method saves the split, per-cancer counts, held-out scores, neighbor
+database, thresholds, and per-batch candidate scores. The summary records
+patient overlap, marginal and joint pass counts, and exported sample counts.
+Individual-sample stratification does not guarantee patient-independent
+calibration.
+
+The default `gep_max_generation_batches: 100` stops a run that cannot
+collect the requested sample count. It counts candidate batches, not
+individual profiles, and persists across resumptions. Thresholds are not
+automatically loosened and intermediate artifacts are preserved on failure.
+
+When comparison plotting is enabled, local-filter runs additionally save:
+
+- `reference_only_PCA_coordinates.csv`
+- `reference_only_PCA_PC1_PC2.png` and `.pdf`, using the filtering model
+- `local_filter_score_distributions.png` and `.pdf`, with threshold markers
+
+The joint comparison plot still uses all eligible TCGA samples. Plotting
+does not fit or recalibrate the acceptance model. Two-dimensional visual
+overlap is not a guarantee of high-dimensional similarity. Use a fresh
+target name when migrating an existing centroid-filtered run.
 
 ## Global Defaults And Dataset Overrides
 

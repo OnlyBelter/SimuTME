@@ -110,6 +110,12 @@ Dataset-level Mixed fields can override them.
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
 - `gep_norm_ord`
+- `gep_reference_holdout_fraction`
+- `gep_reference_holdout_seed`
+- `gep_knn_n_neighbors`
+- `gep_knn_distance_quantile`
+- `gep_pca_residual_quantile`
+- `gep_max_generation_batches`
 
 #### Gene-level filtering and PCA comparison defaults
 
@@ -155,7 +161,41 @@ range-selection modes fail with a migration message. Remove
 
 `gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
 `gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
-The supported distance methods are `median_gep`, `mean_gep`, and `linear_mmd`.
+The supported methods are `median_gep`, `mean_gep`, `linear_mmd`, and
+`knn_residual`. Existing centroid methods retain their v1 behavior.
+
+For `knn_residual`, provide `paths.tcga2cancer_type_file_path` with unique
+sample IDs and a `cancer_type` column. After exact sample alignment and
+`filtering_ref_types` selection, hold out `ceil(fraction * n)` individual
+samples per cancer type. Every type must retain fitting and held-out
+samples. The default fraction is 0.2 and the dedicated split seed is 42.
+Repeated patient samples are not grouped; patient overlap is reported.
+
+Only fitting TCGA samples estimate PCA, neighbors, and optional gene-range
+bounds. All held-out samples calibrate the two upper score thresholds,
+including samples that fail the gene-range check.
+
+| Parameter | Default | Meaning in `knn_residual` |
+| --- | --- | --- |
+| `gep_reference_holdout_fraction` | `0.2` | Held-out fraction within each cancer type |
+| `gep_reference_holdout_seed` | `42` | Reproducible individual-sample split seed |
+| `gep_knn_n_neighbors` | `10` | Mean distance to k fitting-reference neighbors |
+| `gep_knn_distance_quantile` | `0.95` | Held-out neighbor-distance upper percentile |
+| `gep_pca_residual_quantile` | `0.95` | Held-out reconstruction-residual upper percentile |
+| `gep_max_generation_batches` | `100` | Cumulative candidate-batch bound |
+
+The new method requires `gep_filtering_in_pca_space: true`. Use
+`gep_pca_n_components: 0.9` to retain 90% of fitting-reference variance, or
+an integer for an explicit component count. Raw PCs are not whitened.
+`gep_norm_ord` selects Manhattan (1) or Euclidean (2) neighbor distance;
+reconstruction residuals always use L2 in normalized log-expression space.
+`gep_filtering_quantile` applies only to centroid methods and does not
+impose a lower distance bound in `knn_residual`.
+
+With `gep_filtering: false`, no local split or calibration runs. Changing
+methods, labels, split membership, or calibration settings requires
+compatible metadata or a new output location; old artifacts are not
+reused as local-filter runs.
 
 ### SCT sample-diversity parameters
 

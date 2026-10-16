@@ -29,6 +29,7 @@ from .simu_helper import (sample_random, get_sample_id_random, sample_with_neigh
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
                           NeighborSamplingScheme)
 from .filtering import FixedGeneFilter, validate_metadata, write_metadata
+from .local_filtering import LocalTCGAFilter
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
 
 
@@ -85,6 +86,17 @@ class GEPGenerationConfig:
             raise ValueError("n_samples must be positive")
         if self.simu_method not in ('ave', 'mul'):
             raise ValueError(f"Invalid simu_method: {self.simu_method}")
+        if self.filtering and self.filtering_method == "knn_residual" and not isinstance(
+            self.filtering_space, LocalTCGAFilter
+        ):
+            raise ValueError(
+                "knn_residual requires a prepared LocalTCGAFilter. "
+                "Use run_bulk_simulation to resolve the annotated reference and split."
+            )
+        if isinstance(self.filtering_space, LocalTCGAFilter) and (
+            not self.filtering or self.filtering_method != "knn_residual"
+        ):
+            raise ValueError("LocalTCGAFilter requires filtering=True and filtering_method='knn_residual'.")
         if self.dirichlet_sampling_seed is not None and (
             isinstance(self.dirichlet_sampling_seed, bool)
             or not isinstance(self.dirichlet_sampling_seed, (int, np.integer))
@@ -440,6 +452,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 pbar.update(self.generated_bulk_gep_counter)
 
             while self.generated_bulk_gep_counter < self.n_samples:
+                if isinstance(self.filtering_space, LocalTCGAFilter):
+                    self.filtering_space.check_batch_limit(
+                        self.generated_bulk_gep_counter, self.gep_filtering_input_n_samples
+                    )
                 # 1. Generate Fractions
                 generated_cell_frac = generate_cell_fraction(
                     sampling_method=config.sampling_method_prop,
@@ -535,6 +551,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                                                   cell_fraction=generated_cell_frac)
 
                 self.n_round += 1
+                if isinstance(self.filtering_space, LocalTCGAFilter):
+                    self.filtering_space.save_batch_scores(
+                        simulated_gep.index if simulated_gep is not None else []
+                    )
                 if self.filtering_space is not None:
                     self._save_filtering_metadata()
 
@@ -568,6 +588,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         result_artifacts = list(space.result_dir.iterdir()) if space.result_dir.exists() else []
         if any(path.exists() for path in artifacts) or result_artifacts:
             metadata = validate_metadata(self.filtering_metadata_path, space.identity)
+            if isinstance(space, LocalTCGAFilter) and not (
+                {"n_round", "generated_bulk_gep_counter"} <= metadata.get("generator_stats", {}).keys()
+            ):
+                raise ValueError("Local-filter checkpoint is incomplete. Use a new dataset name/output location.")
             space.restore_stats(metadata.get("stats", {}))
             for key, value in metadata.get("generator_stats", {}).items():
                 setattr(self, key, value)
@@ -599,11 +623,16 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             for artifact in space.additional_artifacts:
                 if artifact.exists():
                     validate_metadata(artifact.with_suffix(".metadata.json"), space.identity)
+            if isinstance(space, LocalTCGAFilter):
+                space.validate_saved_scores(self.generated_bulk_gep_counter)
         space.validate_model()
+        space.persist_genes()
+        if isinstance(space, LocalTCGAFilter):
+            self._save_filtering_metadata()
+            space.prepare_calibration()
         if space.pca is not None:
             self.gep_filtering_pca_target = space.pca.n_components
             self.gep_filtering_n_pcs = int(space.pca.n_components_)
-        space.persist_genes()
         self._save_filtering_metadata()
 
     def _save_filtering_metadata(self):
@@ -615,6 +644,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 "gep_filtering_n_pcs",
             )
         }
+        if isinstance(self.filtering_space, LocalTCGAFilter):
+            generator_stats.update(
+                n_round=self.n_round,
+                generated_bulk_gep_counter=self.generated_bulk_gep_counter,
+            )
         write_metadata(
             self.filtering_metadata_path, self.filtering_space.identity,
             stats=self.filtering_space.stats(), generator_stats=generator_stats,
@@ -1454,6 +1488,22 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if the generation process broke accidentally,
         generated intermediate result can be used to recovery generation process
         """
+        if isinstance(getattr(self, "filtering_space", None), LocalTCGAFilter):
+            if self.generated_bulk_gep_csv_fp.exists():
+                fractions = pd.read_csv(self.generated_cell_fraction_fp, index_col=0)
+                expression = pd.read_csv(self.generated_bulk_gep_csv_fp, index_col=0, usecols=[0])
+                sampled = pd.read_csv(self.sampled_sc_cell_id_file_path, index_col=0, usecols=[0])
+                if (fractions.index.has_duplicates or expression.index.has_duplicates
+                        or fractions.index.tolist() != expression.index.tolist()
+                        or set(sampled.index) != set(expression.index)
+                        or len(expression) != self.generated_bulk_gep_counter):
+                    raise ValueError(
+                        "Local-filter intermediate sample IDs/counts differ from checkpoint. "
+                        "Use a new dataset name/output location; artifacts are not deleted."
+                    )
+            elif self.generated_bulk_gep_counter:
+                raise ValueError("Local-filter expression batches are missing. Use a new output location.")
+            return
         if self.generated_cell_fraction_fp.exists():
             gen_cell_frac = pd.read_csv(self.generated_cell_fraction_fp, index_col=0)
             gen_cell_frac = gen_cell_frac[~gen_cell_frac.index.duplicated(keep='first')].copy()

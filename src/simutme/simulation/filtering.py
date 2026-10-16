@@ -112,6 +112,9 @@ def write_metadata(path, identity, **metadata):
 class FixedGeneFilter:
     """Reference-only filter reused across generation batches."""
 
+    workflow_version = WORKFLOW_VERSION
+    supported_methods = ("median_gep", "mean_gep", "linear_mmd")
+
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
                  correlation_file=None):
@@ -129,7 +132,7 @@ class FixedGeneFilter:
             pd.util.hash_pandas_object(self.reference_log, index=True).values.tobytes()
         ).hexdigest()
         self.pca_identity = {
-            "workflow_version": WORKFLOW_VERSION,
+            "workflow_version": self.workflow_version,
             "gene_list_hash": self.gene_hash,
             "normalization_version": NORMALIZATION_VERSION,
             "reference_file": str(Path(reference_file).resolve()),
@@ -158,14 +161,15 @@ class FixedGeneFilter:
         self.range_input = self.range_kept = 0
         self.distance_input = self.distance_kept = 0
         if self.gep.enabled:
-            if self.gep.filtering_method not in ("median_gep", "mean_gep", "linear_mmd"):
+            if self.gep.filtering_method not in self.supported_methods:
                 raise ValueError(
                     "Correlation-first GEP filtering supports median_gep, mean_gep, "
                     "and linear_mmd; migrate marker_ratio filtering to a reference-distance method."
                 )
             q_low, q_high = self.gep.gep_filtering_quantile
-            if q_high is None or not 0 <= q_high <= 1 or (
-                q_low is not None and not 0 <= q_low <= q_high
+            if self.gep.filtering_method != "knn_residual" and (
+                q_high is None or not 0 <= q_high <= 1
+                or (q_low is not None and not 0 <= q_low <= q_high)
             ):
                 raise ValueError("gep_filtering_quantile must satisfy 0 <= lower <= upper <= 1.")
             if not 0 <= self.gep.min_percentage_within_gene_range <= 1:

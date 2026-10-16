@@ -23,9 +23,10 @@ from .simulation.sampling import (
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 from .simulation.filtering import (
-    FixedGeneFilter, WORKFLOW_VERSION, NORMALIZATION_VERSION, identity_hash,
+    FixedGeneFilter, NORMALIZATION_VERSION, identity_hash,
     normalize_selected, select_fixed_genes, validate_metadata, write_metadata,
 )
+from .simulation.local_filtering import LocalTCGAFilter, split_tcga_reference, validate_local_parameters
 
 
 def _build_sorted_bulk_imputed_sct_path(
@@ -350,6 +351,12 @@ class SimuConfig:
     gep_filtering_in_pca_space: bool = True
     gep_pca_n_components: int | float | None = None
     gep_norm_ord: int = 1
+    gep_reference_holdout_fraction: float = 0.2
+    gep_reference_holdout_seed: int = 42
+    gep_knn_n_neighbors: int = 10
+    gep_knn_distance_quantile: float = 0.95
+    gep_pca_residual_quantile: float = 0.95
+    gep_max_generation_batches: int = 100
     gene_filtering_enabled_default: bool = False
     gene_filtering_reference_file: Path | None = None
     gene_filtering_type: str | None = None
@@ -512,6 +519,12 @@ class ResolvedGEPFilteringParams:
     norm_ord: int
     high_corr_gene_list_file: str | None
     high_corr_gene_list: List[str] | None
+    reference_holdout_fraction: float = 0.2
+    reference_holdout_seed: int = 42
+    knn_n_neighbors: int = 10
+    knn_distance_quantile: float = 0.95
+    pca_residual_quantile: float = 0.95
+    max_generation_batches: int = 100
 
 
 @dataclass(frozen=True)
@@ -706,11 +719,14 @@ def _resolve_gep_filtering_params(
     high_corr_gene_list = None
     if high_corr_gene_list_file:
         high_corr_gene_list = _read_gene_list_file(high_corr_gene_list_file)
+    filtering_method = str(_resolve_dataset_override(
+        params, config, "gep_filtering_method", config.gep_filtering_method))
+    norm_ord = _resolve_dataset_override(params, config, "gep_norm_ord", config.gep_norm_ord)
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
         reference_file=reference_file,
         ref_exp_type=str(ref_exp_type) if ref_exp_type is not None else None,
-        filtering_method=str(_resolve_dataset_override(params, config, "gep_filtering_method", config.gep_filtering_method)),
+        filtering_method=filtering_method,
         filtering_ref_types=filtering_ref_types,
         gep_filtering_quantile=quantile,
         n_top=int(_resolve_dataset_override(params, config, "gep_n_top", config.gep_n_top if hasattr(config, "gep_n_top") else 20)),
@@ -738,11 +754,25 @@ def _resolve_gep_filtering_params(
         pca_n_components=_parse_pca_component_value(
             _resolve_dataset_override(params, config, "gep_pca_n_components", config.gep_pca_n_components)
         ),
-        norm_ord=int(_resolve_dataset_override(params, config, "gep_norm_ord", config.gep_norm_ord)),
+        norm_ord=norm_ord if filtering_method == "knn_residual" else int(norm_ord),
         high_corr_gene_list_file=high_corr_gene_list_file,
         high_corr_gene_list=high_corr_gene_list,
+        reference_holdout_fraction=float(_resolve_dataset_override(
+            params, config, "gep_reference_holdout_fraction", 0.2)),
+        reference_holdout_seed=_resolve_dataset_override(
+            params, config, "gep_reference_holdout_seed", 42),
+        knn_n_neighbors=_resolve_dataset_override(params, config, "gep_knn_n_neighbors", 10),
+        knn_distance_quantile=float(_resolve_dataset_override(
+            params, config, "gep_knn_distance_quantile", 0.95)),
+        pca_residual_quantile=float(_resolve_dataset_override(
+            params, config, "gep_pca_residual_quantile", 0.95)),
+        max_generation_batches=_resolve_dataset_override(params, config, "gep_max_generation_batches", 100),
     )
     if resolved.enabled:
+        if resolved.filtering_method == "knn_residual":
+            validate_local_parameters(resolved)
+            if not config.tcga2cancer_type_file_path:
+                raise ValueError("knn_residual requires paths.tcga2cancer_type_file_path.")
         if not resolved.reference_file:
             raise ValueError(
                 f'"gep_filtering_reference_file" must be set when gep_filtering is enabled for Mixed dataset "{dataset_name}".'
@@ -1263,7 +1293,12 @@ def run_bulk_simulation(dataset_name: str,
             )
         sampling_method_gep = 'random'
 
-        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{filtering_str}_median_gep'
+        output_tag = (
+            "with_filtering_knn_residual"
+            if resolved_gep_filtering.enabled and resolved_gep_filtering.filtering_method == "knn_residual"
+            else f"{filtering_str}_median_gep"
+        )
+        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{output_tag}'
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,
@@ -1577,7 +1612,20 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
         reference = pd.DataFrame(np.expm1(values * np.log(2)), index=reference.index,
                                  columns=reference.columns)
     reference_subset = gep.filtering_ref_types if gep.enabled else None
-    if reference_subset:
+    local_mode = gep.enabled and gep.filtering_method == "knn_residual"
+    local_kwargs = {}
+    if local_mode:
+        annotation_file = Path(config.tcga2cancer_type_file_path)
+        annotation = pd.read_csv(annotation_file, index_col=0)
+        reference, split, split_summary = split_tcga_reference(
+            reference, annotation, gep.reference_holdout_fraction,
+            gep.reference_holdout_seed, reference_subset,
+        )
+        local_kwargs = {
+            "split": split, "split_summary": split_summary,
+            "annotation_file": str(annotation_file.resolve()),
+        }
+    elif reference_subset:
         mapping = pd.read_csv(config.tcga2cancer_type_file_path, index_col=0)
         sample_ids = mapping.index[mapping["cancer_type"].isin(reference_subset)]
         reference = reference.loc[reference.index.isin(sample_ids)].copy()
@@ -1614,9 +1662,10 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
         sct_genes, reference.columns.tolist(), cell_types, supplied_genes=supplied_genes,
         correlations=correlations, corr_threshold=gene.corr_threshold, n_gene_max=gene.n_gene_max,
     )
-    return FixedGeneFilter(
+    filter_type = LocalTCGAFilter if local_mode else FixedGeneFilter
+    return filter_type(
         genes, reference, reference_file, reference_subset, gep, result_dir,
-        len(sct_genes), shared_count, correlation_file=correlation_file,
+        len(sct_genes), shared_count, correlation_file=correlation_file, **local_kwargs,
     )
 
 
@@ -1659,7 +1708,7 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         outputs["filtered_bulk_gep_file"] = str(output)
     if gene_params.plot_pca:
         result_dir = filtering_space.result_dir
-        postfix = WORKFLOW_VERSION
+        postfix = filtering_space.workflow_version
         model = result_dir / f"comparison_pca_{gene_params.pca_n_components}.joblib"
         coordinates = result_dir / f"comparison_pca_{gene_params.pca_n_components}.csv"
         comparison_metadata = model.with_suffix(".metadata.json")
@@ -1678,7 +1727,8 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
             if cached_model.n_features_in_ != len(filtering_space.genes):
                 raise ValueError("Comparison PCA gene order differs from G. Use a new output location.")
         filtering_by_gene_list_and_pca_plot(
-            bulk_log, filtering_space.reference_log, filtering_space.genes,
+            bulk_log, getattr(filtering_space, "all_reference_log", filtering_space.reference_log),
+            filtering_space.genes,
             str(result_dir), dataset_name, n_components=gene_params.pca_n_components,
             pca_model_name_postfix=postfix, pca_model_file_path=str(model),
             pca_data_file_path=str(coordinates), figsize=gene_params.pca_figsize,
@@ -1689,6 +1739,11 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
             pca_model_file=str(model), pca_data_file=str(coordinates),
             pca_plot_file=str(result_dir / f"{dataset_name}_PCA_with_TCGA_{postfix}_PC0_PC1.png"),
         )
+        if isinstance(filtering_space, LocalTCGAFilter):
+            from .simulation.filtering_diagnostics import plot_local_filter_diagnostics
+            filtering_space.diagnostic_outputs = plot_local_filter_diagnostics(
+                filtering_space, bulk_log, dataset_name
+            )
     return outputs
 
 
@@ -2018,7 +2073,7 @@ def _build_mixed_dataset_summary(
     }
     if filtering_space is not None:
         summary.update({
-            "filtering_workflow_version": WORKFLOW_VERSION,
+            "filtering_workflow_version": filtering_space.workflow_version,
             "normalization_version": NORMALIZATION_VERSION,
             "filtering_identity": filtering_space.identity,
             "filtering_cache_identity": identity_hash(filtering_space.identity),
@@ -2033,6 +2088,9 @@ def _build_mixed_dataset_summary(
             ),
             **filtering_space.stats(),
         })
+        if isinstance(filtering_space, LocalTCGAFilter):
+            summary.update(filtering_space.summary())
+            summary["exported_n_samples"] = generated_shape[0] if generated_shape else None
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     return summary_path
