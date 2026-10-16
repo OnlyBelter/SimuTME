@@ -82,11 +82,11 @@ parameters:
   gene_quantile_range: [0.005, 0.5, 0.995]
   gep_filtering_quantile: [0.0, 0.95]
   pca_n_components: 0.9
-  gene_list_type: "high_corr_gene_and_quantile_range"
+  gene_list_type: "high_corr_gene"  # Legacy fallback name; correlation-first mode is the default
   gep_filtering_enabled_default: false  # Optional global default for Mixed GEP-level filtering when a dataset does not set `gep_filtering`
   gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for Mixed GEP-level filtering; defaults to paths.tcga_merged_tpm_file_path
   gep_filtering_ref_exp_type: "TPM"  # Optional reference expression type for GEP-level filtering
-  gep_filtering_method: "median_gep"  # Optional GEP-level filtering metric: "median_gep", "mean_gep", "linear_mmd", or "marker_ratio"
+  gep_filtering_method: "median_gep"  # Reference-distance method: "median_gep", "mean_gep", or "linear_mmd"
   gep_n_top: 20  # Optional neighbor count for marker-ratio filtering
   gep_show_filtering_info: false  # Optional verbose logging for GEP-level filtering
   gep_filtering_by_gene_range: false  # Optional extra per-sample gene-range filtering during Mixed generation
@@ -96,15 +96,13 @@ parameters:
   gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
   gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
   gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
-  gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for post-generation gene filtering; defaults to paths.tcga_merged_tpm_file_path
-  gene_filtering_type: "high_corr_gene_and_quantile_range"  # Optional post-generation gene filtering mode; defaults to the legacy `gene_list_type`
-  gene_filtering_quantile_range: [0.005, 0.5, 0.995]  # Optional TCGA quantile triplet for quantile-based gene filtering
-  gene_filtering_q_col_name: ["q_0.5", "q_50", "q_99.5"]  # Optional column names paired with the quantile triplet
+  gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Reference for selecting shared genes and normalization when GEP filtering is disabled
+  gene_filtering_type: "high_corr_gene"  # Select genes before target generation; no expression-range gene selection
   calculate_gene_cell_prop_correlation: false  # Optional switch for saving a full, unfiltered Mixed gene/cell-fraction correlation matrix
-  gene_filtering_correlation_reference_dataset: null  # Optional source Mixed dataset name for reusable high-correlation filtering
+  gene_filtering_correlation_reference_dataset: null  # Required earlier unfiltered segment source when gene filtering has no supplied gene list
   gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
-  gene_filtering_save_filtered_h5ad: true  # Optional switch for writing the filtered Mixed `.h5ad`
+  gene_filtering_save_filtered_h5ad: true  # Optional additional named export; the primary Mixed `.h5ad` already contains only G
   gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming
   plot_pca_for_comparison: true  # Optional Mixed-versus-TCGA PCA plotting switch; works with or without gene filtering
   gene_filtering_pca_n_components: 2  # Optional PCA component count for comparison plots; must be >= 2 when plotting is enabled

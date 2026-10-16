@@ -138,7 +138,7 @@ def test_simu_config_from_yaml_defaults_shared_filtering_params(tmp_path: Path):
     ("specific_gene_filtering_type", "expected_gene_filtering_type"),
     [
         ("quantile_range", "quantile_range"),
-        (None, "high_corr_gene_and_quantile_range"),
+        (None, "high_corr_gene"),
     ],
 )
 def test_simu_config_from_yaml_defaults_legacy_gene_list_type_when_omitted(
@@ -181,7 +181,7 @@ def test_simu_config_from_yaml_defaults_legacy_gene_list_type_when_omitted(
 
     config = SimuConfig.from_yaml(str(config_path))
 
-    assert config.gene_list_type == "high_corr_gene_and_quantile_range"
+    assert config.gene_list_type == "high_corr_gene"
     assert config.gene_filtering_type == expected_gene_filtering_type
 
 

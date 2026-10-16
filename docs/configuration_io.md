@@ -87,8 +87,8 @@ These parameters affect shared simulation behavior across workflows.
   `0.9` when omitted.
 
 - `gene_list_type`
-  Legacy global gene-filtering mode. It still maps to
-  `gene_filtering_type`.
+  Legacy global gene-filtering mode. It maps to `gene_filtering_type`
+  and defaults to `high_corr_gene`.
 
 ### Mixed filtering parameters
 
@@ -118,8 +118,6 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_type`
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
-- `gene_filtering_quantile_range`
-- `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
@@ -140,6 +138,24 @@ earlier segment-sampled, unfiltered Mixed dataset with
 and maximum genes per cell type are applied without changing the source table.
 An explicit `gene_filtering_high_corr_gene_file` or
 `paths.high_corr_gene_file_path` gene list takes precedence.
+
+Gene selection runs before target generation, using only output cell types.
+The selected list G is intersected with SCT and reference genes, persisted
+in a deterministic order, and reused for normalization, profile checks,
+PCA, and export. Each profile is normalized over G to 1,000,000 before
+`log2(TPM + 1)` transformation. When GEP filtering is enabled, its reference
+file and `filtering_ref_types` define the reference space; otherwise,
+`gene_filtering_reference_file` is used.
+
+Use `gene_filtering_type: high_corr_gene`. Without a supplied gene list,
+`gene_filtering_correlation_reference_dataset` is required. Explicit legacy
+range-selection modes fail with a migration message. Remove
+`gene_filtering_quantile_range` and `gene_filtering_q_col_name`; the separate
+`gep_gene_quantile_range` controls profile acceptance on G.
+
+`gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
+`gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
+The supported distance methods are `median_gep`, `mean_gep`, and `linear_mmd`.
 
 ### SCT sample-diversity parameters
 
@@ -232,7 +248,6 @@ For SCT datasets:
 - `gep_filtering_method`
 - `gep_filtering_quantile`
 - `gep_filtering_reference_file`
-- `gep_high_corr_gene_list_file`
 - `gep_filtering_by_gene_range`
 - `gep_min_percentage_within_gene_range`
 - `gep_gene_quantile_range`
@@ -247,8 +262,6 @@ For SCT datasets:
 - `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
-- `gene_filtering_quantile_range`
-- `gene_filtering_q_col_name`
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
@@ -261,7 +274,7 @@ For Mixed datasets:
 - `sampling_method_gep` is ignored if provided; Mixed generation always uses `random`
   when drawing SCT profiles from the referenced SCT dataset
 - `gep_filtering` controls GEP-level filtering during Mixed generation
-- `gene_filtering` controls post-generation gene-level filtering
+- `gene_filtering` selects the fixed gene list before generation
 - `parameters.mixed_sct_loading_mode` controls whether the upstream SCT
   reference is loaded eagerly in memory, lazily in backed mode, or selected
   automatically based on matrix size
@@ -405,6 +418,21 @@ Optional post-processing outputs:
 - PCA score tables
 - PCA figures
 - dataset-level summary JSON
+
+For targets with gene or GEP filtering enabled, the primary CSV and `.h5ad`
+contain exactly the fixed list G in normalized `log2(TPM + 1)` space.
+`gene_filtering_save_filtered_h5ad` controls an additional named copy, not
+whether the primary output is restricted to G.
+
+Dataset-local filtering artifacts include `fixed_filtering_gene_list.csv`,
+`filtering_metadata.json`, and, when PCA filtering is used,
+`gep_filtering_pca.joblib` with `gep_filtering_pca.metadata.json`.
+The summary separates `pre_selection_n_genes`, `shared_n_genes`, and
+`exported_n_genes`; `generated_n_genes` reports the actual artifact dimension.
+
+Missing or incompatible filtering metadata prevents reuse of target outputs,
+models, and intermediate batches. Use a new dataset name/output location.
+Existing unfiltered correlation-source artifacts remain reusable.
 
 ## Usage Pattern
 

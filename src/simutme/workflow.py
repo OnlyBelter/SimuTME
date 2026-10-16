@@ -22,6 +22,10 @@ from .simulation.sampling import (
 )
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
+from .simulation.filtering import (
+    FixedGeneFilter, WORKFLOW_VERSION, NORMALIZATION_VERSION, identity_hash,
+    normalize_selected, select_fixed_genes, validate_metadata, write_metadata,
+)
 
 
 def _build_sorted_bulk_imputed_sct_path(
@@ -333,7 +337,7 @@ class SimuConfig:
     gep_filtering_quantile: Tuple[float, float]
     gene_quantile_range: List[float] = field(default_factory=lambda: [0.005, 0.5, 0.995])
     pca_n_components: float = 0.9
-    gene_list_type: str = "high_corr_gene_and_quantile_range"
+    gene_list_type: str = "high_corr_gene"
     gep_filtering_enabled_default: bool = False
     gep_filtering_reference_file: Path | None = None
     gep_filtering_ref_exp_type: str | None = None
@@ -764,7 +768,10 @@ def _resolve_gene_filtering_params(
         _resolve_dataset_override(params, config, "gene_filtering_quantile_range", config.gene_filtering_quantile_range),
         "gene_filtering_quantile_range",
     )
-    filtering_type = str(_resolve_dataset_override(params, config, "gene_filtering_type", config.gene_filtering_type or config.gene_list_type))
+    filtering_type = str(
+        _resolve_dataset_override(params, config, "gene_filtering_type")
+        or config.gene_list_type
+    )
     if quantile_range is None and "quantile_range" in filtering_type:
         quantile_range = _resolve_quantile_triplet(config.gene_quantile_range, "gene_quantile_range")
     q_col_name = _resolve_quantile_col_names(
@@ -781,8 +788,15 @@ def _resolve_gene_filtering_params(
             config.high_corr_gene_file_path,
             f'Mixed dataset "{dataset_name}" shared gene filtering fallback',
         )
+    if enabled and high_corr_gene_file is None and filtering_type != "high_corr_gene":
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" uses legacy gene_filtering_type={filtering_type!r}. '
+            'Migrate to gene_filtering_type: high_corr_gene and remove '
+            'gene_filtering_quantile_range and gene_filtering_q_col_name; '
+            'use gep_gene_quantile_range for profile acceptance.'
+        )
     correlation_reference_dataset = None
-    if high_corr_gene_file is None and "high_corr_gene" in filtering_type:
+    if enabled and high_corr_gene_file is None and "high_corr_gene" in filtering_type:
         if "gene_filtering_correlation_reference_dataset" in params:
             correlation_reference_dataset = params["gene_filtering_correlation_reference_dataset"]
         else:
@@ -799,6 +813,12 @@ def _resolve_gene_filtering_params(
                 f'Mixed dataset "{dataset_name}" cannot use itself as a gene-correlation reference.'
             )
         correlation_reference_dataset = None
+    if enabled and high_corr_gene_file is None and not correlation_reference_dataset:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" requires '
+            '"gene_filtering_correlation_reference_dataset" or a supplied gene list '
+            'before generation. No implicit pilot or target-derived correlations are allowed.'
+        )
     if correlation_reference_dataset:
         dataset_definitions = getattr(config, "_dataset_definitions", {})
         dataset_order = getattr(config, "_dataset_order", [])
@@ -1265,10 +1285,24 @@ def run_bulk_simulation(dataset_name: str,
         )
 
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
+        filtering_space = None
+        if resolved_gene_filtering.enabled or resolved_gep_filtering.enabled:
+            filtering_space = _prepare_fixed_gene_filter(
+                dataset_name, resolved_sct_dataset_file_path, config.output_types,
+                resolved_gep_filtering, resolved_gene_filtering, config,
+                _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name),
+            )
+            if resolved_gene_filtering.enabled and resolved_gene_filtering.save_filtered_h5ad:
+                filtering_space.additional_artifacts = [
+                    _build_filtered_h5ad_path(
+                        generated_bulk_gep_fp, "high_corr_gene",
+                        resolved_gene_filtering.filtered_dataset_postfix,
+                    )
+                ]
 
         # 2. Generate GEP (if it doesn't exist)
         generated_bulk_gep_was_cached = os.path.exists(generated_bulk_gep_fp)
-        if not generated_bulk_gep_was_cached:
+        if not generated_bulk_gep_was_cached or filtering_space is not None:
             gep_gen_config = GEPGenerationConfig(
                 n_samples=params['n_samples'],
                 simu_method='mul',  # matrix multiplication by cell proportions and sampled GEPs to get bulk GEPs
@@ -1294,6 +1328,7 @@ def run_bulk_simulation(dataset_name: str,
                 filtering_in_pca_space=resolved_gep_filtering.filtering_in_pca_space,
                 norm_ord=resolved_gep_filtering.norm_ord,
                 pca_n_components=resolved_gep_filtering.pca_n_components,
+                filtering_space=filtering_space,
             )
             bulk_generator.generate_gep(config=gep_gen_config)
         else:
@@ -1336,6 +1371,7 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
             resolved_params=resolved_gene_filtering,
+            filtering_space=filtering_space,
         )
         if full_gene_corr_file is not None:
             postprocess_outputs["full_gene_corr_with_cell_fraction_file"] = str(full_gene_corr_file)
@@ -1352,6 +1388,7 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
             preserve_existing_gep_pca_metadata=generated_bulk_gep_was_cached,
+            filtering_space=filtering_space,
         )
 
         return str(generated_bulk_gep_fp)
@@ -1529,13 +1566,144 @@ def _build_filtered_h5ad_path(
     return generated_bulk_gep_fp.with_name(f"{generated_bulk_gep_fp.stem}_{postfix}{generated_bulk_gep_fp.suffix}")
 
 
+def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, config, result_dir):
+    reference_file = gep.reference_file if gep.enabled else gene.reference_file
+    reference_type = gep.ref_exp_type if gep.enabled else "TPM"
+    reference = ReadExp(str(reference_file), exp_type=reference_type).exp
+    if reference_type == "log_space":
+        values = reference.to_numpy(dtype=np.float64)
+        if not np.isfinite(values).all() or (values < 0).any():
+            raise ValueError("Reference contains negative or non-finite log expression.")
+        reference = pd.DataFrame(np.expm1(values * np.log(2)), index=reference.index,
+                                 columns=reference.columns)
+    reference_subset = gep.filtering_ref_types if gep.enabled else None
+    if reference_subset:
+        mapping = pd.read_csv(config.tcga2cancer_type_file_path, index_col=0)
+        sample_ids = mapping.index[mapping["cancer_type"].isin(reference_subset)]
+        reference = reference.loc[reference.index.isin(sample_ids)].copy()
+        if reference.empty:
+            raise ValueError(f'No reference samples match filtering_ref_types for "{dataset_name}".')
+    if reference.empty:
+        raise ValueError("Filtering reference has no samples.")
+    sct_reader = ReadH5AD(sct_file, backed="r")
+    try:
+        sct_genes = sct_reader.get_h5ad().var_names.tolist()
+    finally:
+        sct_reader.get_h5ad().file.close()
+    supplied_genes = None
+    correlations = None
+    correlation_file = None
+    if gene.enabled and gene.high_corr_gene_file:
+        supplied_genes = _read_gene_list_file(gene.high_corr_gene_file)
+    elif gene.enabled:
+        source = config._generated_mixed_outputs.get(gene.correlation_reference_dataset)
+        if source is None:
+            raise ValueError(
+                f'Gene-correlation source "{gene.correlation_reference_dataset}" '
+                "has not been generated before its target."
+            )
+        correlation_file = source.get("full_gene_corr_with_cell_fraction_file")
+        if correlation_file is None or not Path(correlation_file).exists():
+            raise ValueError(
+                f'Gene-correlation source "{gene.correlation_reference_dataset}" has no '
+                'full_gene_corr_with_cell_fraction.csv. Set '
+                'calculate_gene_cell_prop_correlation: true and run the source first.'
+            )
+        correlations = pd.read_csv(correlation_file, index_col=0)
+    genes, shared_count = select_fixed_genes(
+        sct_genes, reference.columns.tolist(), cell_types, supplied_genes=supplied_genes,
+        correlations=correlations, corr_threshold=gene.corr_threshold, n_gene_max=gene.n_gene_max,
+    )
+    return FixedGeneFilter(
+        genes, reference, reference_file, reference_subset, gep, result_dir,
+        len(sct_genes), shared_count, correlation_file=correlation_file,
+    )
+
+
+def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, filtering_space):
+    """Export/plot the already fixed space without selecting genes again."""
+    import anndata as ad
+    from scipy.sparse import issparse
+
+    outputs = {
+        "filtered_bulk_gep_file": None,
+        "gene_list_file": str(filtering_space.gene_list_file),
+        "corr_result_file": None,
+        "pca_model_file": None,
+        "pca_data_file": None,
+        "pca_plot_file": None,
+        "full_gene_corr_with_cell_fraction_file": filtering_space.correlation_file,
+    }
+    bulk = ad.read_h5ad(generated_file)
+    if bulk.var_names.tolist() != filtering_space.genes:
+        raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
+    values = bulk.X.toarray() if issparse(bulk.X) else bulk.X
+    bulk_log = pd.DataFrame(values, index=bulk.obs_names, columns=bulk.var_names)
+    if gene_params.enabled and gene_params.save_filtered_h5ad:
+        output = _build_filtered_h5ad_path(
+            generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
+        )
+        metadata_path = output.with_suffix(".metadata.json")
+        if not output.exists():
+            bulk.write_h5ad(output, compression="gzip")
+            write_metadata(metadata_path, filtering_space.identity)
+        else:
+            validate_metadata(metadata_path, filtering_space.identity)
+            existing = ad.read_h5ad(output, backed="r")
+            try:
+                if (existing.var_names.tolist() != filtering_space.genes
+                        or existing.obs_names.tolist() != bulk.obs_names.tolist()):
+                    raise ValueError("Selected-gene export differs from G or sample IDs. Use a new output location.")
+            finally:
+                existing.file.close()
+        outputs["filtered_bulk_gep_file"] = str(output)
+    if gene_params.plot_pca:
+        result_dir = filtering_space.result_dir
+        postfix = WORKFLOW_VERSION
+        model = result_dir / f"comparison_pca_{gene_params.pca_n_components}.joblib"
+        coordinates = result_dir / f"comparison_pca_{gene_params.pca_n_components}.csv"
+        comparison_metadata = model.with_suffix(".metadata.json")
+        comparison_identity = {
+            **filtering_space.pca_identity,
+            "comparison_components": gene_params.pca_n_components,
+            "bulk_hash": identity_hash(pd.util.hash_pandas_object(bulk_log, index=True).tolist()),
+            "model_scope": "joint-reference-and-simulated-diagnostic",
+            "ordered_genes": filtering_space.genes,
+        }
+        if model.exists() or coordinates.exists() or comparison_metadata.exists():
+            validate_metadata(comparison_metadata, comparison_identity)
+            if not model.exists() or not coordinates.exists():
+                raise ValueError("Comparison PCA artifacts are incomplete. Use a new output location.")
+            cached_model = load(model)
+            if cached_model.n_features_in_ != len(filtering_space.genes):
+                raise ValueError("Comparison PCA gene order differs from G. Use a new output location.")
+        filtering_by_gene_list_and_pca_plot(
+            bulk_log, filtering_space.reference_log, filtering_space.genes,
+            str(result_dir), dataset_name, n_components=gene_params.pca_n_components,
+            pca_model_name_postfix=postfix, pca_model_file_path=str(model),
+            pca_data_file_path=str(coordinates), figsize=gene_params.pca_figsize,
+            if_plot_pca=True, normalized_log_inputs=True,
+        )
+        write_metadata(comparison_metadata, comparison_identity)
+        outputs.update(
+            pca_model_file=str(model), pca_data_file=str(coordinates),
+            pca_plot_file=str(result_dir / f"{dataset_name}_PCA_with_TCGA_{postfix}_PC0_PC1.png"),
+        )
+    return outputs
+
+
 def _run_gene_filtering_postprocess(
     dataset_name: str,
     generated_bulk_gep_fp: str | Path,
     params: Dict[str, Any],
     config: SimuConfig,
     resolved_params: ResolvedGeneFilteringParams,
+    filtering_space: FixedGeneFilter | None = None,
 ) -> Dict[str, str | None]:
+    if filtering_space is not None:
+        return _postprocess_fixed_gene_filter(
+            dataset_name, generated_bulk_gep_fp, resolved_params, filtering_space
+        )
     outputs: Dict[str, str | None] = {
         "filtered_bulk_gep_file": None,
         "gene_list_file": None,
@@ -1771,6 +1939,7 @@ def _build_mixed_dataset_summary(
     gep_filtering_pca_target: int | float | None = None,
     gep_filtering_n_pcs: int | None = None,
     preserve_existing_gep_pca_metadata: bool = False,
+    filtering_space: FixedGeneFilter | None = None,
 ) -> Path:
     summary_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(summary_dir)
@@ -1785,6 +1954,7 @@ def _build_mixed_dataset_summary(
                 gep_filtering_n_pcs = existing_summary.get("gep_filtering_n_pcs")
     if (
         preserve_existing_gep_pca_metadata
+        and filtering_space is None
         and gep_filtering.enabled
         and gep_filtering.filtering_in_pca_space
         and (gep_filtering_pca_target is None or gep_filtering_n_pcs is None)
@@ -1846,6 +2016,23 @@ def _build_mixed_dataset_summary(
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
     }
+    if filtering_space is not None:
+        summary.update({
+            "filtering_workflow_version": WORKFLOW_VERSION,
+            "normalization_version": NORMALIZATION_VERSION,
+            "filtering_identity": filtering_space.identity,
+            "filtering_cache_identity": identity_hash(filtering_space.identity),
+            "fixed_gene_list_hash": filtering_space.gene_hash,
+            "pre_selection_n_genes": filtering_space.generation_n_genes,
+            "shared_n_genes": filtering_space.shared_n_genes,
+            "selected_n_genes": len(filtering_space.genes),
+            "exported_n_genes": generated_shape[1] if generated_shape else None,
+            "removed_n_genes": filtering_space.generation_n_genes - len(filtering_space.genes),
+            "gep_filtering_pca_model_file": (
+                str(filtering_space.model_path) if filtering_space.pca is not None else None
+            ),
+            **filtering_space.stats(),
+        })
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     return summary_path
@@ -2034,7 +2221,7 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
                                         n_components=5, pca_model_name_postfix='', bulk_exp_type='log_space',
                                         tcga_exp_type='TPM', pca_model_file_path=None, pca_data_file_path=None,
                                         h5ad_file_path=None, cell_frac_file: pd.DataFrame = None, figsize=(5, 5),
-                                        if_plot_pca: bool = False):
+                                        if_plot_pca: bool = False, normalized_log_inputs: bool = False):
     """
     Applying gene-level filtering based on a specific gene list to simulated bulk GEPs.
     After filtering, the bulk GEPs are rescaled to log2(TPM+1).
@@ -2057,16 +2244,21 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
     :param if_plot_pca: boolean, if True plot PCA components using both simulated bulk GEPs and TCGA samples.
     :return: None
     """
-    bulk_obj = ReadExp(bulk_exp, exp_type=bulk_exp_type)
-    bulk_obj.align_with_gene_list(gene_list=gene_list)
-    bulk_exp = bulk_obj.get_exp()
+    if normalized_log_inputs:
+        bulk_exp = bulk_exp.loc[:, gene_list].copy()
+        tcga_exp = tcga_exp.loc[:, gene_list].copy()
+    else:
+        bulk_obj = ReadExp(bulk_exp, exp_type=bulk_exp_type)
+        bulk_obj.align_with_gene_list(gene_list=gene_list)
+        bulk_exp = bulk_obj.get_exp()
 
     # PCA and plot
     if if_plot_pca:
-        tcga_obj = ReadExp(tcga_exp, exp_type=tcga_exp_type)
-        tcga_obj.align_with_gene_list(gene_list=gene_list)
-        tcga_obj.to_log2cpm1p()
-        tcga_exp = tcga_obj.get_exp()
+        if not normalized_log_inputs:
+            bulk_linear = np.expm1(bulk_exp * np.log(2)) if bulk_exp_type == "log_space" else bulk_exp
+            bulk_exp = np.log2(normalize_selected(bulk_linear, gene_list, "Comparison bulk") + 1)
+            tcga_linear = np.expm1(tcga_exp * np.log(2)) if tcga_exp_type == "log_space" else tcga_exp
+            tcga_exp = np.log2(normalize_selected(tcga_linear, gene_list, "Comparison reference") + 1)
 
         check_dir(result_dir)
         assert n_components >= 2, 'n_components must be >= 2'

@@ -200,21 +200,19 @@ def test_resolve_gep_filtering_params_allows_missing_optional_high_corr_file(tmp
     assert resolved.high_corr_gene_list is None
 
 
-def test_resolve_gene_filtering_params_allows_missing_optional_high_corr_file(tmp_path: Path):
+def test_resolve_gene_filtering_params_requires_source_when_optional_gene_file_is_missing(tmp_path: Path):
     config = _make_filtering_config(tmp_path)
     config.high_corr_gene_file_path = tmp_path / "missing_high_corr.csv"
 
-    resolved = _resolve_gene_filtering_params(
-        dataset_name="Mixed_Test",
-        params={
-            "gene_filtering": True,
-            "gene_filtering_type": "high_corr_gene",
-        },
-        config=config,
-    )
-
-    assert resolved.enabled is True
-    assert resolved.high_corr_gene_file is None
+    with pytest.raises(ValueError, match="requires"):
+        _resolve_gene_filtering_params(
+            dataset_name="Mixed_Test",
+            params={
+                "gene_filtering": True,
+                "gene_filtering_type": "high_corr_gene",
+            },
+            config=config,
+        )
 
 
 def test_resolve_gene_filtering_params_accepts_segment_correlation_reference(tmp_path: Path):

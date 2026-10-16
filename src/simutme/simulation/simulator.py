@@ -8,7 +8,7 @@ import multiprocessing
 from tqdm import tqdm
 from pathlib import Path
 from joblib import dump, load
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from sklearn.decomposition import PCA
 from sklearn.exceptions import InconsistentVersionWarning
 from typing import List, Dict, Union, Optional, Tuple, Any
@@ -28,6 +28,7 @@ from .sampling import (
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
                           NeighborSamplingScheme)
+from .filtering import FixedGeneFilter, validate_metadata, write_metadata
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
 
 
@@ -76,6 +77,7 @@ class GEPGenerationConfig:
     dirichlet_alpha: Optional[Dict[str, float]] = None
     pred_cell_prop_file_path: Optional[Union[str, Path]] = None
     dirichlet_sampling_seed: Optional[int] = None
+    filtering_space: Optional[FixedGeneFilter] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -382,6 +384,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         # Determine batch size for generation
         min_n_cell_frac = min(5000, config.n_samples) if config.filtering else min(1000, config.n_samples)
 
+        self.filtering_space = config.filtering_space
+        if self.filtering_space is not None:
+            self._prepare_filtering_artifacts(config)
+
         if self.generated_bulk_gep_fp.exists():
             logger.info(f'Previous result existed: {self.generated_bulk_gep_fp}')
             logger.info(self.__str__())
@@ -397,7 +403,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         # Setup Filtering Reference
         sample_id_for_filtering = []
-        if config.filtering and config.filtering_ref_types:
+        if config.filtering and config.filtering_ref_types and self.filtering_space is None:
             s2c = pd.read_csv(self.tcga2cancer_type_file_path, index_col=0)
             sample_id_for_filtering = s2c.loc[s2c['cancer_type'].isin(config.filtering_ref_types)].index.to_list()
             if sample_id_for_filtering:
@@ -463,10 +469,20 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     noise_params=config.noise_params
                 )
 
-                simulated_gep_bak = simulated_gep.copy()  # Keep TPM version
+                simulated_gep_bak = (
+                    simulated_gep.copy() if self.filtering_space is None else None
+                )
 
                 # 4. Filtering (GEP-level filtering during generation)
-                if config.filtering:
+                if self.filtering_space is not None:
+                    pre_filter_n_samples = len(simulated_gep)
+                    simulated_gep = self.filtering_space.filter(simulated_gep)
+                    if config.filtering:
+                        self._record_gep_filtering_counts(pre_filter_n_samples, len(simulated_gep))
+                    if self.filtering_space.pca is not None:
+                        self.gep_filtering_pca_target = self.filtering_space.pca.n_components
+                        self.gep_filtering_n_pcs = int(self.filtering_space.pca.n_components_)
+                elif config.filtering:
                     pre_filter_n_samples = int(simulated_gep.shape[0])
                     simulated_gep = self._filter_simulated_geps(
                         simulated_gep=simulated_gep,
@@ -500,7 +516,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         simulated_gep = simulated_gep.iloc[:remaining_needed]
 
                     # Convert back to log2(TPM+1) for saving
-                    simulated_gep_log = log2_transform(simulated_gep)
+                    simulated_gep_log = (
+                        np.log2(simulated_gep + 1) if self.filtering_space is not None
+                        else log2_transform(simulated_gep)
+                    )
 
                     count = simulated_gep.shape[0]
                     self.generated_bulk_gep_counter += count
@@ -516,9 +535,90 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                                                   cell_fraction=generated_cell_frac)
 
                 self.n_round += 1
+                if self.filtering_space is not None:
+                    self._save_filtering_metadata()
 
         # Finalize
         self._finalize_generation(config.sampling_method_prop, config.filtering_method, config.log_file_path)
+        if self.filtering_space is not None:
+            self._save_filtering_metadata()
+
+    def _prepare_filtering_artifacts(self, config):
+        space = self.filtering_space
+        generation = {
+            item.name: getattr(config, item.name)
+            for item in fields(config)
+            if item.name not in ("filtering_space", "log_file_path", "n_threads", "show_filtering_info")
+        }
+        sct_file = Path(self.sct_dataset_file_path)
+        generation.update(
+            sct_file=str(sct_file.resolve()),
+            sct_size=sct_file.stat().st_size,
+            sct_mtime_ns=sct_file.stat().st_mtime_ns,
+            cell_type2subtype=self.cell_fraction_type2subtype,
+            total_rna_coefficient=self.total_rna_coefficient,
+        )
+        space.identity["generation"] = json.loads(json.dumps(generation, default=str))
+        self.filtering_metadata_path = space.result_dir / "filtering_metadata.json"
+        artifacts = [
+            self.generated_bulk_gep_fp, self.generated_bulk_gep_csv_fp,
+            self.generated_cell_fraction_fp, self.sampled_sc_cell_id_file_path,
+            self.ref_neighbor_counter_fp, *space.additional_artifacts,
+        ]
+        result_artifacts = list(space.result_dir.iterdir()) if space.result_dir.exists() else []
+        if any(path.exists() for path in artifacts) or result_artifacts:
+            metadata = validate_metadata(self.filtering_metadata_path, space.identity)
+            space.restore_stats(metadata.get("stats", {}))
+            for key, value in metadata.get("generator_stats", {}).items():
+                setattr(self, key, value)
+            intermediate = [
+                self.generated_bulk_gep_csv_fp, self.generated_cell_fraction_fp,
+                self.sampled_sc_cell_id_file_path,
+            ]
+            if not self.generated_bulk_gep_fp.exists() and any(p.exists() for p in intermediate):
+                if not all(p.exists() for p in intermediate):
+                    raise ValueError(
+                        "Intermediate generation files are incomplete. Use a new dataset name/output location."
+                    )
+            if self.generated_bulk_gep_csv_fp.exists():
+                columns = pd.read_csv(self.generated_bulk_gep_csv_fp, nrows=0, index_col=0).columns.tolist()
+                if columns != space.genes:
+                    raise ValueError("Intermediate gene order differs from G. Use a new output location.")
+            if self.generated_bulk_gep_fp.exists():
+                reader = ReadH5AD(self.generated_bulk_gep_fp, backed="r")
+                try:
+                    if reader.get_h5ad().var_names.tolist() != space.genes:
+                        raise ValueError("Accepted artifact gene order differs from G. Use a new output location.")
+                    if not self.generated_cell_fraction_fp.exists():
+                        raise ValueError("Accepted artifact has no cell fractions. Use a new output location.")
+                    fractions = pd.read_csv(self.generated_cell_fraction_fp, index_col=0)
+                    if reader.get_h5ad().obs_names.tolist() != fractions.index.tolist():
+                        raise ValueError("Accepted artifact and cell-fraction sample IDs differ. Use a new output location.")
+                finally:
+                    reader.get_h5ad().file.close()
+            for artifact in space.additional_artifacts:
+                if artifact.exists():
+                    validate_metadata(artifact.with_suffix(".metadata.json"), space.identity)
+        space.validate_model()
+        if space.pca is not None:
+            self.gep_filtering_pca_target = space.pca.n_components
+            self.gep_filtering_n_pcs = int(space.pca.n_components_)
+        space.persist_genes()
+        self._save_filtering_metadata()
+
+    def _save_filtering_metadata(self):
+        generator_stats = {
+            key: getattr(self, key)
+            for key in (
+                "gep_filtering_input_n_samples", "gep_filtering_kept_n_samples",
+                "gep_filtering_removed_n_samples", "gep_filtering_pca_target",
+                "gep_filtering_n_pcs",
+            )
+        }
+        write_metadata(
+            self.filtering_metadata_path, self.filtering_space.identity,
+            stats=self.filtering_space.stats(), generator_stats=generator_stats,
+        )
 
     def _load_sc_data_for_generation(
             self,
@@ -1376,6 +1476,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         ref2n_neighbors = pd.read_csv(self.ref_neighbor_counter_fp, index_col=0).to_dict()['0']
                         self.ref_neighbor_counter = ref2n_neighbors.copy()
                 else:
+                    if getattr(self, "filtering_space", None) is not None:
+                        raise ValueError(
+                            "Intermediate expression and cell-fraction samples do not match. "
+                            "Use a new dataset name/output location; artifacts are not deleted."
+                        )
                     files_to_remove = [
                         self.generated_cell_fraction_fp,
                         self.generated_bulk_gep_csv_fp,
@@ -1394,7 +1499,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             cell_fraction: Optional[pd.DataFrame] = None
     ) -> None:
         """Save generated GEPs and metadata."""
-        append_to_csv(gep, self.generated_bulk_gep_csv_fp)
+        precision = "%.17g" if getattr(self, "filtering_space", None) is not None else "%g"
+        append_to_csv(gep, self.generated_bulk_gep_csv_fp, float_format=precision)
         append_to_csv(cell_id, self.sampled_sc_cell_id_file_path)
 
         if cell_fraction is not None:

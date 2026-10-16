@@ -14,17 +14,17 @@ ground-truth cell fractions.
 1. Load the YAML configuration and dataset-specific parameters.
 2. Determine which SCT reference dataset should be used.
 3. Initialize `BulkGEPGenerator`.
-4. Generate cell-type proportions using `sampling_method_prop`.
-5. Sample expression profiles from the reference source.
-6. Compose mixed bulk GEPs.
-7. Save cell-fraction, CSV, and `.h5ad` outputs.
-8. Save cell-fraction distribution outputs for the dataset.
-9. Optionally apply GEP-level filtering during generation.
-10. Optionally apply gene-level filtering and PCA-based validation after generation.
+4. Resolve and persist the fixed gene list G before target generation.
+5. Generate cell-type proportions and sample SCT profiles.
+6. Compose bulk GEPs in the original linear expression space.
+7. Subset reference and simulated profiles to G, normalize each row to
+   1,000,000, and transform to `log2(TPM + 1)`.
+8. Optionally reject profiles by gene ranges and reference-PCA distances.
+9. Save accepted expression on G with matching cell-fraction rows.
+10. Save summaries, fraction distributions, and optional comparison PCA.
 
-The visual summary is shown below.
-
-![Mixed workflow](figures/workflow_bulk.svg)
+The independent unfiltered correlation source retains its full gene universe
+and existing generation behavior.
 
 ## Required Inputs
 
@@ -56,7 +56,6 @@ The visual summary is shown below.
 - `gep_filtering_method`
 - `gep_filtering_quantile`
 - `gep_filtering_reference_file`
-- `gep_high_corr_gene_list_file`
 - `gep_filtering_by_gene_range`
 - `gep_min_percentage_within_gene_range`
 - `gep_gene_quantile_range`
@@ -71,8 +70,6 @@ The visual summary is shown below.
 - `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
-- `gene_filtering_quantile_range`
-- `gene_filtering_q_col_name`
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
@@ -219,35 +216,27 @@ Dataset-local diagnostic outputs under:
 
 ## Optional Filtering And PCA Outputs
 
-Mixed filtering is now split into two explicit stages:
+Gene selection runs before GEP-level profile filtering. With
+`gene_filtering: true`, use `gene_filtering_type: high_corr_gene`. A supplied
+`gene_filtering_high_corr_gene_file`, falling back to
+`paths.high_corr_gene_file_path`, takes precedence over a correlation source.
+Otherwise, `gene_filtering_correlation_reference_dataset` is required.
 
-1. GEP-level filtering
+The fixed list G is shared by normalization, optional per-gene range checks,
+reference-only GEP-filtering PCA, and accepted-profile export. With
+`gene_filtering: false` and `gep_filtering: true`, G is the common
+reference/SCT gene universe. With GEP filtering disabled and gene filtering
+enabled, all generated profiles are normalized and exported on G without
+profile rejection.
 
-- Controlled primarily by dataset-level `gep_filtering`
-- Runs inside Mixed bulk generation
-- Uses the `gep_*` parameter family plus the existing `filtering_ref_types`
-  and legacy `filtering_in_pca_space` override
+`gep_filtering` gates profile rejection. `gep_filtering_by_gene_range`
+enables the range acceptance check; it does not remove genes. The supported
+reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`.
+PCA fit and transform both use `log2(TPM + 1)` normalized over G.
 
-2. gene-level filtering
-
-- Controlled by dataset-level `gene_filtering`
-- Runs after the Mixed `.h5ad` is generated
-- Uses the `gene_filtering_*` parameter family
-- Reuses `paths.high_corr_gene_file_path` as the shared fallback high-corr gene list when needed
-
-When `plot_pca_for_comparison` is enabled, the workflow generates a gene list
-for PCA, a PCA model, transformed coordinates, and a PCA plot, regardless of
-whether gene-level filtering is enabled. With gene-level filtering disabled,
-the PCA gene list contains all genes shared by the Mixed data and TCGA.
-Gene-filtered expression outputs are generated only when gene-level filtering
-is enabled.
-
-- PCA model files
-- PCA-transformed data tables
-- PCA plots comparing simulated bulk data with TCGA reference samples
-- dataset-level summary JSON files
-- filtered `.h5ad` files, filtered gene lists, and gene/cell-fraction
-  correlation tables when gene-level filtering is enabled
+`plot_pca_for_comparison` independently enables a diagnostic joint PCA on
+the same normalized gene space. Its component count is separate from the
+reference-only GEP-filtering PCA target.
 
 These artifacts are written under the dataset-local directory:
 
@@ -255,21 +244,19 @@ These artifacts are written under the dataset-local directory:
 
 Typical files include:
 
-- `gene_list_filtered_by_<gene_filtering_type>.csv` when gene filtering is enabled
-- `gene_list_all_genes_for_pca.csv` when gene filtering is disabled
-- `gene_corr_with_cell_fraction.csv`
+- `fixed_filtering_gene_list.csv` for targets with either filter enabled
+- `filtering_metadata.json` for output and intermediate compatibility
+- `gep_filtering_pca.joblib` and `gep_filtering_pca.metadata.json`
+- `comparison_pca_<n_components>.joblib`, `.csv`, and `.metadata.json`
+- `<dataset_name>_PCA_with_TCGA_correlation-first-v1_PC0_PC1.png`
 - `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
-- `both_TCGA_and_simu_<dataset_name>_PCA_<postfix>.joblib`
-- `<dataset_name>_PCA_with_TCGA_<postfix>.csv`
-- `<dataset_name>_PCA_with_TCGA_<postfix>_PC0_PC1.png`
 - `mixed_dataset_summary.json`
 
-The PCA postfix is the gene-filtering type when filtering is enabled and
-`all_genes_for_pca` otherwise. The summary records the plot path in
-`pca_plot_file`. It also records `gep_pca_n_components`, the variance target
-used for GEP-filtering PCA, and `gep_filtering_n_pcs`, the actual number of
-components retained by the fitted or cached PCA model. Both fields are null
-when GEP filtering does not use PCA space.
+The summary records the workflow version, cache identity, pre-selection,
+shared, and exported gene counts, and acceptance totals. It records
+`gep_pca_n_components` as the configured target and `gep_filtering_n_pcs`
+as the actual fitted count, not a second configuration setting. Both PCA
+fields are null when GEP filtering does not use PCA space.
 
 For correlation-based gene selection, `calculate_gene_cell_prop_correlation`
 creates `full_gene_corr_with_cell_fraction.csv` without applying a threshold
@@ -278,12 +265,19 @@ dataset with `gene_filtering_correlation_reference_dataset`. The source must
 use segment sampling with GEP- and gene-level filtering disabled. Each target
 applies its own `gene_filtering_corr_threshold` and
 `gene_filtering_n_gene_max`; those selections do not alter the reusable
-matrix. Without a configured source, correlations are calculated from the
-target dataset. A supplied high-correlation gene list takes precedence.
+matrix. No correlations are calculated from target samples, and no implicit
+pilot dataset is created. A supplied high-correlation gene list takes
+precedence and is not modified by correlation thresholds.
 
-The filtered `.h5ad` is written beside the original Mixed `.h5ad` using either
-the configured `gene_filtering_filtered_dataset_postfix` or the default
-`filtered_by_<gene_filtering_type>` suffix.
+The primary target `.h5ad` contains exactly G as normalized
+`log2(TPM + 1)`. `gene_filtering_save_filtered_h5ad` optionally creates an
+additional named copy beside it, using `gene_filtering_filtered_dataset_postfix`
+or the default `filtered_by_high_corr_gene` suffix.
+
+Existing targets or resumable batches with missing or incompatible filtering
+metadata fail before reuse. Use a new dataset name/output location; SimuTME
+does not delete old artifacts or relabel historical summaries. The independent
+unfiltered correlation source remains reusable.
 
 ## Global Defaults And Dataset Overrides
 
@@ -307,8 +301,6 @@ Global filtering defaults live under `parameters`:
 - `gene_filtering_type`
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
-- `gene_filtering_quantile_range`
-- `gene_filtering_q_col_name`
 - `gene_filtering_corr_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
@@ -326,9 +318,14 @@ The legacy `gene_filtering_plot_pca` key remains supported as an alias for
 For backward compatibility, older global fields still work:
 
 - `gene_list_type` maps to `gene_filtering_type`
-- `gene_quantile_range` still feeds quantile-based filtering
+- `gene_quantile_range` still supplies the default profile-range quantiles
 - `pca_n_components` still feeds GEP-level PCA filtering defaults
 - `gene_filtering` is independent from `gep_filtering`
+
+Explicit legacy range-selection modes require migration to `high_corr_gene`
+unless a supplied gene list takes precedence. Remove
+`gene_filtering_quantile_range` and `gene_filtering_q_col_name`; retain
+`gep_gene_quantile_range` for profile acceptance.
 
 ## When To Use This Workflow
 
