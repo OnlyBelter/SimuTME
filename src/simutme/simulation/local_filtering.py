@@ -15,10 +15,14 @@ from .filtering import (
 
 logger = logging.getLogger(__name__)
 LOCAL_WORKFLOW_VERSION = "correlation-first-local-v2"
+KNN_WORKFLOW_VERSION = "correlation-first-knn-v3"
+LOCAL_FILTER_METHODS = ("knn", "knn_residual")
 SPLIT_VERSION = "cancer-sample-ceiling-sha256-v1"
 
 
 def validate_local_parameters(gep):
+    if gep.filtering_method not in LOCAL_FILTER_METHODS:
+        raise ValueError(f"Local filtering requires one of {LOCAL_FILTER_METHODS}.")
     for name in ("reference_holdout_fraction", "knn_distance_quantile", "pca_residual_quantile"):
         value = getattr(gep, name)
         valid = np.isfinite(value) and (
@@ -33,9 +37,9 @@ def validate_local_parameters(gep):
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < minimum:
             raise ValueError(f"gep_{name} must be an integer >= {minimum}.")
     if not gep.filtering_in_pca_space:
-        raise ValueError("knn_residual requires gep_filtering_in_pca_space: true.")
+        raise ValueError(f"{gep.filtering_method} requires gep_filtering_in_pca_space: true.")
     if isinstance(gep.norm_ord, bool) or gep.norm_ord not in (1, 2):
-        raise ValueError("knn_residual requires gep_norm_ord to be 1 or 2.")
+        raise ValueError(f"{gep.filtering_method} requires gep_norm_ord to be 1 or 2.")
 
 
 def split_tcga_reference(reference, annotation, fraction=0.2, seed=42, ref_types=None):
@@ -107,13 +111,16 @@ class LocalTCGAFilter(FixedGeneFilter):
     """Fit on reference samples, calibrate on reserved samples, score candidates."""
 
     workflow_version = LOCAL_WORKFLOW_VERSION
-    supported_methods = ("knn_residual",)
+    supported_methods = LOCAL_FILTER_METHODS
     score_chunk_size = 256
 
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
                  split, split_summary, annotation_file, correlation_file=None):
         validate_local_parameters(gep_params)
+        self.residual_filter_enabled = gep_params.filtering_method == "knn_residual"
+        if not self.residual_filter_enabled:
+            self.workflow_version = KNN_WORKFLOW_VERSION
         super().__init__(
             genes, reference_linear, reference_file, reference_subset, gep_params,
             result_dir, generation_n_genes, shared_n_genes, correlation_file,
@@ -124,7 +131,7 @@ class LocalTCGAFilter(FixedGeneFilter):
         self.fitting_ids = split.index[split.role == "fitting"].tolist()
         self.heldout_ids = split.index[split.role == "held_out"].tolist()
         if len(self.fitting_ids) < 2:
-            raise ValueError("knn_residual requires at least two fitting-reference samples for PCA.")
+            raise ValueError(f"{self.gep.filtering_method} requires at least two fitting-reference samples for PCA.")
         if len(self.fitting_ids) < self.gep.knn_n_neighbors:
             raise ValueError("Fitting TCGA reference has fewer samples than gep_knn_n_neighbors.")
         self.heldout_linear = self.reference_linear.loc[self.heldout_ids].copy()
@@ -151,6 +158,10 @@ class LocalTCGAFilter(FixedGeneFilter):
             "range_quantiles": self.gep.gene_quantile_range,
             "range_min_fraction": self.gep.min_percentage_within_gene_range,
         }
+        if not self.residual_filter_enabled:
+            self.calibration_identity.update(
+                filtering_method="knn", residual_filter_enabled=False,
+            )
         self.identity.update(self.calibration_identity)
         self.identity["max_generation_batches"] = self.gep.max_generation_batches
         self.split_path = self.result_dir / "tcga_reference_split.csv"
@@ -210,7 +221,7 @@ class LocalTCGAFilter(FixedGeneFilter):
         scores["gene_range_pass"] = self._range_mask(self.heldout_linear)
         scores["knn_pass"] = scores.knn_distance <= self.knn_threshold
         scores["residual_pass"] = scores.pca_residual <= self.residual_threshold
-        scores["joint_pass"] = scores[["gene_range_pass", "knn_pass", "residual_pass"]].all(axis=1)
+        scores["joint_pass"] = scores.gene_range_pass & self._active_local_pass(scores)
         scores.index.name = "sample_id"
         scores.to_csv(self.calibration_scores_path, float_format="%.17g")
         # Hash the serialized representation that the cached path reads.
@@ -226,7 +237,10 @@ class LocalTCGAFilter(FixedGeneFilter):
             len(self.fitting_ids), len(self.heldout_ids), self.gep.knn_n_neighbors,
             self.knn_threshold, self.residual_threshold,
         )
-        logger.info("gep_filtering_quantile applies only to centroid methods; knn_residual has no lower cutoff.")
+        if not self.residual_filter_enabled:
+            logger.info("PCA residual percentile is diagnostic only; residual filtering is disabled.")
+        logger.info("gep_filtering_quantile applies only to centroid methods; %s has no lower cutoff.",
+                    self.gep.filtering_method)
         for cancer_type, group in self.calibration_scores.groupby("cancer_type"):
             logger.info("Held-out %s: %d/%d pass all checks.", cancer_type, group.joint_pass.sum(), len(group))
 
@@ -240,6 +254,11 @@ class LocalTCGAFilter(FixedGeneFilter):
             linear.ge(self.range_bounds.iloc[0], axis=1)
             & linear.le(self.range_bounds.iloc[1], axis=1)
         ).mean(axis=1) >= self.gep.min_percentage_within_gene_range
+
+    def _active_local_pass(self, scores):
+        if self.residual_filter_enabled:
+            return scores.knn_pass & scores.residual_pass
+        return scores.knn_pass
 
     def score_log_profiles(self, log_expression):
         if self.pca is None or self.neighbors is None:
@@ -266,10 +285,14 @@ class LocalTCGAFilter(FixedGeneFilter):
 
     def check_batch_limit(self, exported_count, generated_count):
         if self.generation_batches >= self.gep.max_generation_batches:
+            residual_status = (
+                f"residual_surviving={self.residual_after_knn_kept}"
+                if self.residual_filter_enabled else "residual_filter_enabled=False"
+            )
             raise RuntimeError(
-                f"knn_residual reached gep_max_generation_batches={self.gep.max_generation_batches}: "
+                f"{self.gep.filtering_method} reached gep_max_generation_batches={self.gep.max_generation_batches}: "
                 f"generated={generated_count}, range_surviving={self.distance_input}, "
-                f"neighbor_surviving={self.knn_kept}, residual_surviving={self.residual_after_knn_kept}, "
+                f"neighbor_surviving={self.knn_kept}, {residual_status}, "
                 f"exported={exported_count}. Thresholds were not loosened; intermediate artifacts are preserved."
             )
 
@@ -294,15 +317,19 @@ class LocalTCGAFilter(FixedGeneFilter):
         scores = self.score_log_profiles(np.log2(normalized + 1))
         scores["knn_pass"] = scores.knn_distance <= self.knn_threshold
         scores["residual_pass"] = scores.pca_residual <= self.residual_threshold
-        scores["joint_pass"] = scores.knn_pass & scores.residual_pass
+        scores["joint_pass"] = self._active_local_pass(scores)
         self.distance_input += len(scores)
         self.knn_kept += int(scores.knn_pass.sum())
         self.residual_kept += int(scores.residual_pass.sum())
         self.distance_kept += int(scores.joint_pass.sum())
-        self.residual_after_knn_kept += int(scores.joint_pass.sum())
+        self.residual_after_knn_kept += int((scores.knn_pass & scores.residual_pass).sum())
         self.last_scores = scores
-        logger.info("Local acceptance: neighbors=%d, residuals=%d, joint=%d/%d.",
-                    scores.knn_pass.sum(), scores.residual_pass.sum(), scores.joint_pass.sum(), len(scores))
+        if self.residual_filter_enabled:
+            logger.info("Local acceptance: neighbors=%d, residuals=%d, joint=%d/%d.",
+                        scores.knn_pass.sum(), scores.residual_pass.sum(), scores.joint_pass.sum(), len(scores))
+        else:
+            logger.info("KNN acceptance: %d/%d; residual diagnostic passes=%d/%d (not applied to acceptance).",
+                        scores.joint_pass.sum(), len(scores), scores.residual_pass.sum(), len(scores))
         return normalized.loc[scores.joint_pass].copy()
 
     def save_batch_scores(self, exported_ids):
@@ -323,8 +350,13 @@ class LocalTCGAFilter(FixedGeneFilter):
             if self.distance_input or exported_count:
                 raise ValueError("Candidate scores are missing. Use a new dataset name/output location.")
             return
+        if not self.residual_filter_enabled and self.knn_threshold is None:
+            self.validate_model()
         n_scored = n_exported = 0
-        for chunk in pd.read_csv(self.candidate_scores_path, index_col=0, chunksize=10000):
+        for chunk in pd.read_csv(
+            self.candidate_scores_path, index_col=0, chunksize=10000,
+            float_precision="round_trip" if not self.residual_filter_enabled else None,
+        ):
             required = {"knn_distance", "pca_residual", "knn_pass", "residual_pass",
                         "joint_pass", "batch_number", "exported"}
             if not required <= set(chunk.columns):
@@ -334,7 +366,12 @@ class LocalTCGAFilter(FixedGeneFilter):
             if (not np.isfinite(distances).all() or (distances < 0).any()
                     or not all(pd.api.types.is_bool_dtype(chunk[c]) for c in flags)):
                 raise ValueError("Candidate scores/flags are invalid. Use a new dataset name/output location.")
-            if ((chunk.joint_pass != (chunk.knn_pass & chunk.residual_pass)).any()
+            if not self.residual_filter_enabled and (
+                (chunk.knn_pass != (chunk.knn_distance <= self.knn_threshold)).any()
+                or (chunk.residual_pass != (chunk.pca_residual <= self.residual_threshold)).any()
+            ):
+                raise ValueError("Candidate score comparisons are inconsistent. Use a new output location.")
+            if ((chunk.joint_pass != self._active_local_pass(chunk)).any()
                     or (chunk.exported & ~chunk.joint_pass).any()):
                 raise ValueError("Candidate acceptance flags are inconsistent. Use a new output location.")
             if not chunk.batch_number.between(1, self.generation_batches).all():
@@ -351,7 +388,7 @@ class LocalTCGAFilter(FixedGeneFilter):
             "knn_kept_n_samples": self.knn_kept,
             "residual_kept_n_samples": self.residual_kept,
             "residual_after_knn_kept_n_samples": self.residual_after_knn_kept,
-            "knn_residual_joint_kept_n_samples": self.distance_kept,
+            "knn_residual_joint_kept_n_samples": self.residual_after_knn_kept,
             "generation_batches": self.generation_batches,
         }
 
@@ -389,7 +426,7 @@ class LocalTCGAFilter(FixedGeneFilter):
                 **{f"{column}_n_samples": int(group[column].sum()) for column in
                    ("gene_range_pass", "knn_pass", "residual_pass", "joint_pass")},
             }
-        return {
+        result = {
             "reference_split_unit": "sample", "reference_holdout_fraction": self.gep.reference_holdout_fraction,
             "reference_holdout_seed": self.gep.reference_holdout_seed,
             "reference_fitting_n_samples": len(self.fitting_ids),
@@ -410,3 +447,11 @@ class LocalTCGAFilter(FixedGeneFilter):
                ("gene_range_pass", "knn_pass", "residual_pass", "joint_pass")},
             **self.diagnostic_outputs,
         }
+        if not self.residual_filter_enabled:
+            result.update(
+                residual_filter_enabled=False,
+                residual_diagnostic_pass_n_samples=self.residual_kept,
+                diagnostic_neighbor_and_residual_pass_n_samples=self.residual_after_knn_kept,
+                local_filter_kept_n_samples=self.distance_kept,
+            )
+        return result

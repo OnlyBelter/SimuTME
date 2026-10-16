@@ -63,11 +63,13 @@ def plot_local_filter_diagnostics(space, simulated_log, dataset_name):
         accepted = pd.concat(accepted_parts) if accepted_parts else pd.DataFrame(
             columns=["knn_distance", "pca_residual"], dtype=float
         )
-        fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+        diagnostic_residual = not space.residual_filter_enabled
+        fig, axes = plt.subplots(1, 2, figsize=(7, 3.3 if diagnostic_residual else 3))
         for ax, column, threshold, title, xlabel in zip(
             axes, ("knn_distance", "pca_residual"),
             (space.knn_threshold, space.residual_threshold),
-            ("Neighbor proximity", "PCA reconstruction residual"),
+            ("Neighbor proximity", "PCA residual (diagnostic only)" if diagnostic_residual
+             else "PCA reconstruction residual"),
             (f"Mean {space.gep.knn_n_neighbors}-neighbor distance (L{space.gep.norm_ord})",
              "Residual L2 norm in log-expression space"),
         ):
@@ -80,13 +82,21 @@ def plot_local_filter_diagnostics(space, simulated_log, dataset_name):
                 ax.hist(simulated, bins=bins, density=True, histtype="step",
                         color=colors["Simulated"], linestyle="--", linewidth=1.5,
                         label=f"Exported simulated (n={len(simulated)})")
-            ax.axvline(threshold, color="black", linestyle=":", label="Acceptance threshold")
+            if column == "pca_residual" and diagnostic_residual:
+                ax.axvline(threshold, color="0.4", linestyle="-.",
+                           label="Residual percentile (diagnostic only)")
+            else:
+                ax.axvline(threshold, color="black", linestyle=":", label="Acceptance threshold")
             ax.set(xlabel=xlabel, ylabel="Density", title=title)
             ax.set_xlim(left=0)
         handles, labels = axes[0].get_legend_handles_labels()
+        if diagnostic_residual:
+            diagnostic_handles, diagnostic_labels = axes[1].get_legend_handles_labels()
+            handles.append(diagnostic_handles[-1])
+            labels.append(diagnostic_labels[-1])
         fig.legend(handles, labels, loc="upper left", bbox_to_anchor=(0.07, 1),
-                   ncol=3, fontsize=7, frameon=False)
-        fig.tight_layout(rect=(0, 0, 1, 0.9))
+                   ncol=2 if diagnostic_residual else 3, fontsize=7, frameon=False)
+        fig.tight_layout(rect=(0, 0, 1, 0.85 if diagnostic_residual else 0.9))
         for suffix in ("png", "pdf"):
             path = space.result_dir / f"local_filter_score_distributions.{suffix}"
             fig.savefig(path, dpi=300, bbox_inches="tight")

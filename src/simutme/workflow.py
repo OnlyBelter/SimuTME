@@ -26,7 +26,9 @@ from .simulation.filtering import (
     FixedGeneFilter, NORMALIZATION_VERSION, identity_hash,
     normalize_selected, select_fixed_genes, validate_metadata, write_metadata,
 )
-from .simulation.local_filtering import LocalTCGAFilter, split_tcga_reference, validate_local_parameters
+from .simulation.local_filtering import (
+    LOCAL_FILTER_METHODS, LocalTCGAFilter, split_tcga_reference, validate_local_parameters,
+)
 
 
 def _build_sorted_bulk_imputed_sct_path(
@@ -754,7 +756,7 @@ def _resolve_gep_filtering_params(
         pca_n_components=_parse_pca_component_value(
             _resolve_dataset_override(params, config, "gep_pca_n_components", config.gep_pca_n_components)
         ),
-        norm_ord=norm_ord if filtering_method == "knn_residual" else int(norm_ord),
+        norm_ord=norm_ord if filtering_method in LOCAL_FILTER_METHODS else int(norm_ord),
         high_corr_gene_list_file=high_corr_gene_list_file,
         high_corr_gene_list=high_corr_gene_list,
         reference_holdout_fraction=float(_resolve_dataset_override(
@@ -769,10 +771,10 @@ def _resolve_gep_filtering_params(
         max_generation_batches=_resolve_dataset_override(params, config, "gep_max_generation_batches", 100),
     )
     if resolved.enabled:
-        if resolved.filtering_method == "knn_residual":
+        if resolved.filtering_method in LOCAL_FILTER_METHODS:
             validate_local_parameters(resolved)
             if not config.tcga2cancer_type_file_path:
-                raise ValueError("knn_residual requires paths.tcga2cancer_type_file_path.")
+                raise ValueError(f"{resolved.filtering_method} requires paths.tcga2cancer_type_file_path.")
         if not resolved.reference_file:
             raise ValueError(
                 f'"gep_filtering_reference_file" must be set when gep_filtering is enabled for Mixed dataset "{dataset_name}".'
@@ -1294,8 +1296,8 @@ def run_bulk_simulation(dataset_name: str,
         sampling_method_gep = 'random'
 
         output_tag = (
-            "with_filtering_knn_residual"
-            if resolved_gep_filtering.enabled and resolved_gep_filtering.filtering_method == "knn_residual"
+            f"with_filtering_{resolved_gep_filtering.filtering_method}"
+            if resolved_gep_filtering.enabled and resolved_gep_filtering.filtering_method in LOCAL_FILTER_METHODS
             else f"{filtering_str}_median_gep"
         )
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{output_tag}'
@@ -1612,7 +1614,7 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
         reference = pd.DataFrame(np.expm1(values * np.log(2)), index=reference.index,
                                  columns=reference.columns)
     reference_subset = gep.filtering_ref_types if gep.enabled else None
-    local_mode = gep.enabled and gep.filtering_method == "knn_residual"
+    local_mode = gep.enabled and gep.filtering_method in LOCAL_FILTER_METHODS
     local_kwargs = {}
     if local_mode:
         annotation_file = Path(config.tcga2cancer_type_file_path)

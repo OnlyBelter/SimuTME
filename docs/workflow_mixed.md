@@ -194,10 +194,10 @@ For a dataset named `<dataset_name>`, the Mixed workflow writes files under:
 
 `paths.simu_bulk_dir/<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_median_gep/`
 
-The `knn_residual` method uses
-`<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_with_filtering_knn_residual/`
-instead, so new local-filter outputs are not labeled as centroid-filtered
-datasets. Existing centroid and unfiltered-source locations are unchanged.
+The local methods use
+`<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_with_filtering_<method>/`,
+where `<method>` is `knn` or `knn_residual`. Each method has a separate
+output location. Existing centroid and unfiltered-source locations are unchanged.
 
 Main files:
 
@@ -237,7 +237,7 @@ profile rejection.
 `gep_filtering` gates profile rejection. `gep_filtering_by_gene_range`
 enables the range acceptance check; it does not remove genes. The supported
 reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`;
-`knn_residual` adds held-out calibration for local TCGA proximity.
+`knn` and `knn_residual` add held-out calibration for local TCGA proximity.
 PCA fit and transform both use `log2(TPM + 1)` normalized over G.
 
 `plot_pca_for_comparison` independently enables a diagnostic joint PCA on
@@ -287,8 +287,9 @@ unfiltered correlation source remains reusable.
 
 ### Cancer-stratified local filtering
 
-Opt into `gep_filtering_method: knn_residual` when you need candidates
-near actual TCGA profiles rather than only near a global reference center.
+Opt into `gep_filtering_method: knn` for proximity to actual TCGA profiles
+in retained reference-PC space. Use `knn_residual` to additionally constrain
+reconstruction residuals in normalized log-expression space.
 
 1. Match TCGA expression sample IDs to `paths.tcga2cancer_type_file_path`.
 2. Reserve `ceil(0.2 * n)` individual samples within each cancer type,
@@ -297,8 +298,9 @@ near actual TCGA profiles rather than only near a global reference center.
    only. Transform held-out samples using the same PCA and normalization.
 4. Set upper thresholds from held-out neighbor distances and L2
    reconstruction residuals, using the 95th percentile of each by default.
-5. Retain candidates that pass the optional range check and both score
-   thresholds. There is no minimum distance cutoff.
+5. Retain candidates that pass the optional range check and neighbor
+   threshold. In `knn_residual`, also require the residual threshold.
+   There is no minimum distance cutoff.
 
 Use `gep_pca_n_components: 0.9` for a 90% variance target and
 `gep_norm_ord: 2` for Euclidean neighbor distance. The default neighbor count
@@ -311,6 +313,13 @@ patient overlap, marginal and joint pass counts, and exported sample counts.
 Individual-sample stratification does not guarantee patient-independent
 calibration.
 
+In `knn`, residual scores and the calibrated residual percentile are
+diagnostic only. They do not affect acceptance or export. Candidate
+`joint_pass` equals `knn_pass`, so an exported sample can have
+`residual_pass: false`. The summary records `residual_filter_enabled: false`
+and separates `local_filter_kept_n_samples` from diagnostic residual and
+neighbor/residual conjunction counts. Strict-mode score semantics are unchanged.
+
 The default `gep_max_generation_batches: 100` stops a run that cannot
 collect the requested sample count. It counts candidate batches, not
 individual profiles, and persists across resumptions. Thresholds are not
@@ -321,6 +330,10 @@ When comparison plotting is enabled, local-filter runs additionally save:
 - `reference_only_PCA_coordinates.csv`
 - `reference_only_PCA_PC1_PC2.png` and `.pdf`, using the filtering model
 - `local_filter_score_distributions.png` and `.pdf`, with threshold markers
+
+For `knn`, the residual panel and its percentile marker say "diagnostic only."
+Changing the method requires a fresh target/output location or matching
+metadata; strict and KNN-only caches are not interchangeable.
 
 The joint comparison plot still uses all eligible TCGA samples. Plotting
 does not fit or recalibrate the acceptance model. Two-dimensional visual

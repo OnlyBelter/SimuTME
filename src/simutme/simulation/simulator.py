@@ -29,7 +29,7 @@ from .simu_helper import (sample_random, get_sample_id_random, sample_with_neigh
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
                           NeighborSamplingScheme)
 from .filtering import FixedGeneFilter, validate_metadata, write_metadata
-from .local_filtering import LocalTCGAFilter
+from .local_filtering import LocalTCGAFilter, LOCAL_FILTER_METHODS
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
 
 
@@ -86,17 +86,17 @@ class GEPGenerationConfig:
             raise ValueError("n_samples must be positive")
         if self.simu_method not in ('ave', 'mul'):
             raise ValueError(f"Invalid simu_method: {self.simu_method}")
-        if self.filtering and self.filtering_method == "knn_residual" and not isinstance(
+        if self.filtering and self.filtering_method in LOCAL_FILTER_METHODS and not isinstance(
             self.filtering_space, LocalTCGAFilter
         ):
             raise ValueError(
-                "knn_residual requires a prepared LocalTCGAFilter. "
+                f"{self.filtering_method} requires a prepared LocalTCGAFilter. "
                 "Use run_bulk_simulation to resolve the annotated reference and split."
             )
         if isinstance(self.filtering_space, LocalTCGAFilter) and (
-            not self.filtering or self.filtering_method != "knn_residual"
+            not self.filtering or self.filtering_method != self.filtering_space.gep.filtering_method
         ):
-            raise ValueError("LocalTCGAFilter requires filtering=True and filtering_method='knn_residual'.")
+            raise ValueError("LocalTCGAFilter requires filtering=True and a matching local filtering_method.")
         if self.dirichlet_sampling_seed is not None and (
             isinstance(self.dirichlet_sampling_seed, bool)
             or not isinstance(self.dirichlet_sampling_seed, (int, np.integer))

@@ -161,10 +161,10 @@ range-selection modes fail with a migration message. Remove
 
 `gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
 `gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
-The supported methods are `median_gep`, `mean_gep`, `linear_mmd`, and
+The supported methods are `median_gep`, `mean_gep`, `linear_mmd`, `knn`, and
 `knn_residual`. Existing centroid methods retain their v1 behavior.
 
-For `knn_residual`, provide `paths.tcga2cancer_type_file_path` with unique
+For either local method, provide `paths.tcga2cancer_type_file_path` with unique
 sample IDs and a `cancer_type` column. After exact sample alignment and
 `filtering_ref_types` selection, hold out `ceil(fraction * n)` individual
 samples per cancer type. Every type must retain fitting and held-out
@@ -172,25 +172,35 @@ samples. The default fraction is 0.2 and the dedicated split seed is 42.
 Repeated patient samples are not grouped; patient overlap is reported.
 
 Only fitting TCGA samples estimate PCA, neighbors, and optional gene-range
-bounds. All held-out samples calibrate the two upper score thresholds,
-including samples that fail the gene-range check.
+bounds. All held-out samples calibrate the two upper score percentiles,
+including samples that fail the gene-range check. In `knn`, only neighbor
+distance affects local acceptance; residual scores and their percentile
+remain diagnostic. In `knn_residual`, both score thresholds must pass.
 
-| Parameter | Default | Meaning in `knn_residual` |
+| Parameter | Default | Meaning in local methods |
 | --- | --- | --- |
 | `gep_reference_holdout_fraction` | `0.2` | Held-out fraction within each cancer type |
 | `gep_reference_holdout_seed` | `42` | Reproducible individual-sample split seed |
 | `gep_knn_n_neighbors` | `10` | Mean distance to k fitting-reference neighbors |
 | `gep_knn_distance_quantile` | `0.95` | Held-out neighbor-distance upper percentile |
-| `gep_pca_residual_quantile` | `0.95` | Held-out reconstruction-residual upper percentile |
+| `gep_pca_residual_quantile` | `0.95` | Held-out residual upper percentile; diagnostic only in `knn` |
 | `gep_max_generation_batches` | `100` | Cumulative candidate-batch bound |
 
-The new method requires `gep_filtering_in_pca_space: true`. Use
+Both local methods require `gep_filtering_in_pca_space: true`. Use
 `gep_pca_n_components: 0.9` to retain 90% of fitting-reference variance, or
 an integer for an explicit component count. Raw PCs are not whitened.
 `gep_norm_ord` selects Manhattan (1) or Euclidean (2) neighbor distance;
 reconstruction residuals always use L2 in normalized log-expression space.
 `gep_filtering_quantile` applies only to centroid methods and does not
-impose a lower distance bound in `knn_residual`.
+impose a lower distance bound in either local method. KNN-only proximity
+constrains the retained reference-PC space, not omitted expression directions.
+
+In KNN-only candidate tables, `joint_pass` equals `knn_pass`; held-out
+`joint_pass` also includes the optional gene-range check. An exported
+candidate can have `residual_pass: false`. KNN summaries record
+`residual_filter_enabled: false`, `local_filter_kept_n_samples`, and separate
+diagnostic residual and neighbor/residual conjunction counts. Residual
+plots label the percentile marker as diagnostic only.
 
 With `gep_filtering: false`, no local split or calibration runs. Changing
 methods, labels, split membership, or calibration settings requires

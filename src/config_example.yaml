@@ -86,7 +86,7 @@ parameters:
   gep_filtering_enabled_default: false  # Optional global default for Mixed GEP-level filtering when a dataset does not set `gep_filtering`
   gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for Mixed GEP-level filtering; defaults to paths.tcga_merged_tpm_file_path
   gep_filtering_ref_exp_type: "TPM"  # Optional reference expression type for GEP-level filtering
-  gep_filtering_method: "median_gep"  # Reference-distance method; opt into "knn_residual" for held-out local calibration
+  gep_filtering_method: "median_gep"  # Use "knn" for held-out neighbor filtering or "knn_residual" to also require a residual cutoff
   gep_n_top: 20  # Optional neighbor count for marker-ratio filtering
   gep_show_filtering_info: false  # Optional verbose logging for GEP-level filtering
   gep_filtering_by_gene_range: false  # Optional extra per-sample gene-range filtering during Mixed generation
@@ -95,12 +95,12 @@ parameters:
   gep_filtering_in_pca_space: true  # Optional PCA-space distance filtering during Mixed generation
   gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
   gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
-  gep_reference_holdout_fraction: 0.2  # knn_residual only: ceil(20% of samples) per cancer type for calibration
+  gep_reference_holdout_fraction: 0.2  # knn/knn_residual: ceil(20% of samples) per cancer type for calibration
   gep_reference_holdout_seed: 42  # Dedicated reference-split seed, independent of simulation seeds
-  gep_knn_n_neighbors: 10  # knn_residual only: number of nearest fitting TCGA samples
+  gep_knn_n_neighbors: 10  # knn/knn_residual: number of nearest fitting TCGA samples
   gep_knn_distance_quantile: 0.95  # Held-out neighbor-distance upper cutoff
-  gep_pca_residual_quantile: 0.95  # Held-out reconstruction-residual upper cutoff
-  gep_max_generation_batches: 100  # knn_residual only: cumulative candidate-batch bound, preserved on resume
+  gep_pca_residual_quantile: 0.95  # Held-out residual percentile; diagnostic only in "knn", acceptance cutoff in "knn_residual"
+  gep_max_generation_batches: 100  # knn/knn_residual: cumulative candidate-batch bound, preserved on resume
   gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
   gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Reference for selecting shared genes and normalization when GEP filtering is disabled
   gene_filtering_type: "high_corr_gene"  # Select genes before target generation; no expression-range gene selection

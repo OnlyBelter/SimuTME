@@ -167,7 +167,7 @@ class FixedGeneFilter:
                     "and linear_mmd; migrate marker_ratio filtering to a reference-distance method."
                 )
             q_low, q_high = self.gep.gep_filtering_quantile
-            if self.gep.filtering_method != "knn_residual" and (
+            if self.gep.filtering_method not in ("knn", "knn_residual") and (
                 q_high is None or not 0 <= q_high <= 1
                 or (q_low is not None and not 0 <= q_low <= q_high)
             ):
