@@ -3,7 +3,7 @@ import pandas as pd
 import multiprocessing
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
+from .nneighbors_shared_memory import NeighborData, parallel_sample_with_nearest_neighbors
 
 
 class SimuMethod:
@@ -40,7 +40,7 @@ def should_use_neighbor_sampling(
 def sample_with_neighbors(
         sampled_cell_ids: pd.DataFrame,
         obs_df: pd.DataFrame,
-        cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        cell_distance_dict: Dict[str, NeighborData],
         n_threads: int,
         minimum_n_base: int = 1,
         sc_dataset: str = 'merged_sc_dataset',

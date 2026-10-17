@@ -86,10 +86,20 @@ class SampleTaskArgs:
 
 
 @dataclass
+class CompactNeighborData:
+    """Top-neighbor indices for each anchor in one ordered candidate pool."""
+    neighbor_indices: np.ndarray
+    cell_ids: List[str]
+
+
+NeighborData = Union[Tuple[np.ndarray, List[str]], CompactNeighborData]
+
+
+@dataclass
 class WorkerSharedData:
     """Container for shared data in worker processes."""
     obs_df: pd.DataFrame
-    distance_dict: Dict[str, Tuple[np.ndarray, List[str]]]
+    distance_dict: Dict[str, NeighborData]
     shm_handles: List[shared_memory.SharedMemory] = field(default_factory=list)
 
     def close(self):
@@ -111,6 +121,7 @@ class SharedMemoryMetadata:
     distance_shapes: Dict[str, Tuple[int, ...]]
     distance_dtypes: Dict[str, str]
     distance_cell_ids: Dict[str, List[str]]
+    distance_kinds: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for pickling."""
@@ -121,6 +132,7 @@ class SharedMemoryMetadata:
             'distance_shapes': self.distance_shapes.copy(),
             'distance_dtypes': self.distance_dtypes.copy(),
             'distance_cell_ids': self.distance_cell_ids.copy(),
+            'distance_kinds': self.distance_kinds.copy(),
         }
 
     @classmethod
@@ -157,7 +169,7 @@ class SharedDataManager:
     def __init__(
         self,
         obs_df: pd.DataFrame,
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        distance_dict: Dict[str, NeighborData],
         dtype: np.dtype = np.float64
     ):
         """
@@ -168,7 +180,7 @@ class SharedDataManager:
         obs_df : pd.DataFrame
             The observation DataFrame to share.
         distance_dict : dict
-            Dictionary mapping cell_type -> (distance_matrix, cell_ids).
+            Distance matrices or compact neighbor data keyed by cell type.
         dtype : np.dtype
             Data type for distance matrices (default: float64).
         """
@@ -180,7 +192,10 @@ class SharedDataManager:
             self._init_obs_df(obs_df)
             self._init_distance_matrices(distance_dict, dtype)
             atexit.register(self.cleanup)
-            logger.debug(f"SharedDataManager initialized with {len(distance_dict)} distance matrices")
+            logger.debug(
+                "SharedDataManager initialized with %d neighbor data arrays",
+                len(distance_dict),
+            )
         except Exception as e:
             self.cleanup()
             raise RuntimeError(f"Failed to initialize shared memory: {e}") from e
@@ -202,7 +217,7 @@ class SharedDataManager:
 
     def _init_distance_matrices(
         self,
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        distance_dict: Dict[str, NeighborData],
         dtype: np.dtype
     ) -> None:
         """Initialize shared memory for distance matrices."""
@@ -210,21 +225,41 @@ class SharedDataManager:
         self._distance_shapes: Dict[str, Tuple[int, ...]] = {}
         self._distance_dtypes: Dict[str, str] = {}
         self._distance_cell_ids: Dict[str, List[str]] = {}
+        self._distance_kinds: Dict[str, str] = {}
 
-        for cell_type, (dist_matrix, cell_ids) in distance_dict.items():
-            dist_matrix = np.asarray(dist_matrix, dtype=dtype)
+        for cell_type, data in distance_dict.items():
+            if isinstance(data, CompactNeighborData):
+                array = np.asarray(data.neighbor_indices)
+                if array.dtype.kind not in 'iu':
+                    raise TypeError(
+                        f'Neighbor indices for {cell_type!r} must have an '
+                        f'integer dtype, got {array.dtype}.'
+                    )
+                cell_ids = data.cell_ids
+                if array.ndim != 2 or array.shape[0] != len(cell_ids):
+                    raise ValueError(
+                        f'Neighbor indices for {cell_type!r} must have one '
+                        f'row per cell ID; got shape {array.shape} for '
+                        f'{len(cell_ids)} IDs.'
+                    )
+                kind = 'neighbor_indices'
+            else:
+                dist_matrix, cell_ids = data
+                array = np.asarray(dist_matrix, dtype=dtype)
+                kind = 'distance_matrix'
 
-            shm = shared_memory.SharedMemory(create=True, size=dist_matrix.nbytes)
+            shm = shared_memory.SharedMemory(create=True, size=array.nbytes)
             self._shm_objects.append(shm)
 
             # Create view and copy data
-            shm_array = np.ndarray(dist_matrix.shape, dtype=dtype, buffer=shm.buf)
-            np.copyto(shm_array, dist_matrix)
+            shm_array = np.ndarray(array.shape, dtype=array.dtype, buffer=shm.buf)
+            np.copyto(shm_array, array)
 
             self._distance_shms[cell_type] = shm.name
-            self._distance_shapes[cell_type] = dist_matrix.shape
-            self._distance_dtypes[cell_type] = np.dtype(dtype).name
+            self._distance_shapes[cell_type] = array.shape
+            self._distance_dtypes[cell_type] = array.dtype.name
             self._distance_cell_ids[cell_type] = cell_ids
+            self._distance_kinds[cell_type] = kind
 
     def get_metadata(self) -> dict:
         """
@@ -250,6 +285,7 @@ class SharedDataManager:
             'distance_shapes': self._distance_shapes.copy(),
             'distance_dtypes': self._distance_dtypes.copy(),
             'distance_cell_ids': self._distance_cell_ids.copy(),
+            'distance_kinds': self._distance_kinds.copy(),
         }
 
     def cleanup(self) -> None:
@@ -333,8 +369,8 @@ def worker_init(metadata: dict) -> None:
 
         obs_df = pickle.loads(shm_obs.buf[:metadata['obs_size']])
 
-        # Reconstruct distance matrices from shared memory
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+        # Reconstruct distance or compact neighbor arrays from shared memory.
+        distance_dict = {}
 
         for cell_type, shm_name in metadata['distance_shms'].items():
             shm = shared_memory.SharedMemory(name=shm_name)
@@ -344,9 +380,15 @@ def worker_init(metadata: dict) -> None:
             dtype = np.dtype(metadata['distance_dtypes'].get(cell_type, 'float64'))
 
             # Create a VIEW into shared memory (no copy)
-            dist_matrix = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+            array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
             cell_ids = metadata['distance_cell_ids'][cell_type]
-            distance_dict[cell_type] = (dist_matrix, cell_ids)
+            data_kind = metadata.get('distance_kinds', {}).get(
+                cell_type, 'distance_matrix'
+            )
+            if data_kind == 'neighbor_indices':
+                distance_dict[cell_type] = CompactNeighborData(array, cell_ids)
+            else:
+                distance_dict[cell_type] = (array, cell_ids)
 
         _worker_data = WorkerSharedData(
             obs_df=obs_df,
@@ -460,13 +502,13 @@ def worker_sample(args: tuple) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], 
 
 def parallel_sample_with_nearest_neighbors(
     obs_df: pd.DataFrame,
-    distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+    distance_dict: Dict[str, NeighborData],
     sampling_tasks: List[dict],
     n_processes: int = 4,
     show_progress: bool = True
 ) -> Dict[int, Any]:
     """
-    Run sampling by finding top (n-1) most similar cells in parallel using shared memory.
+    Run neighbor sampling in parallel using shared-memory arrays.
 
     This function manages the entire lifecycle of shared memory and worker
     processes, ensuring proper cleanup even if errors occur.
@@ -476,8 +518,7 @@ def parallel_sample_with_nearest_neighbors(
     obs_df : pd.DataFrame
         Observation DataFrame containing cell metadata.
     distance_dict : dict
-        Pre-computed distance matrices by cell type.
-        Format: {cell_type: (distance_matrix, cell_ids)}
+        Pre-computed distance matrices or compact neighbor indices by cell type.
     sampling_tasks : list of dict
         Each dict contains parameters for one sampling task.
         Required keys: 'cell_type', 'n_samples', 'n_base'
@@ -536,7 +577,7 @@ def get_sample_id_with_neighbors(
         n_samples: int,
         cell_type: str,
         n_base: int,
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        distance_dict: Dict[str, NeighborData],
         class_by: str = 'cell_type',
         sep_by_patient: bool = False,
         sc_dataset: str = 'merged_sc_dataset',
@@ -545,7 +586,7 @@ def get_sample_id_with_neighbors(
         neighbor_sampling_scheme: str = 'single_anchor',
 ) -> Union[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:
     """
-    Select sample IDs by nearest-neighbor sampling using pre-computed per-class distance matrices.
+    Select sample IDs using pre-computed per-class neighbor data.
 
     Parameters
     ----------
@@ -593,6 +634,12 @@ def get_sample_id_with_neighbors(
         sc_dataset=sc_dataset,
         glioma_epi_ratio=glioma_epi_ratio,
     )
+    if isinstance(distance_dict.get(cell_type), CompactNeighborData):
+        if sep_by_patient or neighbor_sampling_scheme != 'single_anchor':
+            raise ValueError(
+                'Compact neighbor indices support only single_anchor sampling '
+                'with sep_by_patient=False.'
+            )
 
     if neighbor_sampling_scheme == "two_half_anchor":
         sampler = lambda: _sample_ids_two_half_anchor(
@@ -653,7 +700,7 @@ def _sample_single_neighbor_group(
         obs_df: pd.DataFrame,
         cell_type: str,
         n_base: int,
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        distance_dict: Dict[str, NeighborData],
         class_by: str = 'cell_type',
         sep_by_patient: bool = False,
         minimum_n_base: int = 1,
@@ -666,7 +713,12 @@ def _sample_single_neighbor_group(
             f"Available types: {list(distance_dict.keys())}"
         )
 
-    distance_matrix, all_samples_id = distance_dict[cell_type]
+    neighbor_data = distance_dict[cell_type]
+    if isinstance(neighbor_data, CompactNeighborData):
+        all_samples_id = neighbor_data.cell_ids
+        distance_matrix = None
+    else:
+        distance_matrix, all_samples_id = neighbor_data
     cell_id_to_matrix_idx = {cell_id: idx for idx, cell_id in enumerate(all_samples_id)}
     if len(all_samples_id) < minimum_n_base:
         raise ValueError(
@@ -738,9 +790,26 @@ def _sample_single_neighbor_group(
     if n_base == 1:
         return (anchor_id,), selected_dataset_id
 
-    distances = distance_matrix[anchor_matrix_idx, indices_pool]
-    nearest_local_indices = np.argpartition(distances, n_base - 1)[:n_base]
-    nearest_local_indices = nearest_local_indices[np.argsort(distances[nearest_local_indices])]
+    if isinstance(neighbor_data, CompactNeighborData):
+        if id_pool != all_samples_id:
+            raise ValueError(
+                'Compact neighbor indices require the complete, ordered '
+                'candidate pool without dataset or patient restrictions.'
+            )
+        if n_base > neighbor_data.neighbor_indices.shape[1]:
+            raise ValueError(
+                f'Compact neighbor data retains {neighbor_data.neighbor_indices.shape[1]} '
+                f'neighbors, but this sample requests {n_base}.'
+            )
+        nearest_local_indices = neighbor_data.neighbor_indices[
+            anchor_matrix_idx, :n_base
+        ]
+    else:
+        distances = distance_matrix[anchor_matrix_idx, indices_pool]
+        nearest_local_indices = np.argpartition(distances, n_base - 1)[:n_base]
+        nearest_local_indices = nearest_local_indices[
+            np.argsort(distances[nearest_local_indices])
+        ]
     neighbor_ids = [id_pool[i] for i in nearest_local_indices]
     return tuple(sorted(neighbor_ids)), selected_dataset_id
 
@@ -749,7 +818,7 @@ def _sample_ids_two_half_anchor(
         obs_df: pd.DataFrame,
         cell_type: str,
         n_base: int,
-        distance_dict: Dict[str, Tuple[np.ndarray, List[str]]],
+        distance_dict: Dict[str, NeighborData],
         class_by: str = 'cell_type',
         sep_by_patient: bool = False,
         minimum_n_base: int = 1,

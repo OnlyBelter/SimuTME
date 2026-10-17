@@ -28,6 +28,7 @@ from .sampling import (
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
                           should_use_neighbor_sampling, append_to_csv, SimuMethod, DatasetType,
                           NeighborSamplingScheme)
+from .nneighbors_shared_memory import NeighborData
 from .filtering import FixedGeneFilter, validate_metadata, write_metadata
 from .local_filtering import LocalTCGAFilter, LOCAL_FILTER_METHODS
 # from .nneighbors_shared_memory import parallel_sample_with_nearest_neighbors
@@ -964,7 +965,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             sep_by_patient: bool = False,
             sc_dataset: Optional[str] = None,
             minimum_n_base: int = 1,
-            cell_distance_dict: Optional[Dict[str, Tuple[np.ndarray, List[str]]]] = None,
+            cell_distance_dict: Optional[Dict[str, NeighborData]] = None,
             sampling_method_gep: str = 'random',
             neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
     ) -> pd.DataFrame:

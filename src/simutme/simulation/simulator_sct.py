@@ -3,9 +3,16 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from .simulator import BulkGEPGenerator
-from ..utility import ReadExp, log2_transform, create_h5ad_dataset, get_distance_matrices_by_class
+from ..utility import (
+    ReadExp,
+    log2_transform,
+    create_h5ad_dataset,
+    get_distance_matrices_by_class,
+    get_neighbor_indices_by_class,
+)
+from .nneighbors_shared_memory import CompactNeighborData, NeighborData
 from .simu_helper import (
     validate_generation_params_sct,
     SimuMethod,
@@ -63,8 +70,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             check_basic_info=check_basic_info,
         )
 
-        # Cell distance matrix
-        self.cell_distance_dict: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+        # Per-class distance matrices or compact neighbor indices.
+        self.cell_distance_dict: Dict[str, NeighborData] = {}
 
     def generate_samples(self,
                          n_sample_each_cell_type: int = 10000,
@@ -123,7 +130,15 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
         # 4. Calculate cell distance dict if using n_neighbors sampling
         if sampling_method == 'n_neighbors' and not self.cell_distance_dict:
-            self._get_cell_distance_dict(max_cells_per_cell_type=max_cells_per_cell_type)
+            use_compact_neighbors = (
+                neighbor_sampling_scheme == NeighborSamplingScheme.SINGLE_ANCHOR
+                and not sep_by_patient
+            )
+            self._get_cell_distance_dict(
+                max_cells_per_cell_type=max_cells_per_cell_type,
+                n_neighbors=n_base_for_positive_samples,
+                use_compact_neighbors=use_compact_neighbors,
+            )
 
         # 5. Main Generation Loop
         chunk_size = max(100, int(n_sample_each_cell_type / 5)) if n_sample_each_cell_type > 1000 else n_sample_each_cell_type
@@ -189,27 +204,71 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             self.merged_sc_dataset_df = sc_df_obj.get_exp()
             logging.info(f'Dataset aligned. Genes: {self.merged_sc_dataset_df.shape[1]}')
 
-    def _get_cell_distance_dict(self, max_cells_per_cell_type: int = 15000) -> None:
-        """Calculate cell distance dictionary for n_neighbors sampling for all cell types in "output_types"."""
+    def _get_cell_distance_dict(
+            self,
+            max_cells_per_cell_type: int = 15000,
+            n_neighbors: Optional[int] = None,
+            use_compact_neighbors: bool = False,
+    ) -> None:
+        """Prepare neighbor data for the requested SCT sampling mode."""
         logging.info('Calculating cell distance dictionary for n_neighbors sampling...')
-        max_cpu = os.cpu_count() - 2 if os.cpu_count() and os.cpu_count() >= 4 else 1
-        self.cell_distance_dict = get_distance_matrices_by_class(
-            adata_X=self.merged_sc_dataset.X.toarray(),
-            obs_df=self.merged_sc_dataset_obs,
-            class_by='output_types',
-            n_jobs= min(max_cpu, 10),
-            max_cells_per_class=max_cells_per_cell_type,
-        )
-        if self.subtype_col_name in self.merged_sc_dataset_obs.columns:
-            subtype_distance_dict = get_distance_matrices_by_class(
-                adata_X=self.merged_sc_dataset.X.toarray(),
+        adata_X = self.merged_sc_dataset.X
+        if use_compact_neighbors:
+            if n_neighbors is None:
+                raise ValueError(
+                    'n_neighbors is required when preparing compact neighbor indices.'
+                )
+            parent_neighbors = get_neighbor_indices_by_class(
+                adata_X=adata_X,
                 obs_df=self.merged_sc_dataset_obs,
-                class_by=self.subtype_col_name,
+                class_by='output_types',
+                n_neighbors=n_neighbors,
+                max_cells_per_class=max_cells_per_cell_type,
+            )
+            self.cell_distance_dict = {
+                cell_type: CompactNeighborData(indices, cell_ids)
+                for cell_type, (indices, cell_ids) in parent_neighbors.items()
+            }
+        else:
+            max_cpu = os.cpu_count() - 2 if os.cpu_count() and os.cpu_count() >= 4 else 1
+            dense_X = (
+                adata_X.toarray()
+                if hasattr(adata_X, 'toarray')
+                else np.asarray(adata_X)
+            )
+            self.cell_distance_dict = get_distance_matrices_by_class(
+                adata_X=dense_X,
+                obs_df=self.merged_sc_dataset_obs,
+                class_by='output_types',
                 n_jobs=min(max_cpu, 10),
                 max_cells_per_class=max_cells_per_cell_type,
             )
-            for cell_type, matrix in subtype_distance_dict.items():
-                self.cell_distance_dict.setdefault(cell_type, matrix)
+
+        if self.subtype_col_name in self.merged_sc_dataset_obs.columns:
+            if use_compact_neighbors:
+                subtype_neighbors = get_neighbor_indices_by_class(
+                    adata_X=adata_X,
+                    obs_df=self.merged_sc_dataset_obs,
+                    class_by=self.subtype_col_name,
+                    n_neighbors=n_neighbors,
+                    max_cells_per_class=max_cells_per_cell_type,
+                    classes_to_skip=set(self.cell_distance_dict),
+                )
+                for cell_type, (indices, cell_ids) in subtype_neighbors.items():
+                    self.cell_distance_dict.setdefault(
+                        cell_type,
+                        CompactNeighborData(indices, cell_ids),
+                    )
+            else:
+                subtype_distance_dict = get_distance_matrices_by_class(
+                    adata_X=dense_X,
+                    obs_df=self.merged_sc_dataset_obs,
+                    class_by=self.subtype_col_name,
+                    n_jobs=min(max_cpu, 10),
+                    max_cells_per_class=max_cells_per_cell_type,
+                )
+                for cell_type, matrix in subtype_distance_dict.items():
+                    self.cell_distance_dict.setdefault(cell_type, matrix)
 
     def _process_chunk(
             self,

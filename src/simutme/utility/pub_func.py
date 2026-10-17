@@ -17,7 +17,7 @@ import matplotlib.patches as patches
 from sklearn.decomposition import PCA
 from anndata import AnnData, read_h5ad
 from sklearn.metrics import euclidean_distances
-from typing import Union, List, Dict, Optional, Tuple
+from typing import Union, List, Dict, Optional, Tuple, Any, Set
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 from ..config import DEFAULT_CELL_TYPES, DEFAULT_CORE_MARKER_GENES
 
 MAX_LOG2_TPM = 20.0
+MAX_NEIGHBOR_QUERY_BLOCK_SIZE = 128
 
 
 def set_fig_style(font_family: str = None, font_size: int = None):
@@ -786,7 +787,6 @@ def get_distance_matrices_by_class(
     ...     max_cells_per_class=None
     ... )
     """
-    # Validation
     if class_by not in obs_df.columns:
         raise KeyError(f'Column "{class_by}" not found in obs_df.')
 
@@ -794,61 +794,17 @@ def get_distance_matrices_by_class(
     if adata_X.dtype != np.float32:
         adata_X = adata_X.astype(np.float32)
 
-    # Set random seed
-    if random_seed is not None:
-        np.random.seed(random_seed)
-
-    # Group by class
-    grouped = obs_df.groupby(class_by, observed=True)
-
     # Determine number of workers
     if n_jobs == -1:
         n_jobs = min(mp.cpu_count(), 8)
 
-    # Prepare tasks with sampling
-    tasks = []
-    sampling_info = []
-
-    for cell_class, group in grouped:
-        n_cells_original = len(group)
-        cell_ids = group.index.to_list()
-
-        # Sample cells if needed
-        if max_cells_per_class is not None and n_cells_original > max_cells_per_class:
-            # Random sampling
-            sampled_indices = np.random.choice(
-                n_cells_original,
-                size=max_cells_per_class,
-                replace=False
-            )
-            sampled_indices.sort()  # Keep order for reproducibility
-
-            cell_ids_sampled = [cell_ids[i] for i in sampled_indices]
-            n_cells_sampled = len(cell_ids_sampled)
-
-            sampling_info.append({
-                'class': cell_class,
-                'original': n_cells_original,
-                'sampled': n_cells_sampled,
-                'ratio': n_cells_sampled / n_cells_original
-            })
-
-            cell_ids = cell_ids_sampled
-
-        # Get indices in original matrix
-        cell_indices = obs_df.index.get_indexer(cell_ids)
-
-        tasks.append((cell_class, cell_indices, cell_ids))
-
-    # Print sampling info
-    if sampling_info and show_progress:
-        print("\n" + "=" * 70)
-        print("CELL SAMPLING SUMMARY")
-        print("=" * 70)
-        for info in sampling_info:
-            print(f"{info['class']:30s}: {info['original']:7,} → {info['sampled']:7,} cells "
-                  f"({info['ratio'] * 100:.1f}%)")
-        print("=" * 70 + "\n")
+    tasks, sampling_info = _prepare_class_sampling_tasks(
+        obs_df=obs_df,
+        class_by=class_by,
+        max_cells_per_class=max_cells_per_class,
+        random_seed=random_seed,
+    )
+    _print_class_sampling_summary(sampling_info, show_progress)
 
     # Compute distances
     distance_dict = {}
@@ -865,6 +821,146 @@ def get_distance_matrices_by_class(
         )
 
     return distance_dict
+
+
+def get_neighbor_indices_by_class(
+        adata_X: Any,
+        obs_df: pd.DataFrame,
+        n_neighbors: int,
+        class_by: str = 'cell_type',
+        max_cells_per_class: Optional[int] = 15000,
+        random_seed: Optional[int] = 42,
+        query_block_size: int = MAX_NEIGHBOR_QUERY_BLOCK_SIZE,
+        classes_to_skip: Optional[Set[str]] = None,
+        show_progress: bool = True,
+) -> Dict[str, Tuple[np.ndarray, List[str]]]:
+    """Return exact float32 top-neighbor indices for each sampled class.
+
+    Each result contains an ``(n_cells, min(n_neighbors, n_cells))`` int32
+    array and the corresponding ordered cell IDs. Distances are computed in
+    query-row blocks and discarded as soon as each block has been reduced.
+    """
+    if n_neighbors < 1:
+        raise ValueError(f'n_neighbors must be positive, got {n_neighbors}.')
+    if not 1 <= query_block_size <= MAX_NEIGHBOR_QUERY_BLOCK_SIZE:
+        raise ValueError(
+            'query_block_size must be between 1 and '
+            f'{MAX_NEIGHBOR_QUERY_BLOCK_SIZE}, got {query_block_size}.'
+        )
+    if adata_X.shape[0] != len(obs_df):
+        raise ValueError(
+            f'Expression rows ({adata_X.shape[0]}) do not match observation '
+            f'rows ({len(obs_df)}).'
+        )
+
+    tasks, sampling_info = _prepare_class_sampling_tasks(
+        obs_df=obs_df,
+        class_by=class_by,
+        max_cells_per_class=max_cells_per_class,
+        random_seed=random_seed,
+    )
+    _print_class_sampling_summary(sampling_info, show_progress)
+    skipped_classes = classes_to_skip or set()
+    # Candidate tasks are prepared first so skipped classes consume the same
+    # seeded subsampling draws as they do in the full-matrix path.
+    selected_tasks = [task for task in tasks if task[0] not in skipped_classes]
+    iterator = selected_tasks
+    if show_progress:
+        iterator = tqdm(
+            selected_tasks,
+            desc='Computing neighbor indices',
+            unit='class',
+        )
+
+    neighbor_dict = {}
+    for cell_class, cell_indices, cell_ids in iterator:
+        class_X = adata_X[cell_indices, :]
+        if hasattr(class_X, 'toarray'):
+            class_X = class_X.toarray()
+        class_X = np.asarray(class_X, dtype=np.float32)
+
+        n_cells = class_X.shape[0]
+        n_keep = min(n_neighbors, n_cells)
+        neighbor_indices = np.empty((n_cells, n_keep), dtype=np.int32)
+
+        for start in range(0, n_cells, query_block_size):
+            stop = min(start + query_block_size, n_cells)
+            distance_block = euclidean_distances(
+                class_X[start:stop, :],
+                class_X,
+            ).astype(np.float32, copy=False)
+
+            # Match the zero diagonal in the full-matrix reference path.
+            block_rows = np.arange(stop - start)
+            distance_block[block_rows, np.arange(start, stop)] = 0.0
+            for offset, row_distances in enumerate(distance_block):
+                nearest = np.argpartition(row_distances, n_keep - 1)[:n_keep]
+                nearest = nearest[np.argsort(row_distances[nearest])]
+                neighbor_indices[start + offset] = nearest
+
+            del row_distances
+            del distance_block
+
+        neighbor_dict[cell_class] = (neighbor_indices, cell_ids)
+        if show_progress:
+            iterator.set_postfix({'cells': n_cells, 'neighbors': n_keep})
+
+    return neighbor_dict
+
+
+def _prepare_class_sampling_tasks(
+        obs_df: pd.DataFrame,
+        class_by: str,
+        max_cells_per_class: Optional[int],
+        random_seed: Optional[int],
+) -> Tuple[List[Tuple[str, np.ndarray, List[str]]], List[dict]]:
+    if class_by not in obs_df.columns:
+        raise KeyError(f'Column "{class_by}" not found in obs_df.')
+
+    if random_seed is not None:
+        np.random.seed(random_seed)
+
+    tasks = []
+    sampling_info = []
+    for cell_class, group in obs_df.groupby(class_by, observed=True):
+        n_cells_original = len(group)
+        cell_ids = group.index.to_list()
+        if max_cells_per_class is not None and n_cells_original > max_cells_per_class:
+            sampled_indices = np.random.choice(
+                n_cells_original,
+                size=max_cells_per_class,
+                replace=False,
+            )
+            sampled_indices.sort()
+            cell_ids = [cell_ids[i] for i in sampled_indices]
+            n_cells_sampled = len(cell_ids)
+            sampling_info.append({
+                'class': cell_class,
+                'original': n_cells_original,
+                'sampled': n_cells_sampled,
+                'ratio': n_cells_sampled / n_cells_original,
+            })
+
+        cell_indices = obs_df.index.get_indexer(cell_ids)
+        tasks.append((cell_class, cell_indices, cell_ids))
+
+    return tasks, sampling_info
+
+
+def _print_class_sampling_summary(
+        sampling_info: List[dict],
+        show_progress: bool,
+) -> None:
+    if not sampling_info or not show_progress:
+        return
+
+    print("\n" + "=" * 70)
+    print("CELL SAMPLING SUMMARY")
+    print("=" * 70)
+    for info in sampling_info:
+        print(f"{info['class']:30s}: {info['original']:7,} → {info['sampled']:7,} cells "
+              f"({info['ratio'] * 100:.1f}%)")
+    print("=" * 70 + "\n")
 
 
 def _compute_distances_sequential(
