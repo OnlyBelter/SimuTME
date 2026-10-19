@@ -49,6 +49,13 @@ def get_cell_type_used(cell_type2subtype: Dict[str, List[str]], output_types: li
     return cell_type_used, sub_cell_type_used
 
 
+def _candidate_batch_size(n_samples: int, filtering: bool) -> int:
+    """Choose candidate profiles per iteration, oversampling filtered targets."""
+    if filtering:
+        return min(5000, n_samples * 30)
+    return min(1000, n_samples)
+
+
 @dataclass
 class GEPGenerationConfig:
     """Configuration for GEP generation."""
@@ -394,9 +401,6 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if 'linear_mmd' in config.filtering_method:
             norm_ord = 2
 
-        # Determine batch size for generation
-        min_n_cell_frac = min(5000, config.n_samples) if config.filtering else min(1000, config.n_samples)
-
         self.filtering_space = config.filtering_space
         if self.filtering_space is not None:
             self._prepare_filtering_artifacts(config)
@@ -411,8 +415,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         # Load Data
         obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(config.simu_method)
-        if sc_dataset_key == DatasetType.MERGED_SC:
-            min_n_cell_frac = 300  # Smaller batch for merged dataset due to sparsity
+        candidate_batch_size = _candidate_batch_size(
+            config.n_samples,
+            config.filtering,
+        )
 
         # Setup Filtering Reference
         sample_id_for_filtering = []
@@ -460,7 +466,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 # 1. Generate Fractions
                 generated_cell_frac = generate_cell_fraction(
                     sampling_method=config.sampling_method_prop,
-                    n_cell_frac=min_n_cell_frac,
+                    n_cell_frac=candidate_batch_size,
                     sample_prefix=f's_{config.sampling_method_prop}_{self.n_round}',
                     cell_prop_prior=config.cell_prop_prior if config.filtering else None,
                     cell_type2subtype=self.cell_fraction_type2subtype,
