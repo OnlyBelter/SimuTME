@@ -26,6 +26,26 @@ ground-truth cell fractions.
 The independent unfiltered correlation source retains its full gene universe
 and existing generation behavior.
 
+## CPU candidate generation
+
+Random sampling without patient constraints builds eligible ID pools once per
+batch and avoids spawning worker processes for individual selection tasks.
+Eager mixed-profile aggregation gathers bounded expression chunks and uses
+float64 arithmetic. These paths activate automatically; no YAML change is
+required. Patient-constrained sampling, neighbor generation, and lazy
+aggregation retain their existing implementations.
+
+Sampling probabilities and constraints are preserved, but random draws can
+differ from the old multiprocessing implementation. RNA weighting,
+normalization, noise, and filtering rules are unchanged. Each completed batch
+logs time spent on fractions, sampling, aggregation, filtering, and saving.
+Restart the simulation process to load updated source code.
+
+Use `scripts/benchmark_cpu_candidates.py` to compare against Git revision
+`801f248`. It supports synthetic workloads and `--reference <SCT_H5AD>` for
+actual SCT expression. Filtering and file export are excluded from benchmark
+timings.
+
 ## Required Inputs
 
 ### Global YAML fields

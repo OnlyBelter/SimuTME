@@ -4,6 +4,18 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 20, 2026
+
+### CPU candidate simulation
+
+Mixed candidate generation now avoids repeated metadata scans and per-sample pandas expression lookups on the ordinary eager path.
+
+- Build random-selection pools per classification column once per batch.
+- Avoid a spawn pool for random sampling without patient constraints.
+- Aggregate eager expression in bounded chunks with float64 arithmetic.
+- Log per-batch stage timings and provide a baseline CPU benchmark script.
+- Preserve filtering rules; random draws can differ from the legacy workers.
+
 ## August 1, 2026
 
 ### Explicit Mixed SCT reference selection

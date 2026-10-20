@@ -1,6 +1,7 @@
 import os
 import json
 import warnings
+from time import perf_counter
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -464,6 +465,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         self.generated_bulk_gep_counter, self.gep_filtering_input_n_samples
                     )
                 # 1. Generate Fractions
+                batch_started = perf_counter()
                 generated_cell_frac = generate_cell_fraction(
                     sampling_method=config.sampling_method_prop,
                     n_cell_frac=candidate_batch_size,
@@ -473,14 +475,16 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     dirichlet_alpha=dirichlet_alpha,
                     rng=dirichlet_rng,
                 )
+                fractions_finished = perf_counter()
 
-                # 2. Sample Cells (Multiprocessing)
+                # 2. Sample Cells
                 selected_cell_ids = self._sc_sampling(
                     cell_frac=generated_cell_frac,
                     n_threads=n_threads,
                     obs_df=obs_df,
                     sc_dataset=sc_dataset_key
                 )
+                sampling_finished = perf_counter()
 
                 # 3. Aggregate Expression
                 simulated_gep = self._map_cell_id2exp(
@@ -491,6 +495,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     add_noise=config.add_noise,
                     noise_params=config.noise_params
                 )
+                aggregation_finished = perf_counter()
 
                 simulated_gep_bak = (
                     simulated_gep.copy() if self.filtering_space is None else None
@@ -532,6 +537,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     )
 
                 # 5. Save Results
+                filtering_finished = perf_counter()
                 if simulated_gep is not None and not simulated_gep.empty:
                     # Ensure we don't exceed requested n_samples
                     remaining_needed = self.n_samples - self.generated_bulk_gep_counter
@@ -564,6 +570,16 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     )
                 if self.filtering_space is not None:
                     self._save_filtering_metadata()
+                logger.info(
+                    "Candidate batch timing: fractions=%.3fs, sampling=%.3fs, "
+                    "aggregation=%.3fs, filtering=%.3fs, saving=%.3fs, total=%.3fs.",
+                    fractions_finished - batch_started,
+                    sampling_finished - fractions_finished,
+                    aggregation_finished - sampling_finished,
+                    filtering_finished - aggregation_finished,
+                    perf_counter() - filtering_finished,
+                    perf_counter() - batch_started,
+                )
 
         # Finalize
         self._finalize_generation(config.sampling_method_prop, config.filtering_method, config.log_file_path)
@@ -1070,7 +1086,14 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                         ct2rna_coefficient[cell_type] = 1.0
                 self._maybe_log_total_rna_coefficients(ct2rna_coefficient)
 
-            if lazy_sct_reader is not None and not selected_cell_id['selected_cell_id'].astype(str).str.contains(';', regex=False).any():
+            single_row_ids = not selected_cell_id['selected_cell_id'].astype(str).str.contains(';', regex=False).any()
+            if sc_ds_df is not None and sc_ds_df.index.is_unique and single_row_ids:
+                simulated_exp_df = self._aggregate_eager_bulk(
+                    selected_cell_id, cell_frac, sc_ds_df, ct2rna_coefficient,
+                    add_noise, noise_params,
+                )
+                return non_log2cpm(simulated_exp_df, sum_exp=1e6).round(3)
+            if lazy_sct_reader is not None and single_row_ids:
                 simulated_exp = self._aggregate_lazy_sct_bulk(
                     selected_cell_id=selected_cell_id,
                     cell_frac=cell_frac,
@@ -1161,6 +1184,68 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
     @staticmethod
     def _lazy_sct_chunk_size() -> int:
         return 512
+
+    def _aggregate_eager_bulk(
+        self, selected_cell_id, cell_frac, source, coefficients,
+        add_noise=False, noise_params=(),
+    ):
+        """Gather bounded chunks once, preserving legacy sample/reduction order."""
+        groups = selected_cell_id.groupby(level=0).indices
+        sample_ids = list(groups)
+        if not sample_ids:
+            return pd.DataFrame(index=sample_ids, columns=source.columns, dtype=np.float64)
+        positions = np.concatenate(list(groups.values()))
+        tasks = selected_cell_id.iloc[positions]
+        source_rows = source.index.get_indexer(tasks['selected_cell_id'])
+        fraction_rows = cell_frac.index.get_indexer(tasks.index)
+        fraction_columns = cell_frac.columns.get_indexer(tasks['cell_type'])
+        if (source_rows < 0).any():
+            raise ValueError('Selected cell IDs are absent from the expression reference.')
+        if (fraction_rows < 0).any() or (fraction_columns < 0).any():
+            raise ValueError('Selected sample IDs or cell types are absent from cell fractions.')
+        fractions = cell_frac.to_numpy(dtype=np.float64)[fraction_rows, fraction_columns]
+        rna = np.array([coefficients[ct] for ct in tasks['cell_type']], dtype=np.float64)
+        if not np.isfinite(fractions).all() or not np.isfinite(rna).all():
+            raise ValueError('Encountered non-finite aggregation weights.')
+        offsets = np.concatenate(([0], np.cumsum([len(group) for group in groups.values()])))
+        n_genes = source.shape[1]
+        # Allow two float64 expression temporaries within a 64 MiB budget.
+        max_rows = max(1, (64 * 1024 ** 2) // max(1, n_genes * 8 * 2))
+        output = np.empty((len(sample_ids), n_genes), dtype=np.float64)
+        first = 0
+        while first < len(sample_ids):
+            last = first + 1
+            while last < len(sample_ids) and offsets[last + 1] - offsets[first] <= max_rows:
+                last += 1
+            start, stop = offsets[first], offsets[last]
+            expression = source.iloc[source_rows[start:stop]].to_numpy(dtype=np.float64, copy=True)
+            if not np.isfinite(expression).all():
+                raise ValueError('Encountered non-finite single-cell expression before aggregation.')
+            with np.errstate(over='raise', invalid='raise'):
+                try:
+                    if self.total_rna_coefficient:
+                        expression *= rna[start:stop, None]
+                    expression *= fractions[start:stop, None]
+                    for sample in range(first, last):
+                        lo, hi = offsets[sample:sample + 2] - start
+                        values = expression[lo:hi].sum(axis=0, dtype=np.float64)
+                        if self.total_rna_coefficient:
+                            total = values.sum(dtype=np.float64)
+                            if not np.isfinite(total) or total <= 0:
+                                raise ValueError('Invalid total expression after RNA coefficient weighting.')
+                            values = values / total * 1e6
+                        if add_noise:
+                            noise = self._sample_noise(n_samples=n_genes, f=noise_params[0])
+                            if noise.sum() > noise_params[1]:
+                                noise = noise / noise.sum() * noise_params[1]
+                            values += noise
+                        output[sample] = values
+                except FloatingPointError as exc:
+                    raise ValueError('Failed to aggregate extreme or non-finite expression values.') from exc
+            first = last
+        if not np.isfinite(output).all():
+            raise ValueError('Encountered non-finite aggregated expression.')
+        return pd.DataFrame(output, index=sample_ids, columns=source.columns)
 
     def _aggregate_lazy_sct_bulk(
         self,

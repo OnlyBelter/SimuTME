@@ -78,6 +78,42 @@ def sample_random(
         n_threads: int
 ) -> List[Tuple[str, ...]]:
     """Sample cells randomly."""
+    if not sep_by_patient:
+        pools = {}
+        results = []
+        source_ids = obs_df.index.to_numpy()
+        columns = sampled_cell_ids.loc[sampled_cell_ids['n_cell'] != 0, 'class_by'].unique()
+        for column in columns:
+            if column not in obs_df.columns:
+                raise KeyError(f'Column "{column}" not found in obs_df.')
+            pools[column] = {
+                label: source_ids[positions]
+                for label, positions in obs_df.groupby(column, observed=True).indices.items()
+            }
+        for row in sampled_cell_ids.itertuples(index=False):
+            if row.n_cell == 0:
+                results.append(tuple())
+                continue
+            cell_type = row.cell_type
+            class_pools = pools[row.class_by]
+            if (sc_dataset == DatasetType.SCT and cell_type == 'Cancer Cells'
+                    and 'Epithelial Cells' in class_pools and 'Glioma Cells' in class_pools):
+                cell_type = 'Glioma Cells' if np.random.random() <= 0.1 else 'Epithelial Cells'
+            available = class_pools.get(cell_type, np.array([], dtype=object))
+            if len(available) < minimum_n_base:
+                raise ValueError(
+                    f"The number of cells in '{cell_type}' ({len(available)}) is less than "
+                    f"minimum_n_base ({minimum_n_base})."
+                )
+            if len(available) <= row.n_cell:
+                chosen = available
+            elif row.n_cell == 1:
+                chosen = available[np.random.randint(len(available), size=1)]
+            else:
+                chosen = available[np.random.choice(len(available), row.n_cell, replace=False)]
+            results.append(tuple(sorted(chosen)))
+        return results
+
     tasks = [
         (obs_df, 1, row['cell_type'], row['n_cell'], row['class_by'],
          sep_by_patient, sc_dataset, minimum_n_base)
