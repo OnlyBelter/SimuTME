@@ -352,9 +352,13 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         self._save_chunk_results(simulated_gep, selected_cell_ids)
         if all_cell_sampler is not None:
             logger.info(
-                "All-cell SCT chunk: sampling=%.3fs, aggregation=%.3fs, export=%.3fs; %s",
+                "All-cell SCT chunk: sampling=%.3gs, aggregation=%.3gs, export=%.3gs; %s",
                 sampled - started, aggregated - sampled, perf_counter() - aggregated,
-                all_cell_sampler.stats,
+                "{" + ", ".join(
+                    f"{key!r}: {value:.3g}" if isinstance(value, float)
+                    else f"{key!r}: {value}"
+                    for key, value in all_cell_sampler.stats.items()
+                ) + "}",
             )
 
     def _add_auto_sampling_task_overrides(self, rows: pd.DataFrame) -> pd.DataFrame:

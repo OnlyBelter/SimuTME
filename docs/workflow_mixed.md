@@ -130,13 +130,23 @@ sct_reference:
 sct_reference:
   source_type: "generated_dataset"
   dataset_name: "SCT_N6K_31Jul_07"
-  version: "sorted_bulk_imputed"
+  version: "sorted_bulk_imputed"  # Requires imputation on the referenced SCT dataset
 ```
 
 For `source_type: "generated_dataset"`, `version` must be one of:
 
-- `"original"`
-- `"sorted_bulk_imputed"`
+- `"original"`: use the generated SCT output before sorted-bulk imputation.
+  This output remains available even when imputation is enabled.
+- `"sorted_bulk_imputed"`: use the SCT output after sorted-bulk-guided
+  imputation. Set `apply_sorted_bulk_imputation: true` on the referenced SCT
+  dataset, not on the Mixed dataset, and run that SCT dataset first so its
+  imputed output is recorded and available.
+
+`version` selects an output; it does not enable or perform imputation.
+If the referenced SCT dataset has imputation disabled or no recorded imputed
+output, requesting `"sorted_bulk_imputed"` raises an error. There is no
+automatic fallback to `"original"`. Use `version: "original"` when you want
+the pre-imputation reference.
 
 For `source_type: "path"`, SimuTME uses `file_path` directly and does not infer
 another SCT path from it.

@@ -176,7 +176,7 @@ datasets:
     sct_reference:
       source_type: "generated_dataset"  # Mixed only: reference an SCT dataset defined earlier in this YAML
       dataset_name: "SCT_N10_hnscc_07Jan_01"
-      version: "sorted_bulk_imputed"
+      version: "sorted_bulk_imputed"  # Select the imputed SCT output; requires apply_sorted_bulk_imputation: true on the referenced SCT dataset. Use "original" for its pre-imputation output.
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "dirichlet"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     dirichlet_alpha:  # Mixed + dirichlet only: default symmetric prior over the 16 configured output cell types
