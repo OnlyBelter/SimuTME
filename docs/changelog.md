@@ -4,6 +4,19 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 21, 2026
+
+### All-cell SCT neighbor sampling
+
+SCT datasets accept `max_cells_per_cell_type: "all"` to retain every eligible
+cell for single-anchor neighbor generation.
+
+- Query sampled anchors against complete pools without full distance matrices.
+- Cache repeated queries and preserve explicit subtype restrictions.
+- Keep integer caps unchanged and reject unsupported all-cell schemes early.
+- Record sampling mode for partial-output compatibility and log chunk timings.
+- Add exact-query tests and reduced-feature scaling benchmarks.
+
 ## October 20, 2026
 
 ### CPU candidate simulation

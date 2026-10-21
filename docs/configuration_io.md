@@ -286,6 +286,11 @@ Each entry under `datasets:` defines one simulation task.
 
 For SCT datasets:
 
+- `max_cells_per_cell_type` accepts a positive integer or `"all"`; omitted
+  values default to 15,000. `"all"` retains all eligible cells and uses
+  sampled-anchor exact queries for `n_neighbors` with `single_anchor` and no
+  patient constraints. Other neighbor schemes reject `"all"` before loading.
+  Existing QC, dataset selection, and balanced-quota downsampling still apply.
 - `sampling_method_gep` is required and must be set explicitly to `random` or `n_neighbors`
 
 ### Mixed-only fields

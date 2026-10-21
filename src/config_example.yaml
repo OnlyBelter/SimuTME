@@ -144,7 +144,7 @@ datasets:
     n_samples: 10  # Number of bulk samples to simulate for each cell type
     sampling_method_gep: "n_neighbors"  # Required for SCT datasets: sampling method for finding single cells, either "random" or "n_neighbors"
     neighbor_sampling_scheme: "single_anchor"  # Optional SCT-only: "single_anchor" (default) keeps the existing one-anchor neighbor sampling; "two_half_anchor" builds one SCT sample from two half-sized neighbor groups and softly prefers different datasets for the two halves when feasible.
-    stratify_by_dataset: "balanced_quota"   # Optional SCT-only override: "none" (default) or "balanced_quota". Balances the candidate-cell pool across scRNA-seq datasets per cell type.
+    stratify_by_dataset: "none"   # Keep all eligible dataset rows; "balanced_quota" intentionally downsamples larger dataset pools.
     cancer_cell_dataset_ids: ["hnscc_puram_03"]  # Optional for SCT only: restrict rows with cell_type == "Cancer Cells" to these dataset_id values
     non_cancer_cell_dataset_ids: ["hnscc_cillo_01", "pdac_peng_02", "hnscc_puram_03", "pdac_steele_04", "luad_kim_05", "nsclc_guo_06", "prad_cheng_08", "prad_dong_09", "hcc_sun_10", "gbm_neftel_11", "gbm_abdelfattah_12"]  # Optional for SCT only: restrict all non-cancer rows to these dataset_id values; later Mixed datasets inherit this through the generated SCT dataset
     selected_subtypes_by_cell_type:  # Optional SCT-only override: restrict the single-cell candidate pool for a parent cell type while keeping the generated SCT label as the parent cell type; use "auto" to randomly choose the parent pool or one configured subtype per sample
@@ -154,7 +154,7 @@ datasets:
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset
-    max_cells_per_cell_type: 15000  # Maximum number of single cells to use per cell type to avoid memory issues when using n_neighbors sampling
+    max_cells_per_cell_type: "all"  # All eligible cells remain anchors/neighbors; exact queries run only for sampled anchors. Positive integers retain capped precomputation. "all" requires single_anchor without patient constraints.
   Mixed_N100_segment:  # Dataset name
     dataset_type: "Mixed"  # Type of dataset: "SCT" or "Mixed"
     sct_reference:

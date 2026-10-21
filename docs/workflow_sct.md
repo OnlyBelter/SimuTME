@@ -29,6 +29,43 @@ The visual summary is shown below.
 
 ![SCT workflow](figures/workflow_sct.svg)
 
+## All-cell neighbor sampling
+
+Set `max_cells_per_cell_type: "all"` on an SCT dataset to keep all eligible
+cells available for exact neighbor sampling. The default remains 15,000 when
+the parameter is omitted. Positive integers keep the existing capped path.
+
+```yaml
+sampling_method_gep: "n_neighbors"
+neighbor_sampling_scheme: "single_anchor"
+stratify_by_dataset: "none"
+max_cells_per_cell_type: "all"
+```
+
+The all-cell path draws anchors uniformly, queries only the sampled anchors,
+and caches neighbor indices. Queries retain the existing float32 Euclidean
+metric and use bounded distance blocks. Parent subtype restrictions and auto
+subtype choices remain active. `"all"` currently requires `single_anchor`
+without patient constraints; unsupported combinations fail before loading.
+
+QC and dataset restrictions still apply. `"balanced_quota"` intentionally
+downsamples earlier, so use `"none"` to retain eligible rows across datasets.
+All cells are eligible, but a finite generated dataset need not use every
+cell. Exact search across a larger pool can still take longer than capped
+search.
+
+Use a new dataset name when changing from capped to all-cell generation.
+Completed outputs are reused, and a sampling-mode marker prevents mixing
+incompatible partial runs. Chunk logs report sampling, aggregation, export,
+queries, and cache statistics. Existing dense expression loading still
+contributes to RAM use.
+
+Run `scripts/benchmark_all_cell_neighbors.py` for reduced-feature scaling
+comparisons at the observed pool sizes. Its default measures a bounded number
+of anchors and explicitly marks full-workload estimates as extrapolations.
+See the [measured scaling results](all_cell_sct_benchmark.md) for timings,
+memory measurements, and production-benchmark limitations.
+
 ## Required Inputs
 
 ### Global YAML fields

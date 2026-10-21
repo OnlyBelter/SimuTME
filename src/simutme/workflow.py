@@ -15,6 +15,7 @@ from .utility import cal_corr_gene_exp_with_cell_frac
 from .utility import ReadH5AD, ReadExp, create_h5ad_dataset
 from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filtered_by_quantile_range
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
+from .simulation.all_cell_neighbors import validate_cell_cap
 from .simulation.sampling import (
     estimate_dirichlet_alpha_from_pred_cell_props,
     get_default_dirichlet_alpha,
@@ -1139,6 +1140,10 @@ def run_bulk_simulation(dataset_name: str,
             )
         sampling_method_gep = params.get('sampling_method_gep')
         neighbor_sampling_scheme = _resolve_neighbor_sampling_scheme(params)
+        max_cells_per_cell_type = validate_cell_cap(
+            params.get("max_cells_per_cell_type", 15000),
+            sampling_method_gep, neighbor_sampling_scheme,
+        )
         logging.info(f"   > neighbor_sampling_scheme: {neighbor_sampling_scheme}")
 
         sc_dataset_dir = simu_bulk_dir / f'generated_sct_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
@@ -1168,7 +1173,7 @@ def run_bulk_simulation(dataset_name: str,
                                            n_base_for_positive_samples=n_base,
                                            sampling_method=sampling_method_gep, # sampling method for finding single cells
                                            neighbor_sampling_scheme=neighbor_sampling_scheme,
-                                           max_cells_per_cell_type=params.get('max_cells_per_cell_type', 15000)
+                                           max_cells_per_cell_type=max_cells_per_cell_type
                                            )
             logging.info(f"   > Single-Cell-Type Dataset Generation Completed for {dataset_name}")
         else:

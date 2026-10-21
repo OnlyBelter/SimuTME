@@ -1,4 +1,6 @@
 import os
+import json
+from time import perf_counter
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -13,6 +15,7 @@ from ..utility import (
     get_neighbor_indices_by_class,
 )
 from .nneighbors_shared_memory import CompactNeighborData, NeighborData
+from .all_cell_neighbors import AllCellNeighborSampler, validate_cell_cap
 from .simu_helper import (
     validate_generation_params_sct,
     SimuMethod,
@@ -84,7 +87,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                          ref_gene_list_file_path: Optional[str] = None,
                          sampling_method: str = 'random',
                          neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
-                         max_cells_per_cell_type: int = 15000,
+                         max_cells_per_cell_type: int | str = 15000,
                          ) -> None:
         """
         Generate simulated samples (Positive: pure cell types; Negative: mixtures).
@@ -110,10 +113,28 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             minimum_n_base=minimum_n_base,
             neighbor_sampling_scheme=neighbor_sampling_scheme,
         )
+        max_cells_per_cell_type = validate_cell_cap(
+            max_cells_per_cell_type, sampling_method, neighbor_sampling_scheme, sep_by_patient)
 
         if self.generated_bulk_gep_fp.exists():
             logger.info(f'Previous result exists: {self.generated_bulk_gep_fp}')
             return
+        mode_path = Path(str(self.generated_bulk_gep_csv_fp) + ".sampling.json")
+        mode = {"max_cells_per_cell_type": max_cells_per_cell_type}
+        if mode_path.exists():
+            if json.loads(mode_path.read_text()) != mode:
+                raise ValueError("SCT sampling mode changed; use a new SCT dataset name.")
+        elif max_cells_per_cell_type == "all" and self.generated_bulk_gep_csv_fp.exists():
+            raise ValueError("Unmarked partial SCT output cannot resume in all-cell mode; use a new name.")
+        if max_cells_per_cell_type == "all" or mode_path.exists():
+            mode_path.write_text(json.dumps(mode))
+        self.all_cell_sampler = None
+        if sampling_method == "n_neighbors" and max_cells_per_cell_type == "all":
+            self.all_cell_sampler = AllCellNeighborSampler(
+                self.merged_sc_dataset.X, self.merged_sc_dataset_obs,
+                self.cell_type_col_name, self.subtype_col_name,
+                self.selected_subtypes_by_cell_type,
+            )
 
         # 1. Setup Configuration
         if test_set:
@@ -129,7 +150,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         self._prepare_gene_expression(ref_gene_list_file_path)
 
         # 4. Calculate cell distance dict if using n_neighbors sampling
-        if sampling_method == 'n_neighbors' and not self.cell_distance_dict:
+        if sampling_method == 'n_neighbors' and self.all_cell_sampler is None and not self.cell_distance_dict:
             use_compact_neighbors = (
                 neighbor_sampling_scheme == NeighborSamplingScheme.SINGLE_ANCHOR
                 and not sep_by_patient
@@ -294,17 +315,28 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             rows = self._add_auto_sampling_task_overrides(rows)
 
         # Sampling
-        selected_cell_ids = self._sc_sampling(
-            cell_frac=rows,
-            total_cell_number=total_cell_number,
-            obs_df=current_obs_df,
-            sep_by_patient=sep_by_patient,
-            minimum_n_base=min_n_base,
-            sc_dataset=sc_dataset_key,
-            cell_distance_dict=self.cell_distance_dict,
-            sampling_method_gep=sampling_method_gep,
-            neighbor_sampling_scheme=neighbor_sampling_scheme,
-        )
+        started = perf_counter()
+        all_cell_sampler = getattr(self, "all_cell_sampler", None)
+        if all_cell_sampler is not None and sampling_method_gep == "n_neighbors":
+            self.total_cell_number = total_cell_number
+            selected_cell_ids = self._prepare_sampling_tasks(rows)
+            results = all_cell_sampler.sample(selected_cell_ids, min_n_base)
+            selected_cell_ids["selected_cell_id"] = [";".join(ids) for ids in results]
+            selected_cell_ids.index.name = "sample_id"
+            selected_cell_ids.sort_values(["sample_id", "cell_type"], inplace=True)
+        else:
+            selected_cell_ids = self._sc_sampling(
+                cell_frac=rows,
+                total_cell_number=total_cell_number,
+                obs_df=current_obs_df,
+                sep_by_patient=sep_by_patient,
+                minimum_n_base=min_n_base,
+                sc_dataset=sc_dataset_key,
+                cell_distance_dict=self.cell_distance_dict,
+                sampling_method_gep=sampling_method_gep,
+                neighbor_sampling_scheme=neighbor_sampling_scheme,
+            )
+        sampled = perf_counter()
 
         # Aggregation
         simulated_gep = self._map_cell_id2exp(
@@ -314,9 +346,16 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             sc_dataset='merged_sc_dataset',
             gep_type='SCT'
         )
+        aggregated = perf_counter()
 
         # Save
         self._save_chunk_results(simulated_gep, selected_cell_ids)
+        if all_cell_sampler is not None:
+            logger.info(
+                "All-cell SCT chunk: sampling=%.3fs, aggregation=%.3fs, export=%.3fs; %s",
+                sampled - started, aggregated - sampled, perf_counter() - aggregated,
+                all_cell_sampler.stats,
+            )
 
     def _add_auto_sampling_task_overrides(self, rows: pd.DataFrame) -> pd.DataFrame:
         """Choose a parent or one subtype independently for each auto sample."""
