@@ -133,6 +133,12 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 
+When you use `pred_cell_prop_file_path` with segment sampling, SimuTME normalizes
+each row over the output cell types and caps each generated fraction at that
+cell type's global observed maximum. This requires GEP filtering. Segment
+sampling without this file and Dirichlet alpha estimation retain their
+existing behavior.
+
 `gene_filtering_reference_variance_threshold` accepts a finite, nonnegative
 number in TPM squared or `null` to disable selection (the code default).
 The example sets `1.0`. Genes must have population variance (`ddof=0`)
@@ -332,7 +338,8 @@ For SCT datasets:
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
-- `pred_cell_prop_file_path` (only when `sampling_method_prop: "dirichlet"`)
+- `pred_cell_prop_file_path` for Dirichlet alpha estimation, or for empirical
+  per-type caps when `sampling_method_prop: "segment"` and `gep_filtering: true`
 - `dirichlet_sampling_seed` (only when `sampling_method_prop: "dirichlet"`)
 
 For Mixed datasets:

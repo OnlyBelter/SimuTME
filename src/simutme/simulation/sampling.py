@@ -101,11 +101,100 @@ def estimate_dirichlet_alpha_from_pred_cell_props(
     return {cell_type: float(alpha_value) for cell_type, alpha_value in zip(cell_types, alpha_hat)}
 
 
+def estimate_cell_prop_maxima_from_pred_cell_props(
+    pred_cell_prop_file_path: str | Path,
+    cell_types: List[str],
+) -> tuple[Dict[str, float], dict]:
+    """Read, row-normalize, and summarize global per-type empirical maxima."""
+    path = Path(pred_cell_prop_file_path)
+    if not path.exists():
+        raise FileNotFoundError(f'pred_cell_prop_file_path does not exist: {path}')
+    if not cell_types or len(cell_types) != len(set(cell_types)):
+        raise ValueError("Segment fraction caps require unique output cell-type labels.")
+    frame = pd.read_csv(path)
+    missing = [cell_type for cell_type in cell_types if cell_type not in frame.columns]
+    if missing:
+        raise ValueError(
+            f'"pred_cell_prop_file_path" is missing required cell-type columns: {missing}. '
+            f"Expected columns for all segment output types: {cell_types}."
+        )
+    values = frame.loc[:, cell_types].apply(pd.to_numeric, errors="coerce")
+    array = values.to_numpy(dtype=np.float64)
+    if array.shape[0] == 0:
+        raise ValueError(f'"pred_cell_prop_file_path" has no sample rows: {path}')
+    if not np.isfinite(array).all():
+        raise ValueError(f'"pred_cell_prop_file_path" contains nonnumeric or non-finite cell proportions: {path}')
+    if (array < 0).any():
+        raise ValueError(f'"pred_cell_prop_file_path" contains negative cell proportions: {path}')
+    row_sums = array.sum(axis=1)
+    if not np.isfinite(row_sums).all() or (row_sums <= 0).any():
+        raise ValueError(f'"pred_cell_prop_file_path" contains rows with non-positive totals: {path}')
+    normalized = array / row_sums[:, None]
+    maxima = normalized.max(axis=0)
+    caps = {cell_type: float(value) for cell_type, value in zip(cell_types, maxima)}
+    metadata = {
+        "segment_fraction_cap_source": str(path.resolve()),
+        "segment_fraction_cap_source_n_rows": len(normalized),
+        "segment_fraction_cap_scope": "global-normalized-row-maximum",
+        "segment_fraction_cap_row_normalization": "divide-by-row-sum",
+        "segment_fraction_max_caps": caps,
+    }
+    return caps, metadata
+
+
+def merge_cell_prop_prior_with_maxima(cell_types, cell_prop_prior, maxima):
+    """Intersect optional segment prior ranges with empirical upper caps."""
+    cell_types = list(cell_types)
+    if not cell_types or len(cell_types) != len(set(cell_types)):
+        raise ValueError("Segment fraction caps require unique output cell-type labels.")
+    if set(maxima) != set(cell_types):
+        raise ValueError("Empirical segment caps must cover every output cell type exactly.")
+    if any(not np.isfinite(value) or value < 0 or value > 1 for value in maxima.values()):
+        raise ValueError("Empirical segment fraction maxima must be finite and in [0, 1].")
+    if sum(maxima.values()) < 1.0:
+        raise ValueError("Empirical segment fraction maxima sum to less than one; no valid composition exists.")
+
+    manual = {} if cell_prop_prior is None else cell_prop_prior
+    if not isinstance(manual, dict):
+        raise ValueError("cell_prop_prior must be a mapping when empirical caps are enabled.")
+    unknown = set(manual).difference(cell_types)
+    if unknown:
+        raise ValueError(
+            f"cell_prop_prior contains cell types absent from segment outputs: {sorted(unknown)}."
+        )
+    combined = {}
+    minimum_total = 0.0
+    maximum_total = 0.0
+    for cell_type in cell_types:
+        bounds = manual.get(cell_type, (0.0, 1.0))
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not np.isfinite(value) for value in bounds)):
+            raise ValueError(f'cell_prop_prior for "{cell_type}" must be a finite [minimum, maximum] pair.')
+        lower, upper = (float(value) for value in bounds)
+        if not 0 <= lower <= upper <= 1:
+            raise ValueError(f'cell_prop_prior for "{cell_type}" must satisfy 0 <= minimum <= maximum <= 1.')
+        upper = min(upper, maxima[cell_type])
+        if lower > upper:
+            raise ValueError(
+                f'cell_prop_prior minimum for "{cell_type}" exceeds its empirical maximum cap.'
+            )
+        combined[cell_type] = (lower, upper)
+        minimum_total += lower
+        maximum_total += upper
+    if minimum_total > 1.0:
+        raise ValueError("Combined segment fraction prior minima sum to more than one.")
+    if maximum_total < 1.0:
+        raise ValueError("Combined segment fraction prior maxima sum to less than one.")
+    return combined
+
+
 def segment_sampling(n_samples: int,
                      cell_types: List[str],
                      max_value: int = 10000,
                      sample_prefix: str = 'seg',
-                     cell_prop_prior: Optional[Dict[str, tuple]] = None) -> pd.DataFrame:
+                     cell_prop_prior: Optional[Dict[str, tuple]] = None,
+                     max_attempts: Optional[int] = None) -> pd.DataFrame:
     """
     Generate cell fractions using an iterative 'remainder' approach.
     This creates a distribution where some cell types have large proportions
@@ -121,9 +210,17 @@ def segment_sampling(n_samples: int,
     """
     n_cell_types = len(cell_types)
     valid_samples = []
+    attempts = 0
 
     # We use a loop because of the rejection sampling (cell_prop_prior)
     while len(valid_samples) < n_samples:
+        attempts += 1
+        if max_attempts is not None and attempts > max_attempts:
+            raise RuntimeError(
+                f"Segment fraction cap sampling accepted {len(valid_samples)}/{n_samples} "
+                f"proposals after {max_attempts} attempts. Check the predicted maxima "
+                "and any cell_prop_prior constraints."
+            )
         # 1. Generate fragments using iterative subtraction
         # This logic mimics the original: pick a random chunk of the *current remainder*
         frag_for_one_sample = []
@@ -165,7 +262,14 @@ def segment_sampling(n_samples: int,
 
     index = [f"{sample_prefix}_{i + 1}" for i in range(n_samples)]
     df = pd.DataFrame(valid_samples, index=index, columns=cell_types)
-    return df.round(4)
+    df = df.round(4)
+    df.attrs["segment_sampling_stats"] = {
+        "requested": n_samples,
+        "attempted": attempts,
+        "accepted": len(valid_samples),
+        "rejected": attempts - len(valid_samples),
+    }
+    return df
 
 
 def seg_random_sampling(n_samples: int,
@@ -354,7 +458,8 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
                            sample_prefix: str = 'sample',
                            cell_prop_prior: Optional[Dict] = None,
                            dirichlet_alpha: Optional[Union[float, Dict[str, float]]] = None,
-                           rng: Optional[np.random.Generator] = None) -> pd.DataFrame:
+                           rng: Optional[np.random.Generator] = None,
+                           max_segment_sampling_attempts: Optional[int] = None) -> pd.DataFrame:
     """
     Generate cell proportions for simulated bulk GEPs using various sampling strategies.
 
@@ -428,7 +533,8 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
                                   max_value=10000,
                                   sample_prefix=current_prefix,
                                   cell_types=cell_type_with_subtype,
-                                  cell_prop_prior=cell_prop_prior)
+                                  cell_prop_prior=cell_prop_prior,
+                                  max_attempts=max_segment_sampling_attempts)
 
         elif method == 'seg_random':
             df = seg_random_sampling(n_samples=n_count,
@@ -460,6 +566,10 @@ def generate_cell_fraction(sampling_method: Union[str, List[str]],
         return pd.DataFrame(columns=cell_type_with_subtype)
 
     final_df = pd.concat(generated_dfs)
+    if len(methods_to_use) == 1 and methods_to_use[0] == "segment":
+        final_df.attrs["segment_sampling_stats"] = generated_dfs[0].attrs.get(
+            "segment_sampling_stats", {}
+        )
 
     # Ensure the order matches the requested n_cell_frac (though concat usually preserves order)
     return final_df

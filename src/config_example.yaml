@@ -167,6 +167,9 @@ datasets:
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     cell_prop_prior: null
+    # Optional with sampling_method_prop: "segment" and gep_filtering: true:
+    # cap each output cell type at its global maximum in this prediction CSV.
+    # pred_cell_prop_file_path: "path/to/predicted_cell_proportions.csv"
     gep_filtering_method: "median_gep"  # Optional Mixed override for GEP-level filtering
     filtering_in_pca_space: true  # Optional legacy Mixed override kept for GEP-level PCA-space filtering
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
@@ -197,7 +200,7 @@ datasets:
       Neutrophils: 1.0
       Double-neg-like T: 1.0
       Monocytes: 1.0
-    pred_cell_prop_file_path: null  # Mixed + dirichlet only: optional CSV of predicted cell proportions; when provided, estimate dirichlet_alpha from this file and override the manual dictionary
+    pred_cell_prop_file_path: null  # Dirichlet: estimate alpha; filtered segment: cap each output fraction at the file's global observed maximum
     gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering

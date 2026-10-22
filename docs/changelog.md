@@ -18,6 +18,17 @@ preserve existing behavior.
 - Export one complete signed PC1/PC2 gene-loading table sorted by PC1
   beside joint PCA plots, including reused PCA models.
 
+### Segment sampling caps from predicted proportions
+
+When GEP filtering is enabled, segment sampling can use
+`pred_cell_prop_file_path` to cap each output cell type at its global maximum
+predicted fraction.
+
+- Normalize prediction rows before deriving maxima.
+- Combine empirical caps with any configured `cell_prop_prior`.
+- Record cap provenance and bound rejection-sampling attempts.
+- Preserve the existing Dirichlet alpha behavior.
+
 ## October 21, 2026
 
 ### All-cell SCT neighbor sampling

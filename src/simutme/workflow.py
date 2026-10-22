@@ -17,8 +17,11 @@ from .utility import check_dir, non_log2cpm, log2_transform, get_gene_list_filte
 from .simulation import BulkGEPGenerator, SingleCellTypeGEPGenerator, GEPGenerationConfig
 from .simulation.all_cell_neighbors import validate_cell_cap
 from .simulation.sampling import (
+    estimate_cell_prop_maxima_from_pred_cell_props,
     estimate_dirichlet_alpha_from_pred_cell_props,
+    flatten_cell_type2subtype,
     get_default_dirichlet_alpha,
+    merge_cell_prop_prior_with_maxima,
     restrict_cell_type2subtype_to_output_types,
 )
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
@@ -1076,7 +1079,6 @@ def run_bulk_simulation(dataset_name: str,
     dataset_type = params.get('dataset_type', 'mixed').lower()
     dirichlet_only_keys = {
         "dirichlet_alpha",
-        "pred_cell_prop_file_path",
         "dirichlet_sampling_seed",
     }
     if dataset_type != 'sct':
@@ -1116,7 +1118,7 @@ def run_bulk_simulation(dataset_name: str,
                 '"sct_reference" is only supported for Mixed datasets.'
             )
         invalid_keys = [
-            key for key in dirichlet_only_keys
+            key for key in dirichlet_only_keys | {"pred_cell_prop_file_path"}
             if params.get(key, None) not in (None, "")
         ]
         if invalid_keys:
@@ -1273,19 +1275,54 @@ def run_bulk_simulation(dataset_name: str,
                     f'Mixed dataset "{dataset_name}" must set "gene_filtering: false" when '
                     "calculating a reusable gene/cell-fraction correlation file."
                 )
+        resolved_cell_prop_prior = params.get('cell_prop_prior', None)
+        pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
+        segment_fraction_max_caps = None
+        segment_fraction_cap_metadata = None
         if sampling_method_prop != 'dirichlet':
             invalid_keys = [
                 key for key in dirichlet_only_keys
                 if params.get(key, None) not in (None, "")
             ]
+            if sampling_method_prop != "segment" and pred_cell_prop_file_path not in (None, ""):
+                invalid_keys.append("pred_cell_prop_file_path")
             if invalid_keys:
                 raise ValueError(
                     f'{invalid_keys} are only supported when "sampling_method_prop" is "dirichlet" '
                     f'for Mixed dataset "{dataset_name}".'
                 )
             resolved_dirichlet_alpha = None
-            pred_cell_prop_file_path = None
             dirichlet_sampling_seed = None
+            if sampling_method_prop == "segment" and pred_cell_prop_file_path not in (None, ""):
+                if not resolved_gep_filtering.enabled:
+                    raise ValueError(
+                        f'Mixed dataset "{dataset_name}" can use '
+                        '"pred_cell_prop_file_path" with segment sampling only when '
+                        '"gep_filtering: true".'
+                    )
+                output_type_mapping = restrict_cell_type2subtype_to_output_types(
+                    resolved_cell_type2subtypes,
+                    config.output_types,
+                )
+                segment_cell_types = flatten_cell_type2subtype(output_type_mapping)
+                segment_fraction_max_caps, segment_fraction_cap_metadata = (
+                    estimate_cell_prop_maxima_from_pred_cell_props(
+                        pred_cell_prop_file_path,
+                        segment_cell_types,
+                    )
+                )
+                segment_fraction_cap_metadata["segment_fraction_cap_hash"] = identity_hash(
+                    segment_fraction_max_caps
+                )
+                resolved_cell_prop_prior = merge_cell_prop_prior_with_maxima(
+                    segment_cell_types,
+                    resolved_cell_prop_prior,
+                    segment_fraction_max_caps,
+                )
+                logging.info(
+                    'Segment fraction caps from %s: %s',
+                    pred_cell_prop_file_path, segment_fraction_max_caps,
+                )
         else:
             output_cell_type2subtypes = restrict_cell_type2subtype_to_output_types(
                 resolved_cell_type2subtypes,
@@ -1295,7 +1332,6 @@ def run_bulk_simulation(dataset_name: str,
                 'dirichlet_alpha',
                 get_default_dirichlet_alpha(output_cell_type2subtypes),
             )
-            pred_cell_prop_file_path = params.get('pred_cell_prop_file_path', None)
             dirichlet_sampling_seed = _resolve_dataset_override(
                 params,
                 config,
@@ -1370,10 +1406,12 @@ def run_bulk_simulation(dataset_name: str,
                 n_top=resolved_gep_filtering.n_top,
                 show_filtering_info=resolved_gep_filtering.show_filtering_info,
                 filtering_method=resolved_gep_filtering.filtering_method,
-                cell_prop_prior=params.get('cell_prop_prior', None),
+                cell_prop_prior=resolved_cell_prop_prior,
                 dirichlet_alpha=resolved_dirichlet_alpha,
                 pred_cell_prop_file_path=pred_cell_prop_file_path,
                 dirichlet_sampling_seed=dirichlet_sampling_seed,
+                segment_fraction_max_caps=segment_fraction_max_caps,
+                segment_fraction_cap_metadata=segment_fraction_cap_metadata,
                 high_corr_gene_list=resolved_gep_filtering.high_corr_gene_list,
                 filtering_by_gene_range=resolved_gep_filtering.filtering_by_gene_range,
                 min_percentage_within_gene_range=resolved_gep_filtering.min_percentage_within_gene_range,
@@ -2128,6 +2166,10 @@ def _build_mixed_dataset_summary(
     }
     if filtering_space is not None:
         summary.update(getattr(filtering_space, "reference_variance_metadata", {}))
+        generation_identity = filtering_space.identity.get("generation", {})
+        segment_cap_metadata = generation_identity.get("segment_fraction_cap_metadata")
+        if segment_cap_metadata:
+            summary["segment_fraction_cap_metadata"] = segment_cap_metadata
         summary.update({
             "filtering_workflow_version": filtering_space.workflow_version,
             "normalization_version": NORMALIZATION_VERSION,

@@ -87,6 +87,8 @@ class GEPGenerationConfig:
     dirichlet_alpha: Optional[Dict[str, float]] = None
     pred_cell_prop_file_path: Optional[Union[str, Path]] = None
     dirichlet_sampling_seed: Optional[int] = None
+    segment_fraction_max_caps: Optional[Dict[str, float]] = None
+    segment_fraction_cap_metadata: Optional[Dict[str, Any]] = None
     filtering_space: Optional[FixedGeneFilter] = None
 
     def __post_init__(self):
@@ -120,8 +122,26 @@ class GEPGenerationConfig:
                 raise FileNotFoundError(
                     f'"pred_cell_prop_file_path" does not exist: {self.pred_cell_prop_file_path}'
                 )
+            if self.sampling_method_prop == "segment":
+                if not self.filtering:
+                    raise ValueError(
+                        "Segment caps from pred_cell_prop_file_path require GEP filtering."
+                    )
+                if not self.segment_fraction_max_caps or not self.segment_fraction_cap_metadata:
+                    raise ValueError(
+                        "Segment prediction-file caps were not resolved before GEP generation."
+                    )
+            elif self.sampling_method_prop != "dirichlet":
+                raise ValueError(
+                    "pred_cell_prop_file_path supports Dirichlet alpha estimation or "
+                    "GEP-filtered segment maximum caps only."
+                )
         else:
             self.pred_cell_prop_file_path = None
+            if self.segment_fraction_max_caps or self.segment_fraction_cap_metadata:
+                raise ValueError("Segment fraction caps require pred_cell_prop_file_path.")
+        if self.segment_fraction_max_caps and self.sampling_method_prop != "segment":
+            raise ValueError("Empirical maximum caps are supported only with segment sampling.")
 
 
 class BulkGEPGenerator:
@@ -447,6 +467,12 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 cell_types=cell_type_with_subtype,
             )
             logger.info('Estimated Dirichlet alpha for %d cell types.', len(dirichlet_alpha))
+        if config.segment_fraction_max_caps:
+            logger.info(
+                "Segment empirical maximum caps from %s: %s",
+                config.segment_fraction_cap_metadata["segment_fraction_cap_source"],
+                config.segment_fraction_max_caps,
+            )
 
         dirichlet_rng = None
         if (
@@ -474,8 +500,21 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     cell_type2subtype=self.cell_fraction_type2subtype,
                     dirichlet_alpha=dirichlet_alpha,
                     rng=dirichlet_rng,
+                    max_segment_sampling_attempts=(
+                        max(10000, candidate_batch_size * 500)
+                        if config.segment_fraction_max_caps else None
+                    ),
                 )
                 fractions_finished = perf_counter()
+                fraction_stats = generated_cell_frac.attrs.get("segment_sampling_stats")
+                if config.segment_fraction_max_caps and fraction_stats:
+                    logger.info(
+                        "Segment fraction cap proposals: requested=%d, attempted=%d, "
+                        "rejected=%d, acceptance=%.3g%%.",
+                        fraction_stats["requested"], fraction_stats["attempted"],
+                        fraction_stats["rejected"],
+                        100 * fraction_stats["accepted"] / fraction_stats["attempted"],
+                    )
 
                 # 2. Sample Cells
                 selected_cell_ids = self._sc_sampling(

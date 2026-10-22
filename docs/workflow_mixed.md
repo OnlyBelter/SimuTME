@@ -95,7 +95,8 @@ timings.
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
-- `pred_cell_prop_file_path` for `sampling_method_prop: "dirichlet"`
+- `pred_cell_prop_file_path` for Dirichlet alpha estimation or filtered segment
+  maximum caps
 - `dirichlet_sampling_seed` for `sampling_method_prop: "dirichlet"`
 
 The old Mixed-dataset key `filtering` is no longer supported. Use
@@ -200,6 +201,9 @@ Supported values for `sampling_method_prop`:
 - `dirichlet`: draws a composition from a Dirichlet distribution; the
   `dirichlet_alpha` vector controls each cell type's expected abundance and the
   overall concentration of compositions.
+- `segment` with GEP filtering and `pred_cell_prop_file_path`: rejects segment
+  compositions that exceed any output cell type's global maximum in the
+  normalized prediction table.
 - `mixed` (a composite mode that distributes samples across all five methods above)
 
 These control how cell-type proportions are generated before composing the mixed
@@ -218,6 +222,23 @@ For `sampling_method_prop: "dirichlet"`, the workflow also supports:
   An optional seed for reproducible Dirichlet cell-fraction draws. A dataset
   value overrides `parameters.dirichlet_sampling_seed`; the seed does not
   control other stochastic steps in Mixed generation.
+
+For `sampling_method_prop: "segment"`, you can instead provide
+`pred_cell_prop_file_path` when `gep_filtering: true`. SimuTME requires a
+numeric, nonnegative column for every output cell type, normalizes each row to
+sum to one, and uses the maximum normalized value in each column as that
+cell type's cap. Extra metadata columns are ignored. If `cell_prop_prior` is
+also set, SimuTME intersects its ranges with these caps. Incompatible or
+infeasible bounds fail before candidate expression generation.
+
+These caps constrain marginal maxima across the complete file; they do not
+condition on its `cancer_type` column or reproduce the joint distribution of
+observed cell fractions. Segment proposals are rejection-sampled before
+expression aggregation, and capped runs log proposal acceptance. If proposal
+acceptance is too low, fraction generation stops at a bounded attempt count
+with an error rather than looping indefinitely. The DeSide file contains
+predicted proportions, so these maxima define a sampling constraint rather
+than biological ground truth.
 
 ## Main Outputs
 
