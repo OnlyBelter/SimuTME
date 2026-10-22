@@ -25,7 +25,7 @@ from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
 from .simulation.filtering import (
     FixedGeneFilter, NORMALIZATION_VERSION, identity_hash,
-    normalize_selected, select_fixed_genes, validate_metadata, write_metadata,
+    normalize_selected, select_fixed_genes, reference_variance_mask, validate_metadata, write_metadata,
 )
 from .simulation.local_filtering import (
     LOCAL_FILTER_METHODS, LocalTCGAFilter, split_tcga_reference, validate_local_parameters,
@@ -366,6 +366,7 @@ class SimuConfig:
     gene_filtering_quantile_range: List[float] | None = None
     gene_filtering_q_col_name: List[str] | None = None
     gene_filtering_corr_threshold: float = 0.3
+    gene_filtering_reference_variance_threshold: float | None = None
     gene_filtering_n_gene_max: int = 1000
     gene_filtering_save_filtered_h5ad: bool = True
     gene_filtering_filtered_dataset_postfix: str | None = None
@@ -546,6 +547,7 @@ class ResolvedGeneFilteringParams:
     pca_n_components: int
     pca_figsize: Tuple[float, float]
     correlation_reference_dataset: str | None = None
+    reference_variance_threshold: float | None = None
 
 
 def _resolve_optional_path_value(value: Any) -> str | None:
@@ -908,6 +910,14 @@ def _resolve_gene_filtering_params(
     if plot_pca is None:
         plot_pca = getattr(config, "gene_filtering_plot_pca", True)
 
+    variance_threshold = _resolve_dataset_override(
+        params, config, "gene_filtering_reference_variance_threshold", None)
+    if variance_threshold is not None:
+        if (isinstance(variance_threshold, bool)
+                or not isinstance(variance_threshold, (int, float))
+                or not np.isfinite(variance_threshold) or variance_threshold < 0):
+            raise ValueError("gene_filtering_reference_variance_threshold must be finite and >= 0, or null.")
+        variance_threshold = float(variance_threshold)
     resolved = ResolvedGeneFilteringParams(
         enabled=enabled,
         reference_file=_resolve_optional_path_value(
@@ -937,6 +947,7 @@ def _resolve_gene_filtering_params(
             for v in _resolve_dataset_override(params, config, "gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
         ),
         correlation_reference_dataset=correlation_reference_dataset or None,
+        reference_variance_threshold=variance_threshold,
     )
     if len(resolved.pca_figsize) != 2:
         raise ValueError('"gene_filtering_pca_figsize" must contain exactly two values.')
@@ -1640,6 +1651,28 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
             raise ValueError(f'No reference samples match filtering_ref_types for "{dataset_name}".')
     if reference.empty:
         raise ValueError("Filtering reference has no samples.")
+    variance_metadata = {}
+    variance_table = None
+    threshold = gene.reference_variance_threshold
+    eligible_reference_genes = reference.columns.tolist()
+    if threshold is not None:
+        variance_reference = (
+            reference.loc[split.index[split.role == "fitting"]] if local_mode else reference
+        )
+        variances, keep = reference_variance_mask(variance_reference, threshold)
+        eligible_reference_genes = variances.index[keep].tolist()
+        variance_metadata = {
+            "reference_variance_threshold": threshold,
+            "reference_variance_space": "linear-TPM",
+            "reference_variance_ddof": 0,
+            "reference_variance_scope": "fitting-only" if local_mode else "reference",
+            "reference_variance_n_samples": len(variance_reference),
+            "reference_variance_input_n_genes": len(variances),
+            "reference_variance_removed_n_genes": int((~keep).sum()),
+        }
+        variance_table = pd.DataFrame({"variance_TPM2": variances, "variance_pass": keep})
+        logging.info("Reference variance > %.3g TPM^2: kept %d/%d genes (%s).",
+                     threshold, int(keep.sum()), len(keep), variance_metadata["reference_variance_scope"])
     sct_reader = ReadH5AD(sct_file, backed="r")
     try:
         sct_genes = sct_reader.get_h5ad().var_names.tolist()
@@ -1666,14 +1699,26 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
             )
         correlations = pd.read_csv(correlation_file, index_col=0)
     genes, shared_count = select_fixed_genes(
-        sct_genes, reference.columns.tolist(), cell_types, supplied_genes=supplied_genes,
+        sct_genes, eligible_reference_genes, cell_types, supplied_genes=supplied_genes,
         correlations=correlations, corr_threshold=gene.corr_threshold, n_gene_max=gene.n_gene_max,
     )
     filter_type = LocalTCGAFilter if local_mode else FixedGeneFilter
-    return filter_type(
+    space = filter_type(
         genes, reference, reference_file, reference_subset, gep, result_dir,
         len(sct_genes), shared_count, correlation_file=correlation_file, **local_kwargs,
     )
+    space.reference_variance_metadata = variance_metadata
+    if variance_metadata:
+        space.pca_identity.update(variance_metadata)
+        space.identity.update(variance_metadata)
+        if local_mode:
+            space.calibration_identity.update(variance_metadata)
+        # Validate compatibility before writing any auxiliary audit output.
+        space.validate_model()
+        variance_table["selected_in_G"] = variance_table.index.isin(genes)
+        variance_table.index.name = "gene_name"
+        space.reference_variance_table = variance_table
+    return space
 
 
 def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, filtering_space):
@@ -1742,9 +1787,11 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
             if_plot_pca=True, normalized_log_inputs=True,
         )
         write_metadata(comparison_metadata, comparison_identity)
+        loading_paths = _export_pca_gene_loadings(load(model), filtering_space.genes, model)
         outputs.update(
             pca_model_file=str(model), pca_data_file=str(coordinates),
             pca_plot_file=str(result_dir / f"{dataset_name}_PCA_with_TCGA_{postfix}_PC0_PC1.png"),
+            **loading_paths,
         )
         if isinstance(filtering_space, LocalTCGAFilter):
             from .simulation.filtering_diagnostics import plot_local_filter_diagnostics
@@ -2077,8 +2124,10 @@ def _build_mixed_dataset_summary(
         "pca_model_file": postprocess_outputs.get("pca_model_file"),
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
+        "pca_gene_loadings_PC1_file": postprocess_outputs.get("pca_gene_loadings_PC1_file"),
     }
     if filtering_space is not None:
+        summary.update(getattr(filtering_space, "reference_variance_metadata", {}))
         summary.update({
             "filtering_workflow_version": filtering_space.workflow_version,
             "normalization_version": NORMALIZATION_VERSION,
@@ -2281,6 +2330,24 @@ def get_gene_list_for_filtering(bulk_exp_file: str | Path, tcga_file: str | Path
     return gene_list
 
 
+def _export_pca_gene_loadings(model, genes, model_path):
+    """Export one signed PC1/PC2 loading table in descending PC1 order."""
+    components = np.asarray(model.components_)
+    if components.shape[0] < 2 or components.shape[1] != len(genes):
+        raise ValueError("PCA loading shape does not match PC1/PC2 and ordered genes.")
+    if not np.isfinite(components[:2]).all():
+        raise ValueError("PCA loadings contain non-finite values.")
+    table = pd.DataFrame({
+        "gene_name": genes, "PC1_loading": components[0], "PC2_loading": components[1],
+    })
+    model_path = Path(model_path)
+    path = model_path.with_name(f"{model_path.stem}_gene_loadings_sorted_PC1.csv")
+    table.sort_values(
+        ["PC1_loading", "gene_name"], ascending=[False, True], kind="stable",
+    ).to_csv(path, index=False, float_format="%.17g")
+    return {"pca_gene_loadings_PC1_file": str(path)}
+
+
 def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.DataFrame, gene_list: list,
                                         result_dir: str, simu_dataset_name: str,
                                         n_components=5, pca_model_name_postfix='', bulk_exp_type='log_space',
@@ -2360,6 +2427,8 @@ def filtering_by_gene_list_and_pca_plot(bulk_exp: pd.DataFrame, tcga_exp: pd.Dat
             pca_df = pd.read_csv(pca_data_file_path, index_col=0)
             pca_model = load(pca_model_file_path)
 
+        if pca_model_file_path is not None:
+            _export_pca_gene_loadings(pca_model, gene_list, pca_model_file_path)
         # plot
         title = f'{simu_dataset_name}_PCA_with_TCGA_{pca_model_name_postfix}'
         color_code = np.array([simu_dataset_name] * bulk_exp.shape[0] + ['TCGA'] * tcga_exp.shape[0])

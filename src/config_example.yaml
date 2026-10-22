@@ -107,6 +107,7 @@ parameters:
   calculate_gene_cell_prop_correlation: false  # Optional switch for saving a full, unfiltered Mixed gene/cell-fraction correlation matrix
   gene_filtering_correlation_reference_dataset: null  # Required earlier unfiltered segment source when gene filtering has no supplied gene list
   gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
+  gene_filtering_reference_variance_threshold: 1.0  # Retain reference genes with population variance > 1 TPM^2 before fixed-G selection; local KNN uses fitting samples only. Renormalize on final G. null disables; unfiltered correlation sources are unchanged.
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
   gene_filtering_save_filtered_h5ad: true  # Optional additional named export; the primary Mixed `.h5ad` already contains only G
   gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming

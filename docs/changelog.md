@@ -4,6 +4,20 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 22, 2026
+
+### Reference variance selection and PCA loadings
+
+Mixed filtering supports a linear-TPM population-variance threshold before
+fixed-gene selection. The example uses 1.0 TPM squared; omitted settings
+preserve existing behavior.
+
+- Use fitting TCGA rows only for variance selection in local KNN methods.
+- Renormalize reference and candidates on the final gene set.
+- Record variance-selection metadata and per-gene audit values.
+- Export one complete signed PC1/PC2 gene-loading table sorted by PC1
+  beside joint PCA plots, including reused PCA models.
+
 ## October 21, 2026
 
 ### All-cell SCT neighbor sampling

@@ -89,6 +89,7 @@ timings.
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
+- `gene_filtering_reference_variance_threshold`
 - `gene_filtering_n_gene_max`
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
@@ -270,6 +271,25 @@ reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`;
 `knn` and `knn_residual` add held-out calibration for local TCGA proximity.
 PCA fit and transform both use `log2(TPM + 1)` normalized over G.
 
+Set `gene_filtering_reference_variance_threshold: 1.0` to retain only reference
+genes with population variance strictly greater than 1 TPM squared
+(`ddof=0`, calculated in linear expression before subsetting or
+renormalization). This criterion applies before correlation-based or supplied
+gene-list selection and cannot be bypassed by a supplied gene list. For `knn`
+and `knn_residual`, only fitting TCGA samples determine variance; held-out
+samples are excluded. Other methods use the selected reference cohort.
+
+The example YAML uses 1.0; the code default is `null` (disabled) for existing
+configurations. Dataset-level values override the global setting. Zero removes
+constant genes only. Negative or non-finite thresholds are invalid. The
+criterion runs when either gene or GEP filtering is enabled; fully unfiltered
+datasets, including reusable correlation sources, retain their gene universe.
+
+After selection, both reference and simulated profiles are subset to final G
+and renormalized to 1,000,000 before the log transform. The input reference CSV
+is not modified. Changing the threshold requires a fresh target name/output
+location because existing PCA and calibration caches are incompatible.
+
 `plot_pca_for_comparison` independently enables a diagnostic joint PCA on
 the same normalized gene space. Its component count is separate from the
 reference-only GEP-filtering PCA target.
@@ -284,6 +304,9 @@ Typical files include:
 - `filtering_metadata.json` for output and intermediate compatibility
 - `gep_filtering_pca.joblib` and `gep_filtering_pca.metadata.json`
 - `comparison_pca_<n_components>.joblib`, `.csv`, and `.metadata.json`
+- `reference_gene_variance.csv` when variance selection is enabled, including
+  `variance_TPM2`, `variance_pass`, and `selected_in_G` for each reference gene
+- `comparison_pca_<n_components>_gene_loadings_sorted_PC1.csv`
 - `<dataset_name>_PCA_with_TCGA_correlation-first-v1_PC0_PC1.png`
 - `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
 - `mixed_dataset_summary.json`
@@ -293,6 +316,14 @@ shared, and exported gene counts, and acceptance totals. It records
 `gep_pca_n_components` as the configured target and `gep_filtering_n_pcs`
 as the actual fitted count, not a second configuration setting. Both PCA
 fields are null when GEP filtering does not use PCA space.
+
+The single loading table includes all final genes with signed `PC1_loading`
+and `PC2_loading`. It is sorted descending by `PC1_loading`, with
+gene names breaking ties; sorting is by signed value, not absolute magnitude.
+It describes the joint comparison PCA, not the TCGA-only acceptance model,
+and is saved beside the comparison plot for fresh and reused models.
+The summary records its path and the variance threshold, scope, input gene
+count, removed gene count, and number of reference samples used for selection.
 
 For correlation-based gene selection, `calculate_gene_cell_prop_correlation`
 creates `full_gene_corr_with_cell_fraction.csv` without applying a threshold
@@ -393,6 +424,7 @@ Global filtering defaults live under `parameters`:
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
+- `gene_filtering_reference_variance_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`

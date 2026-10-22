@@ -125,12 +125,23 @@ Dataset-level Mixed fields can override them.
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
 - `gene_filtering_corr_threshold`
+- `gene_filtering_reference_variance_threshold`
 - `gene_filtering_n_gene_max`
 - `gene_filtering_save_filtered_h5ad`
 - `gene_filtering_filtered_dataset_postfix`
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+
+`gene_filtering_reference_variance_threshold` accepts a finite, nonnegative
+number in TPM squared or `null` to disable selection (the code default).
+The example sets `1.0`. Genes must have population variance (`ddof=0`)
+strictly above the threshold in linear reference expression before subsetting.
+Local KNN methods use fitting samples only. This criterion applies when
+either gene or GEP filtering is enabled, before correlation/supplied-list
+selection, and both reference and simulated profiles are renormalized on the
+final genes to 1,000,000. Dataset overrides take precedence, including `null`.
+Unfiltered correlation sources remain unchanged.
 
 `plot_pca_for_comparison` is independent of `gene_filtering`: when enabled
 without gene filtering, the PCA comparison uses all genes shared by the Mixed

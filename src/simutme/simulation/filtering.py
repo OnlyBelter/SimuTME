@@ -48,6 +48,22 @@ def normalize_selected(expression, genes, label="Expression"):
     return selected.div(totals, axis=0) * 1e6
 
 
+def reference_variance_mask(reference, threshold):
+    """Select on linear-reference population variance before gene subsetting."""
+    if (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
+            or not np.isfinite(threshold) or threshold < 0):
+        raise ValueError("gene_filtering_reference_variance_threshold must be finite and >= 0.")
+    values = reference.to_numpy(dtype=np.float64)
+    if len(reference) < 2:
+        raise ValueError("Reference variance selection requires at least two fitting samples.")
+    if not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError("Variance reference contains negative or non-finite linear expression.")
+    variance = reference.astype(np.float64).var(axis=0, ddof=0)
+    if not np.isfinite(variance.to_numpy()).all():
+        raise ValueError("Reference variance contains non-finite values.")
+    return variance, variance > threshold
+
+
 def select_fixed_genes(sct_genes, reference_genes, cell_types, supplied_genes=None,
                        correlations=None, corr_threshold=0.3, n_gene_max=1000):
     validate_gene_labels(sct_genes, "Target SCT gene list")
@@ -190,6 +206,10 @@ class FixedGeneFilter:
                 )
         else:
             pd.DataFrame({"gene_name": self.genes}).to_csv(self.gene_list_file, index=False)
+        variance_table = getattr(self, "reference_variance_table", None)
+        if variance_table is not None:
+            variance_table.to_csv(
+                self.result_dir / "reference_gene_variance.csv", float_format="%.17g")
         logger.info("Filtering genes: %d selected, %d shared, %d before selection.",
                     len(self.genes), self.shared_n_genes, self.generation_n_genes)
 
