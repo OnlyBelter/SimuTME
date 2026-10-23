@@ -400,3 +400,84 @@ def test_missing_source_matrix_fails_before_first_batch(workflow_case):
     with pytest.raises(ValueError, match="calculate_gene_cell_prop_correlation"):
         workflow.run_bulk_simulation("target", params, config)
     assert batches == []
+
+
+def test_mgep_filters_linear_tpm_by_reference_l1_quantile(tmp_path, monkeypatch):
+    space = make_space(
+        tmp_path,
+        filtering_method="mgep",
+        filtering_in_pca_space=False,
+        gep_filtering_quantile=(0.0, 0.5),
+    )
+    reference = space.reference_linear.to_numpy()
+    expected_center = np.median(reference, axis=0)
+    expected_reference_distances = np.linalg.norm(
+        reference - expected_center, ord=1, axis=1
+    )
+    expected_cutoff = np.quantile(expected_reference_distances, 0.5)
+    captured_norm_inputs = []
+    original_norm = np.linalg.norm
+
+    def capture_norm(values, ord=None, axis=None):
+        captured_norm_inputs.append((np.asarray(values).copy(), ord))
+        return original_norm(values, ord=ord, axis=axis)
+
+    monkeypatch.setattr(filtering.np.linalg, "norm", capture_norm)
+    simulated = pd.DataFrame(
+        {"a": [2.0, 6.0, 1.0, 9.0], "b": [8.0, 4.0, 9.0, 1.0]},
+        index=["boundary_low", "boundary_high", "outside_low", "outside_high"],
+    )
+
+    result = space.filter(simulated)
+
+    assert result.index.tolist() == ["boundary_low", "boundary_high"]
+    np.testing.assert_allclose(space.mgep_center, expected_center)
+    assert space.mgep_cutoff == expected_cutoff
+    assert [ord_value for _, ord_value in captured_norm_inputs] == [1]
+    np.testing.assert_allclose(
+        captured_norm_inputs[0][0],
+        normalize_selected(simulated, space.genes).to_numpy() - expected_center,
+    )
+    assert space.stats()["mgep_distance_input_n_samples"] == 4
+    assert space.stats()["mgep_distance_kept_n_samples"] == 2
+    assert not space.model_path.exists()
+
+
+def test_mgep_requires_pca_space_filtering_to_be_disabled(tmp_path):
+    with pytest.raises(ValueError, match='mgep.*filtering_in_pca_space: false'):
+        make_space(tmp_path, filtering_method="mgep")
+
+
+def test_mgep_rejects_a_nonzero_lower_distance_quantile(tmp_path):
+    with pytest.raises(ValueError, match="uses only the upper quantile"):
+        make_space(
+            tmp_path,
+            filtering_method="mgep",
+            filtering_in_pca_space=False,
+            gep_filtering_quantile=(0.1, 0.95),
+        )
+
+
+def test_workflow_mgep_uses_linear_filter_and_distinct_output_tag(workflow_case):
+    config, params, _, _ = workflow_case
+    params.update(
+        gep_filtering=True,
+        gep_filtering_method="mgep",
+        filtering_in_pca_space=False,
+    )
+
+    output = workflow.run_bulk_simulation("target", params, config)
+    summary = read_summary(output)
+
+    assert "_mgep" in output
+    assert summary["gep_filtering_method"] == "mgep"
+    assert summary["gep_filtering_n_pcs"] is None
+    first_input = summary["mgep_distance_input_n_samples"]
+    first_kept = summary["mgep_distance_kept_n_samples"]
+    assert first_input > 0 and first_kept > 0
+
+    Path(output).unlink()
+    assert workflow.run_bulk_simulation("target", params, config) == output
+    resumed_summary = read_summary(output)
+    assert resumed_summary["mgep_distance_input_n_samples"] == first_input
+    assert resumed_summary["mgep_distance_kept_n_samples"] == first_kept

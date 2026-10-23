@@ -23,6 +23,7 @@ from ..utility import get_available_threads, non_log2cpm, log2_transform, get_ce
 from .sampling import (
     estimate_dirichlet_alpha_from_pred_cell_props,
     flatten_cell_type2subtype,
+    format_segment_fraction_caps,
     generate_cell_fraction,
     restrict_cell_type2subtype_to_output_types,
 )
@@ -471,7 +472,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             logger.info(
                 "Segment empirical maximum caps from %s: %s",
                 config.segment_fraction_cap_metadata["segment_fraction_cap_source"],
-                config.segment_fraction_max_caps,
+                format_segment_fraction_caps(config.segment_fraction_max_caps),
             )
 
         dirichlet_rng = None

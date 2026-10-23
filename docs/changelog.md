@@ -4,6 +4,14 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 23, 2026
+
+### Linear-TPM mGEP filtering
+
+Mixed GEP filtering supports `gep_filtering_method: "mgep"` for an
+upper-quantile L1 cutoff from the coordinate-wise median of reference profiles
+in linear TPM space. Existing `median_gep` behavior is unchanged.
+
 ## October 22, 2026
 
 ### Reference variance selection and PCA loadings

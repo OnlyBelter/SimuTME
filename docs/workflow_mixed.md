@@ -248,8 +248,10 @@ For a dataset named `<dataset_name>`, the Mixed workflow writes files under:
 
 The local methods use
 `<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_with_filtering_<method>/`,
-where `<method>` is `knn` or `knn_residual`. Each method has a separate
-output location. Existing centroid and unfiltered-source locations are unchanged.
+where `<method>` is `knn` or `knn_residual`. The `mgep` method uses
+`<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_mgep/`.
+Each method has a separate output location. Existing centroid and
+unfiltered-source locations are unchanged.
 
 Main files:
 
@@ -288,9 +290,20 @@ profile rejection.
 
 `gep_filtering` gates profile rejection. `gep_filtering_by_gene_range`
 enables the range acceptance check; it does not remove genes. The supported
-reference-distance methods are `median_gep`, `mean_gep`, and `linear_mmd`;
-`knn` and `knn_residual` add held-out calibration for local TCGA proximity.
-PCA fit and transform both use `log2(TPM + 1)` normalized over G.
+reference-distance methods are `median_gep`, `mgep`, `mean_gep`, and
+`linear_mmd`; `knn` and `knn_residual` add held-out calibration for local TCGA
+proximity.
+
+Set `gep_filtering_method: "mgep"` with `filtering_in_pca_space: false` to
+filter in linear TPM space. SimuTME normalizes reference and simulated
+profiles over G to 1,000,000, calculates the per-gene median across the
+resolved reference samples, and computes each reference profile's L1 distance
+to that mGEP. It keeps simulated profiles at or below the configured upper
+reference-distance quantile. Set the lower value in `gep_filtering_quantile`
+to `null` or `0`; this method applies no lower-distance cutoff.
+
+The other centroid methods use `log2(TPM + 1)` values, either in G or in
+reference-fitted PCA space according to `filtering_in_pca_space`.
 
 Set `gene_filtering_reference_variance_threshold: 1.0` to retain only reference
 genes with population variance strictly greater than 1 TPM squared

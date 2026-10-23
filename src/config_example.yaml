@@ -86,7 +86,7 @@ parameters:
   gep_filtering_enabled_default: false  # Optional global default for Mixed GEP-level filtering when a dataset does not set `gep_filtering`
   gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for Mixed GEP-level filtering; defaults to paths.tcga_merged_tpm_file_path
   gep_filtering_ref_exp_type: "TPM"  # Optional reference expression type for GEP-level filtering
-  gep_filtering_method: "median_gep"  # Use "knn" for held-out neighbor filtering or "knn_residual" to also require a residual cutoff
+  gep_filtering_method: "median_gep"  # Use "mgep" for linear-TPM median L1 filtering, "knn" for held-out neighbors, or "knn_residual" to require both
   gep_n_top: 20  # Optional neighbor count for marker-ratio filtering
   gep_show_filtering_info: false  # Optional verbose logging for GEP-level filtering
   gep_filtering_by_gene_range: false  # Optional extra per-sample gene-range filtering during Mixed generation
@@ -170,8 +170,8 @@ datasets:
     # Optional with sampling_method_prop: "segment" and gep_filtering: true:
     # cap each output cell type at its global maximum in this prediction CSV.
     # pred_cell_prop_file_path: "path/to/predicted_cell_proportions.csv"
-    gep_filtering_method: "median_gep"  # Optional Mixed override for GEP-level filtering
-    filtering_in_pca_space: true  # Optional legacy Mixed override kept for GEP-level PCA-space filtering
+    gep_filtering_method: "mgep"  # Linear selected-gene TPM median with an upper-quantile L1 cutoff
+    filtering_in_pca_space: false  # mGEP operates directly on normalized linear TPM values
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset
     cell_subtype_col: "cell_subtype"  # Column name for cell subtypes in single-cell dataset

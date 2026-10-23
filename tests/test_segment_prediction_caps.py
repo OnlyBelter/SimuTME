@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from simutme.simulation.sampling import (
     estimate_cell_prop_maxima_from_pred_cell_props,
+    format_segment_fraction_caps,
     generate_cell_fraction,
     merge_cell_prop_prior_with_maxima,
     segment_sampling,
@@ -38,6 +39,15 @@ def test_empirical_caps_normalize_rows_and_ignore_metadata(tmp_path):
     assert metadata["segment_fraction_cap_source_n_rows"] == 2
     assert metadata["segment_fraction_cap_scope"] == "global-normalized-row-maximum"
     assert metadata["segment_fraction_cap_source"] == str(path.resolve())
+
+
+def test_segment_fraction_caps_log_format_uses_three_significant_digits():
+    caps = {"Plasma B cells": 0.23923923923923923, "Mast Cells": 0.05}
+
+    assert format_segment_fraction_caps(caps) == (
+        "{'Plasma B cells': 0.239, 'Mast Cells': 0.05}"
+    )
+    assert caps["Plasma B cells"] == 0.23923923923923923
 
 
 @pytest.mark.parametrize(

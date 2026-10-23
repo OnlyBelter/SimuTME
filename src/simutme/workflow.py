@@ -20,6 +20,7 @@ from .simulation.sampling import (
     estimate_cell_prop_maxima_from_pred_cell_props,
     estimate_dirichlet_alpha_from_pred_cell_props,
     flatten_cell_type2subtype,
+    format_segment_fraction_caps,
     get_default_dirichlet_alpha,
     merge_cell_prop_prior_with_maxima,
     restrict_cell_type2subtype_to_output_types,
@@ -730,6 +731,13 @@ def _resolve_gep_filtering_params(
     filtering_method = str(_resolve_dataset_override(
         params, config, "gep_filtering_method", config.gep_filtering_method))
     norm_ord = _resolve_dataset_override(params, config, "gep_norm_ord", config.gep_norm_ord)
+    filtering_in_pca_space = _resolve_dataset_override(
+        params, config, "gep_filtering_in_pca_space", config.gep_filtering_in_pca_space
+    )
+    if "gep_filtering_in_pca_space" not in params:
+        filtering_in_pca_space = params.get(
+            "filtering_in_pca_space", filtering_in_pca_space
+        )
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
         reference_file=reference_file,
@@ -751,14 +759,7 @@ def _resolve_gep_filtering_params(
             )
         ),
         gene_quantile_range=gene_quantile_range,
-        filtering_in_pca_space=bool(
-            _resolve_dataset_override(
-                params,
-                config,
-                "gep_filtering_in_pca_space",
-                params.get("filtering_in_pca_space", config.gep_filtering_in_pca_space),
-            )
-        ),
+        filtering_in_pca_space=bool(filtering_in_pca_space),
         pca_n_components=_parse_pca_component_value(
             _resolve_dataset_override(params, config, "gep_pca_n_components", config.gep_pca_n_components)
         ),
@@ -1321,7 +1322,8 @@ def run_bulk_simulation(dataset_name: str,
                 )
                 logging.info(
                     'Segment fraction caps from %s: %s',
-                    pred_cell_prop_file_path, segment_fraction_max_caps,
+                    pred_cell_prop_file_path,
+                    format_segment_fraction_caps(segment_fraction_max_caps),
                 )
         else:
             output_cell_type2subtypes = restrict_cell_type2subtype_to_output_types(
@@ -1347,11 +1349,18 @@ def run_bulk_simulation(dataset_name: str,
             )
         sampling_method_gep = 'random'
 
-        output_tag = (
-            f"with_filtering_{resolved_gep_filtering.filtering_method}"
-            if resolved_gep_filtering.enabled and resolved_gep_filtering.filtering_method in LOCAL_FILTER_METHODS
-            else f"{filtering_str}_median_gep"
-        )
+        if (
+            resolved_gep_filtering.enabled
+            and resolved_gep_filtering.filtering_method in LOCAL_FILTER_METHODS
+        ):
+            output_tag = f"with_filtering_{resolved_gep_filtering.filtering_method}"
+        elif (
+            resolved_gep_filtering.enabled
+            and resolved_gep_filtering.filtering_method == "mgep"
+        ):
+            output_tag = f"{filtering_str}_mgep"
+        else:
+            output_tag = f"{filtering_str}_median_gep"
         simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{output_tag}'
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,

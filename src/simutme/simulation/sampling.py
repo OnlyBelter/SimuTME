@@ -142,6 +142,14 @@ def estimate_cell_prop_maxima_from_pred_cell_props(
     return caps, metadata
 
 
+def format_segment_fraction_caps(caps: Dict[str, float]) -> str:
+    """Format empirical caps for logs without reducing stored precision."""
+    formatted_caps = ", ".join(
+        f"{cell_type!r}: {value:.3g}" for cell_type, value in caps.items()
+    )
+    return f"{{{formatted_caps}}}"
+
+
 def merge_cell_prop_prior_with_maxima(cell_types, cell_prop_prior, maxima):
     """Intersect optional segment prior ranges with empirical upper caps."""
     cell_types = list(cell_types)

@@ -129,7 +129,7 @@ class FixedGeneFilter:
     """Reference-only filter reused across generation batches."""
 
     workflow_version = WORKFLOW_VERSION
-    supported_methods = ("median_gep", "mean_gep", "linear_mmd")
+    supported_methods = ("median_gep", "mgep", "mean_gep", "linear_mmd")
 
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
@@ -168,6 +168,9 @@ class FixedGeneFilter:
             "distance_quantiles": list(self.gep.gep_filtering_quantile),
             "distance_norm": self.gep.norm_ord,
         }
+        if self.gep.filtering_method == "mgep":
+            self.identity["distance_space"] = "linear-tpm-selected-G-v1"
+            self.identity["distance_norm"] = 1
         self.model_path = self.result_dir / "gep_filtering_pca.joblib"
         self.model_metadata_path = self.model_path.with_suffix(".metadata.json")
         self.additional_artifacts = []
@@ -176,13 +179,27 @@ class FixedGeneFilter:
         self.range_bounds = None
         self.range_input = self.range_kept = 0
         self.distance_input = self.distance_kept = 0
+        self.mgep_center = None
+        self.mgep_cutoff = None
+        self.mgep_distance_input = self.mgep_distance_kept = 0
         if self.gep.enabled:
             if self.gep.filtering_method not in self.supported_methods:
                 raise ValueError(
-                    "Correlation-first GEP filtering supports median_gep, mean_gep, "
-                    "and linear_mmd; migrate marker_ratio filtering to a reference-distance method."
+                    "Correlation-first GEP filtering supports median_gep, mgep, "
+                    "mean_gep, and linear_mmd; migrate marker_ratio filtering to "
+                    "a reference-distance method."
+                )
+            if self.gep.filtering_method == "mgep" and self.gep.filtering_in_pca_space:
+                raise ValueError(
+                    'GEP filtering method "mgep" requires '
+                    '"filtering_in_pca_space: false".'
                 )
             q_low, q_high = self.gep.gep_filtering_quantile
+            if self.gep.filtering_method == "mgep" and q_low not in (None, 0, 0.0):
+                raise ValueError(
+                    'GEP filtering method "mgep" uses only the upper quantile; '
+                    'set the lower quantile to null or 0.'
+                )
             if self.gep.filtering_method not in ("knn", "knn_residual") and (
                 q_high is None or not 0 <= q_high <= 1
                 or (q_low is not None and not 0 <= q_low <= q_high)
@@ -196,6 +213,8 @@ class FixedGeneFilter:
                     0 <= quantiles[0] <= quantiles[1] <= quantiles[2] <= 1
                 ):
                     raise ValueError("gep_gene_quantile_range must be an ordered quantile triplet.")
+            if self.gep.filtering_method == "mgep" and self.reference_linear.empty:
+                raise ValueError('"mgep" requires at least one reference profile.')
 
     def persist_genes(self):
         self.result_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +260,25 @@ class FixedGeneFilter:
         logger.info("GEP-filtering PCA: target=%s, fitted=%d PCs.",
                     self.gep.pca_n_components, self.pca.n_components_)
 
+    def _prepare_mgep(self):
+        if self.mgep_center is not None:
+            return
+        reference = self.reference_linear.to_numpy(dtype=np.float64)
+        self.mgep_center = np.median(reference, axis=0)
+        reference_distances = np.empty(len(reference), dtype=np.float64)
+        for start in range(0, len(reference), 256):
+            stop = min(start + 256, len(reference))
+            reference_distances[start:stop] = np.abs(
+                reference[start:stop] - self.mgep_center
+            ).sum(axis=1)
+        upper_quantile = self.gep.gep_filtering_quantile[1]
+        self.mgep_cutoff = float(np.quantile(reference_distances, upper_quantile))
+        logger.info(
+            "Linear-TPM mGEP L1 cutoff at q=%.3g: %.3g",
+            upper_quantile,
+            self.mgep_cutoff,
+        )
+
     def filter(self, simulated_linear):
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
@@ -260,7 +298,22 @@ class FixedGeneFilter:
             normalized = normalized.loc[mask]
         if normalized.empty:
             return normalized
-        if self.gep.filtering_in_pca_space:
+        if self.gep.filtering_method == "mgep":
+            self._prepare_mgep()
+            simulated = normalized.to_numpy(dtype=np.float64)
+            simulated_distances = np.linalg.norm(
+                simulated - self.mgep_center, ord=1, axis=1
+            )
+            mask = simulated_distances <= self.mgep_cutoff
+            self.mgep_distance_input += len(normalized)
+            self.mgep_distance_kept += int(mask.sum())
+            logger.info(
+                "Linear-TPM mGEP L1 acceptance: %d/%d profiles.",
+                mask.sum(),
+                len(mask),
+            )
+            return normalized.loc[mask].copy()
+        elif self.gep.filtering_in_pca_space:
             self._prepare_pca()
             reference = self.reference_coordinates
             simulated = safe_pca_transform(
@@ -289,15 +342,23 @@ class FixedGeneFilter:
         return normalized.loc[mask].copy()
 
     def stats(self):
-        return {
+        stats = {
             "gene_range_input_n_samples": self.range_input,
             "gene_range_kept_n_samples": self.range_kept,
             "pc_distance_input_n_samples": self.distance_input,
             "pc_distance_kept_n_samples": self.distance_kept,
         }
+        if self.gep.filtering_method == "mgep":
+            stats.update(
+                mgep_distance_input_n_samples=self.mgep_distance_input,
+                mgep_distance_kept_n_samples=self.mgep_distance_kept,
+            )
+        return stats
 
     def restore_stats(self, stats):
         self.range_input = stats.get("gene_range_input_n_samples", 0)
         self.range_kept = stats.get("gene_range_kept_n_samples", 0)
         self.distance_input = stats.get("pc_distance_input_n_samples", 0)
         self.distance_kept = stats.get("pc_distance_kept_n_samples", 0)
+        self.mgep_distance_input = stats.get("mgep_distance_input_n_samples", 0)
+        self.mgep_distance_kept = stats.get("mgep_distance_kept_n_samples", 0)
