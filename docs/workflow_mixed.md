@@ -244,14 +244,17 @@ than biological ground truth.
 
 For a dataset named `<dataset_name>`, the Mixed workflow writes files under:
 
-`paths.simu_bulk_dir/<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_median_gep/`
+`paths.simu_bulk_dir/<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<output_tag>/`
+
+When `gep_filtering: false`, `<output_tag>` is `no_filtering`, regardless of
+the configured `gep_filtering_method`. When filtering is enabled, centroid
+methods retain the historical `<filtering_tag>_median_gep` suffix.
 
 The local methods use
 `<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_with_filtering_<method>/`,
 where `<method>` is `knn` or `knn_residual`. The `mgep` method uses
 `<sampling_method_prop>_<n_sc_datasets>ds_n_base<n_base>_<filtering_tag>_mgep/`.
-Each method has a separate output location. Existing centroid and
-unfiltered-source locations are unchanged.
+Each active filtering method has a separate output location.
 
 Main files:
 

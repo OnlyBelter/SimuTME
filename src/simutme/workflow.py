@@ -1349,15 +1349,11 @@ def run_bulk_simulation(dataset_name: str,
             )
         sampling_method_gep = 'random'
 
-        if (
-            resolved_gep_filtering.enabled
-            and resolved_gep_filtering.filtering_method in LOCAL_FILTER_METHODS
-        ):
+        if not resolved_gep_filtering.enabled:
+            output_tag = "no_filtering"
+        elif resolved_gep_filtering.filtering_method in LOCAL_FILTER_METHODS:
             output_tag = f"with_filtering_{resolved_gep_filtering.filtering_method}"
-        elif (
-            resolved_gep_filtering.enabled
-            and resolved_gep_filtering.filtering_method == "mgep"
-        ):
+        elif resolved_gep_filtering.filtering_method == "mgep":
             output_tag = f"{filtering_str}_mgep"
         else:
             output_tag = f"{filtering_str}_median_gep"

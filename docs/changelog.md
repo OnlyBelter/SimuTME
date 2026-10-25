@@ -4,6 +4,11 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 25, 2026
+
+Mixed runs with GEP filtering disabled use the method-independent
+`no_filtering` output tag, even when a filtering method is configured.
+
 ## October 23, 2026
 
 ### Linear-TPM mGEP filtering

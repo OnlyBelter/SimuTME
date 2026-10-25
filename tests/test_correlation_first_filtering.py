@@ -481,3 +481,21 @@ def test_workflow_mgep_uses_linear_filter_and_distinct_output_tag(workflow_case)
     resumed_summary = read_summary(output)
     assert resumed_summary["mgep_distance_input_n_samples"] == first_input
     assert resumed_summary["mgep_distance_kept_n_samples"] == first_kept
+
+
+def test_workflow_without_gep_filtering_uses_method_independent_output_tag(workflow_case):
+    config, params, _, _ = workflow_case
+    params.update(
+        gep_filtering=False,
+        gep_filtering_method="mgep",
+        filtering_in_pca_space=False,
+    )
+
+    output = workflow.run_bulk_simulation("target", params, config)
+    summary = read_summary(output)
+
+    assert "segment_0ds_n_base1_no_filtering" in output
+    assert summary["gep_filtering_enabled"] is False
+    assert summary["gep_filtering_method"] is None
+    assert summary["mgep_distance_input_n_samples"] == 0
+    assert summary["mgep_distance_kept_n_samples"] == 0
