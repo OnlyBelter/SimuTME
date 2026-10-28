@@ -26,6 +26,7 @@ reference for later Mixed simulations in the same run.
 
 ## Documentation Map
 
+- [Command-line usage and input paths](usage.md)
 - [Installation](installation.md)
 - [Changelog](changelog.md)
 - [SCT Workflow](workflow_sct.md)
@@ -53,6 +54,13 @@ needs:
 ![Mixed workflow](figures/workflow_bulk.svg)
 
 ## Typical Usage Pattern
+
+For the command-line runner, copy `src/config_example.yaml`, update its input
+paths, and run `python src/main_simu_bulk.py --config config.yaml` from the
+repository root. The [CLI usage guide](usage.md) explains how to prepare each
+input and which files depend on optional workflows.
+
+When you use the Python API directly:
 
 1. Prepare a YAML configuration file.
 2. Load the configuration with `SimuConfig.from_yaml(...)`.

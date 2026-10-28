@@ -45,9 +45,6 @@ Its dependency stack is aligned with
 [VAEDecon](https://github.com/OnlyBelter/VAEDecon), so SimuTME can be
 installed in the same environment as VAEDecon.
 
-Choose one installation method below. Both install SimuTME and its
-dependencies; do not run both.
-
 ### Install from source
 
 ```bash
@@ -61,8 +58,24 @@ pip install -e .
 
 ## Quickstart
 
-Start from the example config at [src/config_example.yaml](src/config_example.yaml),
-replace the placeholder paths, and run the workflow:
+Start from [src/config_example.yaml](src/config_example.yaml) and replace its
+placeholder paths with files available to you. For input-file requirements and
+conditional dependencies, see the [CLI usage guide](docs/usage.md).
+
+### Run from the command line
+
+From the SimuTME repository root, copy the example configuration, edit
+`config.yaml`, then run it:
+
+```bash
+cp src/config_example.yaml config.yaml
+python src/main_simu_bulk.py --config config.yaml
+```
+
+The runner executes every dataset in `config.yaml` in YAML order. To run only
+selected datasets, remove the other entries from the working configuration.
+
+### Run from Python
 
 ```python
 import yaml
@@ -83,6 +96,7 @@ for dataset_name, params in datasets_to_run.items():
 Use the docs for workflow and parameter details:
 
 - [Documentation overview](docs/index.md)
+- [Command-line usage and input paths](docs/usage.md)
 - [Installation](docs/installation.md)
 - [Configuration and I/O reference](docs/configuration_io.md)
 - [SCT workflow](docs/workflow_sct.md)

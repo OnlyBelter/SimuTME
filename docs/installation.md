@@ -53,7 +53,18 @@ python -m compileall -q src
 
 ## Package Entry Points
 
-The package is typically used from Python by importing:
+Run configured datasets from the repository root with the command-line script:
+
+```bash
+python src/main_simu_bulk.py --config config.yaml
+```
+
+Prepare `config.yaml` from [the example configuration](../src/config_example.yaml)
+and replace its placeholder paths before running. See the
+[CLI usage guide](usage.md) for input-file requirements and workflow-specific
+dependencies. The script runs every dataset in the YAML file in order.
+
+You can also use the package from Python by importing:
 
 - `SimuConfig`
 - `run_bulk_simulation`
