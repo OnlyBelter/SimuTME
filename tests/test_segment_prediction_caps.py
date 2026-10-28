@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 pytest_plugins = ("tests.test_correlation_first_filtering",)
 
@@ -170,6 +171,13 @@ def test_mixed_workflow_resolves_caps_only_for_filtered_segment(
         "CT1": [0.8, 0.2],
         "CT2": [0.2, 0.8],
     })
+    config.pred_cell_prop_file_path = _write_predictions(
+        tmp_path / "shared_pred.csv",
+        {
+            "CT1": [0.4, 0.4],
+            "CT2": [0.6, 0.6],
+        },
+    )
     params.update(
         gep_filtering=True,
         pred_cell_prop_file_path=str(predictions),
@@ -210,6 +218,116 @@ def test_mixed_workflow_resolves_caps_only_for_filtered_segment(
     assert generation.segment_fraction_max_caps == {"CT1": 0.8, "CT2": 0.8}
     assert generation.cell_prop_prior == {"CT1": (0.1, 0.7), "CT2": (0.0, 0.8)}
     assert generation.segment_fraction_cap_metadata["segment_fraction_cap_source_n_rows"] == 2
+
+
+@pytest.mark.parametrize(
+    "sampling_method_prop, gep_filtering, path_is_used",
+    [
+        ("dirichlet", True, True),
+        ("segment", True, True),
+        ("segment", False, False),
+        ("random", True, False),
+    ],
+)
+def test_global_prediction_path_is_only_used_by_supported_modes(
+    workflow_case,
+    tmp_path,
+    monkeypatch,
+    sampling_method_prop,
+    gep_filtering,
+    path_is_used,
+):
+    import simutme.workflow as workflow
+
+    config, params, _, _ = workflow_case
+    predictions = _write_predictions(tmp_path / "shared_pred.csv", {
+        "sample_id": ["p1", "p2"],
+        "cancer_type": ["A", "B"],
+        "CT1": [0.8, 0.2],
+        "CT2": [0.2, 0.8],
+    })
+    config.pred_cell_prop_file_path = predictions
+    params.pop("pred_cell_prop_file_path", None)
+    params.update(
+        sampling_method_prop=sampling_method_prop,
+        gep_filtering=gep_filtering,
+        gene_filtering=False,
+        cell_prop_prior=None,
+    )
+    captured = {}
+
+    class DummySpace:
+        additional_artifacts = []
+
+    class FakeBulkGEPGenerator:
+        def __init__(self, **kwargs):
+            self.generated_bulk_gep_fp = tmp_path / "generated.h5ad"
+            self.generated_cell_fraction_fp = tmp_path / "fractions.csv"
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_pca_target = None
+            self.gep_filtering_n_pcs = None
+
+        def generate_gep(self, config):
+            captured["generation_config"] = config
+
+    monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
+    monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
+                        lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution",
+                        lambda **kwargs: None)
+    monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess",
+                        lambda **kwargs: {})
+    monkeypatch.setattr(workflow, "_build_mixed_dataset_summary",
+                        lambda **kwargs: None)
+    monkeypatch.setattr(
+        workflow,
+        "_save_estimated_dirichlet_alpha_from_pred_cell_props",
+        lambda **kwargs: captured.update(
+            alpha_estimation_path=kwargs["pred_cell_prop_file_path"]
+        ),
+    )
+
+    workflow.run_bulk_simulation("target", params, config)
+
+    generation = captured["generation_config"]
+    expected_path = predictions if path_is_used else None
+    assert generation.pred_cell_prop_file_path == expected_path
+    if sampling_method_prop == "segment" and gep_filtering:
+        assert generation.segment_fraction_max_caps == {"CT1": 0.8, "CT2": 0.8}
+    else:
+        assert generation.segment_fraction_max_caps is None
+    if sampling_method_prop == "dirichlet":
+        assert captured["alpha_estimation_path"] == predictions
+
+
+def test_example_config_loads_shared_file_paths_from_paths():
+    from simutme.workflow import SimuConfig
+
+    config_path = Path(__file__).resolve().parents[1] / "src" / "config_example.yaml"
+    with config_path.open(encoding="utf-8") as f:
+        yaml_data = yaml.safe_load(f)
+
+    shared_path_names = {
+        "gep_filtering_reference_file",
+        "gene_filtering_reference_file",
+        "pred_cell_prop_file_path",
+    }
+    assert shared_path_names.issubset(yaml_data["paths"])
+    assert shared_path_names.isdisjoint(yaml_data["parameters"])
+    assert "pred_cell_prop_file_path" not in yaml_data["datasets"]["Mixed_N100_dirichlet"]
+
+    config = SimuConfig.from_yaml(str(config_path))
+    assert config.gep_filtering_reference_file == Path(
+        yaml_data["paths"]["gep_filtering_reference_file"]
+    )
+    assert config.gene_filtering_reference_file == Path(
+        yaml_data["paths"]["gene_filtering_reference_file"]
+    )
+    assert config.pred_cell_prop_file_path == Path(
+        yaml_data["paths"]["pred_cell_prop_file_path"]
+    )
 
 
 def test_segment_prediction_caps_require_gep_filtering(workflow_case, tmp_path, monkeypatch):

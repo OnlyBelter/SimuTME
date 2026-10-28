@@ -32,6 +32,29 @@ then reads `datasets` separately when executing the workflow.
   Optional shared fallback high-correlation gene list used by Mixed
   filtering and post-processing. Set it to `null` for a clean first run.
 
+### Optional Mixed reference paths
+
+These paths let Mixed datasets share expression references and predicted
+proportion data. Dataset-level fields with the same names override the shared
+paths. The shared prediction path is unused unless a dataset uses Dirichlet
+sampling or segment sampling with GEP filtering enabled.
+
+- `gep_filtering_reference_file`
+  Reference expression matrix for Mixed GEP filtering. Defaults to
+  `tcga_merged_tpm_file_path` when unset or `null`.
+
+- `gene_filtering_reference_file`
+  Reference expression matrix for fixed-gene selection and normalization when
+  GEP filtering is disabled. Defaults to `tcga_merged_tpm_file_path` when
+  unset or `null`.
+
+- `pred_cell_prop_file_path`
+  Optional predicted cell-proportion CSV shared by Mixed datasets. Dirichlet
+  sampling uses it to estimate concentration parameters. Segment sampling
+  uses it to cap proportions only when GEP filtering is enabled. A Mixed
+  dataset using another sampling mode leaves the shared path unused. A
+  dataset can override it with its own `pred_cell_prop_file_path`.
+
 ### Optional sorted-bulk-guided SCT imputation paths
 
 - `sorted_bulk_expr_file_path`
@@ -98,7 +121,6 @@ Dataset-level Mixed fields can override them.
 #### GEP-level filtering defaults
 
 - `gep_filtering_enabled_default`
-- `gep_filtering_reference_file`
 - `gep_filtering_ref_exp_type`
 - `gep_filtering_method`
 - `gep_filtering_quantile`
@@ -110,17 +132,10 @@ Dataset-level Mixed fields can override them.
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
 - `gep_norm_ord`
-- `gep_reference_holdout_fraction`
-- `gep_reference_holdout_seed`
-- `gep_knn_n_neighbors`
-- `gep_knn_distance_quantile`
-- `gep_pca_residual_quantile`
-- `gep_max_generation_batches`
 
 #### Gene-level filtering and PCA comparison defaults
 
 - `gene_filtering_enabled_default`
-- `gene_filtering_reference_file`
 - `gene_filtering_type`
 - `calculate_gene_cell_prop_correlation`
 - `gene_filtering_correlation_reference_dataset`
@@ -133,21 +148,22 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 
-When you use `pred_cell_prop_file_path` with segment sampling, SimuTME normalizes
-each row over the output cell types and caps each generated fraction at that
-cell type's global observed maximum. This requires GEP filtering. Segment
-sampling without this file and Dirichlet alpha estimation retain their
-existing behavior.
+When you use `paths.pred_cell_prop_file_path` with segment sampling, SimuTME
+normalizes each row over the output cell types and caps each generated fraction
+at that cell type's global observed maximum. This requires GEP filtering.
+Dirichlet sampling uses the same file to estimate alpha values. A dataset-level
+`pred_cell_prop_file_path` overrides the shared path; the global path is
+ignored by other sampling modes.
 
 `gene_filtering_reference_variance_threshold` accepts a finite, nonnegative
 number in TPM squared or `null` to disable selection (the code default).
 The example sets `1.0`. Genes must have population variance (`ddof=0`)
 strictly above the threshold in linear reference expression before subsetting.
-Local KNN methods use fitting samples only. This criterion applies when
-either gene or GEP filtering is enabled, before correlation/supplied-list
-selection, and both reference and simulated profiles are renormalized on the
-final genes to 1,000,000. Dataset overrides take precedence, including `null`.
-Unfiltered correlation sources remain unchanged.
+The selected reference cohort is used when either gene or GEP filtering is
+enabled. Screening runs before correlation/supplied-list selection, and both
+reference and simulated profiles are renormalized on the final genes to
+1,000,000. Dataset overrides take precedence, including `null`. Unfiltered
+correlation sources remain unchanged.
 
 `plot_pca_for_comparison` is independent of `gene_filtering`: when enabled
 without gene filtering, the PCA comparison uses all genes shared by the Mixed
@@ -166,9 +182,10 @@ Gene selection runs before target generation, using only output cell types.
 The selected list G is intersected with SCT and reference genes, persisted
 in a deterministic order, and reused for normalization, profile checks,
 PCA, and export. Each profile is normalized over G to 1,000,000 before
-`log2(TPM + 1)` transformation. When GEP filtering is enabled, its reference
-file and `filtering_ref_types` define the reference space; otherwise,
-`gene_filtering_reference_file` is used.
+`log2(TPM + 1)` transformation. When GEP filtering is enabled,
+`paths.gep_filtering_reference_file` and `filtering_ref_types` define the
+reference space. Otherwise, SimuTME uses `paths.gene_filtering_reference_file`.
+Both paths default to `paths.tcga_merged_tpm_file_path`.
 
 Use `gene_filtering_type: high_corr_gene`. Without a supplied gene list,
 `gene_filtering_correlation_reference_dataset` is required. Explicit legacy
@@ -178,8 +195,9 @@ range-selection modes fail with a migration message. Remove
 
 `gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
 `gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
-The supported methods are `median_gep`, `mgep`, `mean_gep`, `linear_mmd`,
-`knn`, and `knn_residual`. Existing methods retain their behavior.
+The supported methods are `median_gep`, `mean_gep`, `mgep`, and `linear_mmd`.
+Removed or unknown method names fail during configuration resolution with the
+supported-method list.
 
 `mgep` computes a coordinate-wise median from all resolved reference samples
 using linear TPM values normalized over the selected genes to 1,000,000. It
@@ -188,49 +206,6 @@ upper quantile in `gep_filtering_quantile`. It does not apply a lower-distance
 cutoff, so set the lower quantile to `null` or `0`. It requires
 `filtering_in_pca_space: false`. Unlike `median_gep`, `mgep` does not transform
 expression to `log2(TPM + 1)` or project it into PCA space.
-
-For either local method, provide `paths.tcga2cancer_type_file_path` with unique
-sample IDs and a `cancer_type` column. After exact sample alignment and
-`filtering_ref_types` selection, hold out `ceil(fraction * n)` individual
-samples per cancer type. Every type must retain fitting and held-out
-samples. The default fraction is 0.2 and the dedicated split seed is 42.
-Repeated patient samples are not grouped; patient overlap is reported.
-
-Only fitting TCGA samples estimate PCA, neighbors, and optional gene-range
-bounds. All held-out samples calibrate the two upper score percentiles,
-including samples that fail the gene-range check. In `knn`, only neighbor
-distance affects local acceptance; residual scores and their percentile
-remain diagnostic. In `knn_residual`, both score thresholds must pass.
-
-| Parameter | Default | Meaning in local methods |
-| --- | --- | --- |
-| `gep_reference_holdout_fraction` | `0.2` | Held-out fraction within each cancer type |
-| `gep_reference_holdout_seed` | `42` | Reproducible individual-sample split seed |
-| `gep_knn_n_neighbors` | `10` | Mean distance to k fitting-reference neighbors |
-| `gep_knn_distance_quantile` | `0.95` | Held-out neighbor-distance upper percentile |
-| `gep_pca_residual_quantile` | `0.95` | Held-out residual upper percentile; diagnostic only in `knn` |
-| `gep_max_generation_batches` | `100` | Cumulative candidate-batch bound |
-
-Both local methods require `gep_filtering_in_pca_space: true`. Use
-`gep_pca_n_components: 0.9` to retain 90% of fitting-reference variance, or
-an integer for an explicit component count. Raw PCs are not whitened.
-`gep_norm_ord` selects Manhattan (1) or Euclidean (2) neighbor distance;
-reconstruction residuals always use L2 in normalized log-expression space.
-`gep_filtering_quantile` applies only to centroid methods and does not
-impose a lower distance bound in either local method. KNN-only proximity
-constrains the retained reference-PC space, not omitted expression directions.
-
-In KNN-only candidate tables, `joint_pass` equals `knn_pass`; held-out
-`joint_pass` also includes the optional gene-range check. An exported
-candidate can have `residual_pass: false`. KNN summaries record
-`residual_filter_enabled: false`, `local_filter_kept_n_samples`, and separate
-diagnostic residual and neighbor/residual conjunction counts. Residual
-plots label the percentile marker as diagnostic only.
-
-With `gep_filtering: false`, no local split or calibration runs. Changing
-methods, labels, split membership, or calibration settings requires
-compatible metadata or a new output location; old artifacts are not
-reused as local-filter runs.
 
 ### SCT sample-diversity parameters
 
@@ -346,8 +321,8 @@ For SCT datasets:
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
-- `pred_cell_prop_file_path` for Dirichlet alpha estimation, or for empirical
-  per-type caps when `sampling_method_prop: "segment"` and `gep_filtering: true`
+- `pred_cell_prop_file_path` as an optional dataset-level override of
+  `paths.pred_cell_prop_file_path`
 - `dirichlet_sampling_seed` (only when `sampling_method_prop: "dirichlet"`)
 
 For Mixed datasets:

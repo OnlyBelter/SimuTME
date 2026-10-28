@@ -3,7 +3,10 @@ paths:
   simu_bulk_dir: "./datasets/simulated_bulk_cell_dataset"
   tcga2cancer_type_file_path: "path/to/tcga_sample_id2cancer_type.csv"
   tcga_merged_tpm_file_path: "path/to/merged_tpm.csv"
-  high_corr_gene_file_path: "path/to/gene_list_filtered_by_high_corr_gene.csv"  # Optional shared fallback high-correlation gene list for Mixed filtering; set to null for a clean first run
+  high_corr_gene_file_path: null  # Optional shared fallback high-correlation gene list for Mixed filtering; set to null for a clean first run
+  gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional GEP-filtering reference; defaults to tcga_merged_tpm_file_path
+  gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional gene-selection reference when GEP filtering is disabled; defaults to tcga_merged_tpm_file_path
+  pred_cell_prop_file_path: "./datasets/predicted_cell_proportion_by_DeSide/Table_S3.csv"  # Optional shared prediction source for Dirichlet alpha or segment caps with GEP filtering
   merged_sc_dataset_file_path: "path/to/merged_sc_dataset.h5ad"
   sorted_bulk_expr_file_path: "path/to/sorted_bulk_expr.tsv"  # Optional: sorted bulk reference expression matrix for SCT post-imputation
   sorted_bulk_annot_file_path: "path/to/sorted_bulk_annot.tsv"  # Optional: annotation table for the sorted bulk reference
@@ -84,9 +87,8 @@ parameters:
   pca_n_components: 0.9
   gene_list_type: "high_corr_gene"  # Legacy fallback name; correlation-first mode is the default
   gep_filtering_enabled_default: false  # Optional global default for Mixed GEP-level filtering when a dataset does not set `gep_filtering`
-  gep_filtering_reference_file: "path/to/merged_tpm.csv"  # Optional TCGA-like reference used for Mixed GEP-level filtering; defaults to paths.tcga_merged_tpm_file_path
   gep_filtering_ref_exp_type: "TPM"  # Optional reference expression type for GEP-level filtering
-  gep_filtering_method: "median_gep"  # Use "mgep" for linear-TPM median L1 filtering, "knn" for held-out neighbors, or "knn_residual" to require both
+  gep_filtering_method: "median_gep"  # Supported: "median_gep", "mean_gep", "mgep", "linear_mmd"
   gep_n_top: 20  # Optional neighbor count for marker-ratio filtering
   gep_show_filtering_info: false  # Optional verbose logging for GEP-level filtering
   gep_filtering_by_gene_range: false  # Optional extra per-sample gene-range filtering during Mixed generation
@@ -95,19 +97,12 @@ parameters:
   gep_filtering_in_pca_space: true  # Optional PCA-space distance filtering during Mixed generation
   gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
   gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
-  gep_reference_holdout_fraction: 0.2  # knn/knn_residual: ceil(20% of samples) per cancer type for calibration
-  gep_reference_holdout_seed: 42  # Dedicated reference-split seed, independent of simulation seeds
-  gep_knn_n_neighbors: 10  # knn/knn_residual: number of nearest fitting TCGA samples
-  gep_knn_distance_quantile: 0.95  # Held-out neighbor-distance upper cutoff
-  gep_pca_residual_quantile: 0.95  # Held-out residual percentile; diagnostic only in "knn", acceptance cutoff in "knn_residual"
-  gep_max_generation_batches: 100  # knn/knn_residual: cumulative candidate-batch bound, preserved on resume
   gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
-  gene_filtering_reference_file: "path/to/merged_tpm.csv"  # Reference for selecting shared genes and normalization when GEP filtering is disabled
   gene_filtering_type: "high_corr_gene"  # Select genes before target generation; no expression-range gene selection
   calculate_gene_cell_prop_correlation: false  # Optional switch for saving a full, unfiltered Mixed gene/cell-fraction correlation matrix
   gene_filtering_correlation_reference_dataset: null  # Required earlier unfiltered segment source when gene filtering has no supplied gene list
   gene_filtering_corr_threshold: 0.3  # Optional minimum gene/cell-fraction correlation threshold
-  gene_filtering_reference_variance_threshold: 1.0  # Retain reference genes with population variance > 1 TPM^2 before fixed-G selection; local KNN uses fitting samples only. Renormalize on final G. null disables; unfiltered correlation sources are unchanged.
+  gene_filtering_reference_variance_threshold: 1.0  # Retain reference genes with population variance > 1 TPM^2 before fixed-G selection. Renormalize on final G. null disables; unfiltered correlation sources are unchanged.
   gene_filtering_n_gene_max: 1000  # Optional maximum number of genes kept per cell type for correlation-based filtering
   gene_filtering_save_filtered_h5ad: true  # Optional additional named export; the primary Mixed `.h5ad` already contains only G
   gene_filtering_filtered_dataset_postfix: null  # Optional postfix for the filtered Mixed `.h5ad`; null keeps the default `filtered_by_<gene_filtering_type>` naming
@@ -167,9 +162,6 @@ datasets:
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     cell_prop_prior: null
-    # Optional with sampling_method_prop: "segment" and gep_filtering: true:
-    # cap each output cell type at its global maximum in this prediction CSV.
-    # pred_cell_prop_file_path: "path/to/predicted_cell_proportions.csv"
     gep_filtering_method: "mgep"  # Linear selected-gene TPM median with an upper-quantile L1 cutoff
     filtering_in_pca_space: false  # mGEP operates directly on normalized linear TPM values
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
@@ -183,24 +175,6 @@ datasets:
       version: "sorted_bulk_imputed"  # Select the imputed SCT output; requires apply_sorted_bulk_imputation: true on the referenced SCT dataset. Use "original" for its pre-imputation output.
     n_samples: 100  # Number of bulk samples to simulate for each cell type
     sampling_method_prop: "dirichlet"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
-    dirichlet_alpha:  # Mixed + dirichlet only: default symmetric prior over the 16 configured output cell types
-      Non-plasma B cells: 1.0
-      Plasma B cells: 1.0
-      CD4 T: 1.0
-      CD8 T (GZMK high): 1.0
-      CD8 T effector: 1.0
-      DC: 1.0
-      Endothelial Cells: 1.0
-      Cancer Cells: 1.0
-      CAFs: 1.0
-      Myofibroblasts: 1.0
-      Macrophages: 1.0
-      Mast Cells: 1.0
-      NK: 1.0
-      Neutrophils: 1.0
-      Double-neg-like T: 1.0
-      Monocytes: 1.0
-    pred_cell_prop_file_path: null  # Dirichlet: estimate alpha; filtered segment: cap each output fraction at the file's global observed maximum
     gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering

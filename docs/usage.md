@@ -47,12 +47,15 @@ workflow so their sample IDs and labels stay aligned.
 | Configuration field | What it points to | Where to get or prepare it |
 | --- | --- | --- |
 | `simu_bulk_dir` | Writable directory for generated datasets and diagnostics. | Choose a project output directory. SimuTME creates output subdirectories under it. |
-| `merged_sc_dataset_file_path` | Merged single-cell AnnData file (`.h5ad`) used to generate SCT profiles. | Use the merged and annotated single-cell dataset produced by your preprocessing workflow. Confirm that its dataset IDs and cell-type labels match `constants.sc_dataset_ids`, `constants.cell_type2subtypes`, and the configured `cell_type_col` and `cell_subtype_col`. |
-| `tcga_merged_tpm_file_path` | TCGA reference expression matrix used by Mixed filtering and PCA comparison in the example configuration. | Use the processed, linear-TPM TCGA expression matrix from your analysis workflow. It must have samples as rows and genes as columns, with sample IDs matching the annotation file when both are used. |
-| `tcga2cancer_type_file_path` | TCGA sample-to-cancer-type annotation. | Use the annotation table corresponding to the expression matrix. SimuTME reads sample IDs from the first column as the index and expects a `cancer_type` column. It is needed by cancer-type selection and local KNN filtering workflows. |
+| `merged_sc_dataset_file_path` | Merged single-cell RNA-seq AnnData file (`.h5ad`) used to generate SCT profiles. | Download the merged reference (2.13 GiB) from [Figshare](https://figshare.com/ndownloader/files/44325881)|
+| `tcga_merged_tpm_file_path` | TCGA reference expression matrix used by Mixed filtering and PCA comparison in the example configuration. | Download the TPM matrix (7,699 samples from 19 cancer types; 354 MB) from [Figshare](https://figshare.com/ndownloader/files/44597560).|
+| `tcga2cancer_type_file_path` | TCGA sample-to-cancer-type annotation. | Use the [TCGA sample-to-cancer-type CSV](https://github.com/OnlyBelter/DeSide_mini_example/blob/main/datasets/TCGA/tpm/tcga_sample_id2cancer_type.csv) corresponding to the expression matrix.|
 | `high_corr_gene_file_path` | Optional shared high-correlation gene-list file. | Use a previously generated or prepared gene list with a `gene_name` column or one column of gene names. Set it to `null` when you do not have a reusable list; filtering workflows that need a list must then configure a correlation source as described in the [configuration reference](configuration_io.md). |
-| `sorted_bulk_expr_file_path` | Sorted-bulk reference expression matrix for optional SCT imputation. | Use the linear-TPM expression data for the sorted-bulk reference cohort selected for your analysis. The file must contain gene names in the first column and sample IDs in the header; values must be numeric. |
-| `sorted_bulk_annot_file_path` | Sample annotations for the sorted-bulk expression matrix. | Use the matching annotation table. Its sample IDs must match the expression-matrix header, and it must include the cell-type column named by `parameters.sorted_bulk_cell_type_col` (default: `Tumor_model_annot`). |
+| `gep_filtering_reference_file` | Optional expression reference for Mixed GEP filtering. | Use a TCGA-like reference matrix. If unset or `null`, SimuTME uses `tcga_merged_tpm_file_path`; a dataset-level value overrides this shared path. |
+| `gene_filtering_reference_file` | Optional reference for fixed-gene selection when GEP filtering is disabled. | Use a TCGA-like reference matrix. If unset or `null`, SimuTME uses `tcga_merged_tpm_file_path`; a dataset-level value overrides this shared path. |
+| `pred_cell_prop_file_path` | Optional predicted cell-proportion matrix shared by Mixed datasets. | The example uses `./datasets/predicted_cell_proportion_by_DeSide/Table_S3.csv`. Dirichlet sampling uses it to estimate alpha values; segment sampling uses it for per-cell-type caps only with GEP filtering enabled. If a dataset uses neither mode, the shared path is unused. A dataset-level value overrides it. |
+| `sorted_bulk_expr_file_path` | Sorted-bulk reference expression matrix for optional SCT imputation. | Download the linear-TPM expression matrix (gene by sample, 2.46 GiB) from [BostonGene Kassandra](https://science.bostongene.com/kassandra/api/download/all_models_expr.tsv).|
+| `sorted_bulk_annot_file_path` | Sample annotations for the sorted-bulk expression matrix. | Download the [BostonGene Kassandra all-models annotation file](https://science.bostongene.com/kassandra/api/download/all_models_annot.tsv). Its sample IDs must match the expression-matrix header, and it must include the cell-type column named by `parameters.sorted_bulk_cell_type_col` (default: `Tumor_model_annot`). |
 | `sorted_bulk_cell_type_mapping_file_path` | Mapping between generated SCT labels and sorted-bulk cell-type labels. | Prepare a CSV with `cell_type_SCT_N6K_13Jul`, `cell_type_Kassandra_SortedBulk`, and `included` columns. Set `included` to `1` or `0` for each mapping row. |
 
 Keep the five core path keys shown in the example because `SimuConfig` expects
@@ -72,8 +75,8 @@ The example YAML enables several optional operations, so it needs more input
 files than a basic SCT simulation:
 
 - Mixed GEP filtering and PCA comparison use the TCGA expression reference.
-- Local KNN filtering or cancer-type-specific reference selection also needs
-  the TCGA annotation file.
+- Cancer-type-specific reference selection with `filtering_ref_types` also
+  needs the TCGA annotation file.
 - `apply_sorted_bulk_imputation: true` on the example SCT dataset requires all
   three sorted-bulk paths. If you do not have a matched sorted-bulk reference,
   set `apply_sorted_bulk_imputation: false` and change any Mixed reference from

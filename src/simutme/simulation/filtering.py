@@ -15,6 +15,22 @@ from ..utility import safe_pca_transform
 logger = logging.getLogger(__name__)
 WORKFLOW_VERSION = "correlation-first-v1"
 NORMALIZATION_VERSION = "subset-row-sum-1e6-log2p1-v1"
+SUPPORTED_GEP_FILTERING_METHODS = ("median_gep", "mean_gep", "mgep", "linear_mmd")
+REMOVED_GEP_FILTERING_METHODS = ("knn", "knn_residual")
+
+
+def validate_gep_filtering_method(method):
+    supported = ", ".join(SUPPORTED_GEP_FILTERING_METHODS)
+    if method in REMOVED_GEP_FILTERING_METHODS:
+        raise ValueError(
+            f'GEP filtering method "{method}" has been removed. '
+            f"Supported methods are: {supported}."
+        )
+    if method not in SUPPORTED_GEP_FILTERING_METHODS:
+        raise ValueError(
+            f'Unsupported GEP filtering method "{method}". '
+            f"Supported methods are: {supported}."
+        )
 
 
 def identity_hash(identity):
@@ -55,7 +71,7 @@ def reference_variance_mask(reference, threshold):
         raise ValueError("gene_filtering_reference_variance_threshold must be finite and >= 0.")
     values = reference.to_numpy(dtype=np.float64)
     if len(reference) < 2:
-        raise ValueError("Reference variance selection requires at least two fitting samples.")
+        raise ValueError("Reference variance selection requires at least two selected reference samples.")
     if not np.isfinite(values).all() or (values < 0).any():
         raise ValueError("Variance reference contains negative or non-finite linear expression.")
     variance = reference.astype(np.float64).var(axis=0, ddof=0)
@@ -129,7 +145,7 @@ class FixedGeneFilter:
     """Reference-only filter reused across generation batches."""
 
     workflow_version = WORKFLOW_VERSION
-    supported_methods = ("median_gep", "mgep", "mean_gep", "linear_mmd")
+    supported_methods = SUPPORTED_GEP_FILTERING_METHODS
 
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
@@ -200,7 +216,7 @@ class FixedGeneFilter:
                     'GEP filtering method "mgep" uses only the upper quantile; '
                     'set the lower quantile to null or 0.'
                 )
-            if self.gep.filtering_method not in ("knn", "knn_residual") and (
+            if (
                 q_high is None or not 0 <= q_high <= 1
                 or (q_low is not None and not 0 <= q_low <= q_high)
             ):

@@ -16,6 +16,7 @@ from simutme.workflow import (
     _run_gene_filtering_postprocess,
     filtering_by_gene_list_and_pca_plot,
 )
+from simutme.simulation.simulator import GEPGenerationConfig
 from simutme.utility.pub_func import get_gene_list_filtered_by_quantile_range
 
 
@@ -127,6 +128,29 @@ def test_resolve_gep_filtering_params_uses_dataset_overrides_and_legacy_gene_ran
     assert resolved.filtering_in_pca_space is False
     assert resolved.gene_quantile_range == [0.005, 0.5, 0.995]
     assert resolved.high_corr_gene_list == ["G1", "G2"]
+
+
+@pytest.mark.parametrize("method", ["knn", "knn_residual"])
+def test_removed_gep_filtering_methods_fail_before_loading_inputs(tmp_path: Path, method: str):
+    config = _make_filtering_config(tmp_path)
+    config.tcga_merged_tpm_file_path = tmp_path / "missing_reference.csv"
+    config.tcga2cancer_type_file_path = tmp_path / "missing_annotation.csv"
+    config.high_corr_gene_file_path = tmp_path / "missing_gene_list.csv"
+
+    with pytest.raises(ValueError) as error:
+        _resolve_gep_filtering_params(
+            dataset_name="Mixed_Test",
+            params={"gep_filtering": False, "gep_filtering_method": method,
+                    "filtering_ref_types": "all"},
+            config=config,
+        )
+
+    message = str(error.value)
+    assert method in message and "has been removed" in message
+    for supported in ("median_gep", "mean_gep", "mgep", "linear_mmd"):
+        assert supported in message
+    with pytest.raises(ValueError, match="has been removed"):
+        GEPGenerationConfig(n_samples=1, filtering=False, filtering_method=method)
 
 
 def test_resolve_gene_filtering_params_uses_explicit_gene_filtering_switch(tmp_path: Path):

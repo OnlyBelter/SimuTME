@@ -312,9 +312,11 @@ def test_workflow_pca_summary_and_cached_totals(workflow_case):
     output = workflow.run_bulk_simulation("target", params, config)
     summary = read_summary(output)
     assert summary["gep_pca_n_components"] == summary["gep_filtering_n_pcs"] == 1
-    assert summary["gep_filtering_input_n_samples"] == 3
+    assert summary["gep_filtering_input_n_samples"] == 90
+    assert ad.read_h5ad(output).n_obs == 3
     workflow.run_bulk_simulation("target", params, config)
-    assert read_summary(output)["gep_filtering_input_n_samples"] == 3
+    assert read_summary(output)["gep_filtering_input_n_samples"] == 90
+    assert ad.read_h5ad(output).n_obs == 3
     assert len(batches) == 1
 
 
@@ -374,7 +376,8 @@ def test_compatible_intermediate_resume_keeps_normalization_and_stats(workflow_c
     np.testing.assert_allclose(restored.X, original.X)
     assert restored.obs_names.tolist() == original.obs_names.tolist()
     assert len(batches) == 1
-    assert read_summary(output)["gep_filtering_input_n_samples"] == 3
+    assert read_summary(output)["gep_filtering_input_n_samples"] == 90
+    assert restored.n_obs == 3
 
 
 def test_supplied_list_skips_source_and_legacy_range_selection(workflow_case):

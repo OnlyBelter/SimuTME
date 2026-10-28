@@ -58,25 +58,17 @@ def test_workflow_variance_metadata_and_cache_identity(workflow_case):
     pd.testing.assert_frame_equal(reference, pd.read_csv(config.tcga_merged_tpm_file_path, index_col=0))
 
 
-def test_local_selection_excludes_heldout_information(workflow_case, monkeypatch):
+def test_reference_variance_uses_the_selected_reference_cohort(workflow_case):
     config, params, _, _ = workflow_case
-    reference = pd.DataFrame({"a": [1, 3, 100], "b": [5, 1, 3],
-                              "unused": [10, 10, 500]}, index=["r1", "r2", "r3"])
-    reference.to_csv(config.tcga_merged_tpm_file_path)
-    split = pd.DataFrame({"cancer_type": ["A"] * 3,
-                          "role": ["fitting", "fitting", "held_out"]}, index=reference.index)
-    monkeypatch.setattr(workflow, "split_tcga_reference",
-                        lambda *args: (reference, split, pd.DataFrame()))
     params["gene_filtering_reference_variance_threshold"] = 1
     gene = workflow._resolve_gene_filtering_params("target", params, config)
     space = workflow._prepare_fixed_gene_filter(
         "target", params["sct_reference"]["file_path"], ["CT1", "CT2"],
-        gep_params(filtering_method="knn", knn_n_neighbors=1,
-                   reference_file=str(config.tcga_merged_tpm_file_path)), gene, config,
-        Path(config.simu_bulk_dir) / "local_variance")
-    assert space.genes == ["b"]  # a is exactly at the cutoff on fitting rows.
-    assert space.calibration_identity["reference_variance_scope"] == "fitting-only"
-    assert space.reference_variance_metadata["reference_variance_n_samples"] == 2
+        gep_params(reference_file=str(config.tcga_merged_tpm_file_path)), gene, config,
+        Path(config.simu_bulk_dir) / "reference_variance")
+    assert space.genes == ["a", "b"]
+    assert space.reference_variance_metadata["reference_variance_scope"] == "reference"
+    assert space.reference_variance_metadata["reference_variance_n_samples"] == 3
 
 
 def test_pca_loading_export_order_and_values(tmp_path):

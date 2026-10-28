@@ -42,7 +42,6 @@ def test_resolve_mixed_sct_dataset_path_supports_explicit_path_reference(tmp_pat
             "sct_reference": {
                 "source_type": "path",
                 "file_path": str(original_sct_path),
-                "version": "original",
             }
         },
         config=config,
@@ -530,6 +529,9 @@ def test_simu_config_from_yaml_ignores_deprecated_sorted_bulk_imputation_out_dir
                     "tcga_merged_tpm_file_path": "./datasets/merged_tpm.csv",
                     "high_corr_gene_file_path": "./datasets/high_corr.csv",
                     "merged_sc_dataset_file_path": "./datasets/merged_sc.h5ad",
+                    "gep_filtering_reference_file": "./datasets/gep_reference.csv",
+                    "gene_filtering_reference_file": "./datasets/gene_reference.csv",
+                    "pred_cell_prop_file_path": "./datasets/predicted_proportions.csv",
                 },
                 "constants": {
                     "sc_dataset_ids": ["ds1"],
@@ -552,6 +554,17 @@ def test_simu_config_from_yaml_ignores_deprecated_sorted_bulk_imputation_out_dir
 
     config = SimuConfig.from_yaml(str(config_path))
 
+    for name in (
+        "simu_bulk_dir",
+        "tcga2cancer_type_file_path",
+        "tcga_merged_tpm_file_path",
+        "high_corr_gene_file_path",
+        "merged_sc_dataset_file_path",
+        "gep_filtering_reference_file",
+        "gene_filtering_reference_file",
+        "pred_cell_prop_file_path",
+    ):
+        assert isinstance(getattr(config, name), Path)
     assert config.simu_bulk_dir == Path("./datasets")
 
 
@@ -723,6 +736,8 @@ def test_run_bulk_simulation_mixed_uses_random_sampling_and_prefers_dataset_tota
         tcga_merged_tpm_file_path=tcga_path,
         high_corr_gene_file_path=high_corr_path,
         sorted_bulk_imputation_seed=123,
+        mixed_sct_loading_mode="auto",
+        mixed_sct_auto_eager_max_gb=4.0,
         cell_type2subtypes={"B Cells": ["B Cells"], "DC": ["pDC", "mDC"]},
         output_types=["B Cells", "DC"],
         total_rna_coefficient={"B Cells": 1.0, "DC": 1.0},
@@ -764,6 +779,11 @@ def test_run_bulk_simulation_mixed_uses_random_sampling_and_prefers_dataset_tota
             self.generated_bulk_gep_fp.write_text("placeholder", encoding="utf-8")
             self.generated_cell_fraction_fp = tmp_path / "cell_fractions.csv"
             self.generated_cell_fraction_fp.write_text("sample_id\n", encoding="utf-8")
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_pca_target = None
+            self.gep_filtering_n_pcs = None
 
     monkeypatch.setattr("simutme.workflow.BulkGEPGenerator", FakeBulkGEPGenerator)
     monkeypatch.setattr("simutme.workflow._save_cancer_cell_fraction_distribution", lambda **kwargs: None)
