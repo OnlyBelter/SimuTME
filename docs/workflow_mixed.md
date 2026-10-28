@@ -14,13 +14,17 @@ ground-truth cell fractions.
 1. Load the YAML configuration and dataset-specific parameters.
 2. Determine which SCT reference dataset should be used.
 3. Initialize `BulkGEPGenerator`.
-4. Resolve and persist the fixed gene list G before target generation.
+4. When gene or GEP filtering is enabled, apply reference-variance screening
+   using `gene_filtering_reference_variance_threshold` when it is not `null`,
+   then resolve and persist the fixed gene list G before target generation.
 5. Generate cell-type proportions and sample SCT profiles.
 6. Compose bulk GEPs in the original linear expression space.
-7. Subset reference and simulated profiles to G, normalize each row to
-   1,000,000, and transform to `log2(TPM + 1)`.
-8. Optionally reject profiles by gene ranges and reference-PCA distances.
-9. Save accepted expression on G with matching cell-fraction rows.
+7. Subset reference and simulated profiles to G and normalize each row to
+   1,000,000 in linear TPM.
+8. Optionally reject profiles by gene ranges and the configured
+   reference-based GEP filtering method.
+9. Save output expression on G as `log2(TPM + 1)` with matching cell-fraction
+   rows.
 10. Save summaries, fraction distributions, and optional comparison PCA.
 
 The independent unfiltered correlation source retains its full gene universe
@@ -283,13 +287,16 @@ Gene selection runs before GEP-level profile filtering. With
 `gene_filtering_high_corr_gene_file`, falling back to
 `paths.high_corr_gene_file_path`, takes precedence over a correlation source.
 Otherwise, `gene_filtering_correlation_reference_dataset` is required.
+The reference-variance screen described below runs before correlation-based or
+supplied-list selection when either gene or GEP filtering is enabled.
 
 The fixed list G is shared by normalization, optional per-gene range checks,
 reference-only GEP-filtering PCA, and accepted-profile export. With
-`gene_filtering: false` and `gep_filtering: true`, G is the common
-reference/SCT gene universe. With GEP filtering disabled and gene filtering
-enabled, all generated profiles are normalized and exported on G without
-profile rejection.
+`gene_filtering: false` and `gep_filtering: true`, G starts from the common
+reference/SCT gene universe and is narrowed by reference-variance screening
+when that threshold is configured. With GEP filtering disabled and gene
+filtering enabled, all generated profiles are normalized and exported on G
+without profile rejection.
 
 `gep_filtering` gates profile rejection. `gep_filtering_by_gene_range`
 enables the range acceptance check; it does not remove genes. The supported
@@ -364,14 +371,18 @@ count, removed gene count, and number of reference samples used for selection.
 
 For correlation-based gene selection, `calculate_gene_cell_prop_correlation`
 creates `full_gene_corr_with_cell_fraction.csv` without applying a threshold
-or top-N limit. A target can reuse that matrix by naming an earlier Mixed
-dataset with `gene_filtering_correlation_reference_dataset`. The source must
-use segment sampling with GEP- and gene-level filtering disabled. Each target
-applies its own `gene_filtering_corr_threshold` and
-`gene_filtering_n_gene_max`; those selections do not alter the reusable
-matrix. No correlations are calculated from target samples, and no implicit
-pilot dataset is created. A supplied high-correlation gene list takes
-precedence and is not modified by correlation thresholds.
+or top-N limit. Each value is the correlation between a gene's expression and
+one cell type's fraction across source samples. A target can reuse that matrix
+by naming an earlier Mixed dataset with
+`gene_filtering_correlation_reference_dataset`. The source must use segment
+sampling with GEP- and gene-level filtering disabled. Each target applies its
+own `gene_filtering_corr_threshold` and selects up to
+`gene_filtering_n_gene_max` genes per output cell type. The final list is the
+union across cell types, so a gene is included when it passes the threshold
+and top-N selection for at least one cell type. These selections do not alter
+the reusable matrix. No correlations are calculated from target samples, and
+no implicit pilot dataset is created. A supplied high-correlation gene list
+takes precedence and is not modified by correlation thresholds.
 
 The primary target `.h5ad` contains exactly G as normalized
 `log2(TPM + 1)`. `gene_filtering_save_filtered_h5ad` optionally creates an

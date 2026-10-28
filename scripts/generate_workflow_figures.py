@@ -80,13 +80,14 @@ def _svg_flow(title: str, steps: list[tuple[str, str]], width: int, height: int)
 
 def _bulk_steps():
     return [
-        ("Load YAML config (paths/constants/parameters) and dataset params", "#e8f4ff"),
-        ("Initialize BulkGEPGenerator (merged scRNA-seq + optional SCT ref)", "#e8f4ff"),
-        ("Generate cell-type proportions (sampling_method_prop)", "#fff5e6"),
-        ("Sample per-type expression profiles from scRNA-seq", "#fff5e6"),
-        ('Mix into bulk GEPs (simu_method = "mul") and write .h5ad', "#e6fff0"),
-        ("Optional: TCGA-guided filtering", "#fde8ef"),
-        ("Optional: PCA validation plots / artifacts", "#fde8ef"),
+        ("Load YAML config and resolve SCT / filtering references", "#e8f4ff"),
+        ("Resolve shared gene set G before generation (reference variance screen + high-corr gene selection)", "#e8f4ff"),
+        ("Generate cell-type proportions and sample SCT profiles", "#fff5e6"),
+        ("Mix candidate bulk GEPs in linear expression space", "#fff5e6"),
+        ("Apply shared G to reference and simulated profiles; normalize for comparison", "#e6fff0"),
+        ("Optional: filter by gene ranges and reference-based GEP criteria in the configured expression space", "#fde8ef"),
+        ("Save profiles as log2(TPM + 1) with matching cell fractions and summaries", "#e6fff0"),
+        ("Optional: comparison PCA and diagnostics", "#fde8ef"),
     ]
 
 
@@ -110,7 +111,7 @@ def main():
         "SimuTME Workflow: Mixed Bulk RNA-seq Simulation",
         _bulk_steps(),
         width=1200,
-        height=980,
+        height=1200,
     )
     (out_dir / "workflow_bulk.svg").write_text(bulk_svg, encoding="utf-8")
 
