@@ -45,18 +45,18 @@ Its dependency stack is aligned with
 [VAEDecon](https://github.com/OnlyBelter/VAEDecon), so SimuTME can be
 installed in the same environment as VAEDecon.
 
-From source:
+Choose one installation method below. Both install SimuTME and its
+dependencies; do not run both.
+
+### Install from source
 
 ```bash
+git clone git@github.com:OnlyBelter/SimuTME.git
+cd SimuTME
+
 conda create -n simutme python=3.12
 conda activate simutme
 pip install -e .
-```
-
-With Poetry:
-
-```bash
-poetry install
 ```
 
 ## Quickstart
