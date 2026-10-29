@@ -1456,7 +1456,9 @@ def run_bulk_simulation(dataset_name: str,
             dataset_name=dataset_name,
             cell_fraction_file_path=bulk_generator.generated_cell_fraction_fp,
             output_dir=Path(simu_bulk_dir) / dataset_name,
-            plot_all_cell_types=sampling_method_prop == "dirichlet",
+            plot_all_cell_types=(
+                sampling_method_prop == "dirichlet" or resolved_gep_filtering.enabled
+            ),
         )
         if sampling_method_prop == "dirichlet" and pred_cell_prop_file_path not in (None, ""):
             _save_estimated_dirichlet_alpha_from_pred_cell_props(

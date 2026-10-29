@@ -18,6 +18,7 @@ from simutme.simulation.sampling import (
     segment_sampling,
 )
 from simutme.simulation.simulator import GEPGenerationConfig
+from simutme.workflow import _save_cancer_cell_fraction_distribution
 
 
 def _write_predictions(path, rows):
@@ -300,6 +301,119 @@ def test_global_prediction_path_is_only_used_by_supported_modes(
         assert generation.segment_fraction_max_caps is None
     if sampling_method_prop == "dirichlet":
         assert captured["alpha_estimation_path"] == predictions
+
+
+@pytest.mark.parametrize(
+    "sampling_method, global_filter, dataset_filter, gene_filter, expected",
+    [
+        ("dirichlet", False, False, False, True),
+        ("dirichlet", False, True, False, True),
+        ("segment", False, True, False, True),
+        ("segment", True, False, False, False),
+        ("sparse", False, True, False, True),
+        ("sparse", False, False, False, False),
+        ("random", True, None, False, True),
+        ("segment", False, False, True, False),
+    ],
+)
+def test_mixed_workflow_enables_all_cell_plots_for_dirichlet_or_gep_filtering(
+    workflow_case, tmp_path, monkeypatch, sampling_method, global_filter,
+    dataset_filter, gene_filter, expected,
+):
+    import simutme.workflow as workflow
+
+    config, params, _, _ = workflow_case
+    config.gep_filtering_enabled_default = global_filter
+    params.update(sampling_method_prop=sampling_method, gene_filtering=gene_filter)
+    if dataset_filter is None:
+        params.pop("gep_filtering", None)
+    else:
+        params["gep_filtering"] = dataset_filter
+    captured = {}
+
+    class DummySpace:
+        additional_artifacts = []
+
+    class FakeBulkGEPGenerator:
+        def __init__(self, **kwargs):
+            self.generated_bulk_gep_fp = tmp_path / "generated.h5ad"
+            self.generated_cell_fraction_fp = tmp_path / "fractions.csv"
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_pca_target = None
+            self.gep_filtering_n_pcs = None
+
+        def generate_gep(self, config):
+            captured["generation_filtering"] = config.filtering
+
+    monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
+    monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
+                        lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(
+        workflow, "_save_cancer_cell_fraction_distribution",
+        lambda **kwargs: captured.update(plot_all_cell_types=kwargs["plot_all_cell_types"]),
+    )
+    monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess", lambda **kwargs: {})
+    monkeypatch.setattr(workflow, "_build_mixed_dataset_summary", lambda **kwargs: None)
+
+    workflow.run_bulk_simulation("target", params, config)
+
+    assert captured["plot_all_cell_types"] is expected
+    assert captured["generation_filtering"] is (
+        global_filter if dataset_filter is None else dataset_filter
+    )
+
+
+def test_gep_filtered_mixed_workflow_writes_non_cancer_plots(
+    workflow_case, tmp_path, monkeypatch,
+):
+    import simutme.workflow as workflow
+
+    config, params, _, _ = workflow_case
+    params.update(sampling_method_prop="segment", gep_filtering=True, gene_filtering=False)
+    captured = {}
+
+    class DummySpace:
+        additional_artifacts = []
+
+    class FakeBulkGEPGenerator:
+        def __init__(self, **kwargs):
+            self.generated_bulk_gep_fp = tmp_path / "generated.h5ad"
+            self.generated_cell_fraction_fp = tmp_path / "fractions.csv"
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_pca_target = None
+            self.gep_filtering_n_pcs = None
+
+        def generate_gep(self, config):
+            assert config.filtering
+            pd.DataFrame(
+                {"Cancer Cells": [0.2, 0.6, 0.8], "CT1": [0.8, 0.4, 0.2]},
+                index=["accepted1", "accepted2", "accepted3"],
+            ).to_csv(self.generated_cell_fraction_fp)
+
+    def save_plots(**kwargs):
+        captured["output_dir"] = kwargs["output_dir"]
+        _save_cancer_cell_fraction_distribution(**kwargs)
+
+    monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
+    monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
+                        lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", save_plots)
+    monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess", lambda **kwargs: {})
+    monkeypatch.setattr(workflow, "_build_mixed_dataset_summary", lambda **kwargs: None)
+
+    workflow.run_bulk_simulation("target", params, config)
+
+    output_dir = captured["output_dir"]
+    summary = pd.read_csv(output_dir / "cell_fraction_summary_all_cell_types.csv")
+    assert summary.loc[0, "cell_type"] == "CT1"
+    assert summary.loc[0, "n_samples"] == 3
+    assert summary.loc[0, "mean"] == pytest.approx((0.8 + 0.4 + 0.2) / 3, abs=1e-6)
+    assert (output_dir / "CT1_fraction_distribution.png").exists()
+    assert (output_dir / "CT1_fraction_distribution.pdf").exists()
 
 
 def test_example_config_loads_shared_file_paths_from_paths():

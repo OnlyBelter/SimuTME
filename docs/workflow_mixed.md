@@ -293,10 +293,13 @@ Dataset-local diagnostic outputs under:
 - `cancer_cell_fraction_distribution.png`
 - `cancer_cell_fraction_distribution.pdf`
 - `cancer_cell_fraction_summary.csv`
-- `cell_fraction_summary_all_cell_types.csv` when `sampling_method_prop: "dirichlet"`
-- `<cell_type>_fraction_distribution.png` when `sampling_method_prop: "dirichlet"`
-- `<cell_type>_fraction_distribution.pdf` when `sampling_method_prop: "dirichlet"`
+- `cell_fraction_summary_all_cell_types.csv` when `sampling_method_prop: "dirichlet"` or GEP filtering is enabled; contains non-cancer cell types
+- `<cell_type>_fraction_distribution.png` when `sampling_method_prop: "dirichlet"` or GEP filtering is enabled
+- `<cell_type>_fraction_distribution.pdf` when `sampling_method_prop: "dirichlet"` or GEP filtering is enabled
 - `dirichlet_alpha_estimated_from_pred_cell_props.csv` when `sampling_method_prop: "dirichlet"` and `pred_cell_prop_file_path` is provided
+
+The plots use the fraction table of accepted samples after GEP filtering.
+Gene filtering or PCA visualization alone does not enable all-cell-type plots.
 
 ## Optional Filtering And PCA Outputs
 

@@ -464,6 +464,8 @@ Typical outputs:
   - `cancer_cell_fraction_distribution.png`
   - `cancer_cell_fraction_distribution.pdf`
   - `cancer_cell_fraction_summary.csv`
+- when Dirichlet sampling or GEP filtering is enabled, per-cell-type fraction
+  plots and `cell_fraction_summary_all_cell_types.csv` for non-cancer cell types
 
 Optional post-processing outputs:
 
