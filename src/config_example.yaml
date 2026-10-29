@@ -109,7 +109,7 @@ parameters:
   plot_pca_for_comparison: true  # Optional Mixed-versus-TCGA PCA plotting switch; works with or without gene filtering
   gene_filtering_pca_n_components: 2  # Optional PCA component count for comparison plots; must be >= 2 when plotting is enabled
   gene_filtering_pca_figsize: [5, 5]  # Optional figure size for comparison plots
-  n_base: 100
+  n_base: 30
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
   sorted_bulk_imputation_seed: 123  # Optional: random seed for diagnostic sampling during sorted-bulk-guided SCT imputation

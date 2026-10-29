@@ -48,7 +48,7 @@ installed in the same environment as VAEDecon.
 ### Install from source
 
 ```bash
-git clone git@github.com:OnlyBelter/SimuTME.git
+git clone https://github.com/OnlyBelter/SimuTME.git
 cd SimuTME
 
 conda create -n simutme python=3.12
