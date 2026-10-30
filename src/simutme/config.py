@@ -9,6 +9,26 @@ DEFAULT_CELL_TYPES = [
     'Macrophages', 'Mast Cells', 'NK', 'Neutrophils', 'Monocytes', 'T Cells'
 ]
 
+# Raw column-wise extrema from DeSide Table_S3.csv (7,699 TCGA samples).
+DESIDE_TCGA_CELL_PROPORTION_RANGES = {
+    'Plasma B cells': (0.0, 0.239),
+    'Non-plasma B cells': (0.0, 0.704),
+    'CD4 T': (0.0, 0.106),
+    'CD8 T effector': (0.0, 0.161),
+    'CD8 T (GZMK high)': (0.0, 0.164),
+    'Double-neg-like T': (0.0, 0.137),
+    'Cancer Cells': (0.028, 0.996),
+    'DC': (0.0, 0.165),
+    'Endothelial Cells': (0.0, 0.506),
+    'CAFs': (0.0, 0.716),
+    'Myofibroblasts': (0.0, 0.479),
+    'Macrophages': (0.0, 0.612),
+    'Mast Cells': (0.0, 0.050),
+    'NK': (0.0, 0.029),
+    'Neutrophils': (0.0, 0.081),
+    'Monocytes': (0.0, 0.069),
+}
+
 DEFAULT_CORE_MARKER_GENES = {'Cancer Cells': ['KRT19', 'KRT18', 'KRT8', 'EPCAM'],
                              'CD4 T': ['BATF', 'ICOS', 'CD4', 'IL7R', 'FOXP3', 'TIGIT'],
                              'CD8 T': ['CD8A', 'CD8B'],

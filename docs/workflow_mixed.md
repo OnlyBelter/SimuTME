@@ -224,7 +224,8 @@ bulk samples.
 Set `paths.pred_cell_prop_file_path` once to share a predicted proportion CSV
 across Mixed datasets. A dataset-level `pred_cell_prop_file_path` overrides
 the shared path. Dirichlet sampling uses the file to estimate alpha values;
-segment sampling uses it for maximum caps only when `gep_filtering: true`.
+segment sampling uses it for maximum caps only when `gep_filtering: true`
+and no `cell_prop_prior` is supplied.
 If a dataset is neither Dirichlet nor segment with GEP filtering enabled, the
 shared path is not used.
 
@@ -243,19 +244,29 @@ For `sampling_method_prop: "dirichlet"`, the workflow also supports:
   value overrides `parameters.dirichlet_sampling_seed`; the seed does not
   control other stochastic steps in Mixed generation.
 
-For `sampling_method_prop: "segment"`, SimuTME uses
-`paths.pred_cell_prop_file_path` or its dataset-level override only when
-`gep_filtering: true`. It requires a numeric, nonnegative column for every
+For GEP-filtered segment sampling, set `cell_prop_prior` to a mapping from
+output cell types to `[minimum, maximum]` ranges, or to the
+`"DeSide_predicted_TCGA_range"` preset. The preset uses the raw ranges in
+`simutme.config.DESIDE_TCGA_CELL_PROPORTION_RANGES`. Set the optional
+`enlarge_cell_prop_prior` to a nonnegative number, default `0`, to subtract it
+from each minimum and add it to each maximum, clipped to `[0, 1]`.
+For example, `0.15` expands `[0.2, 0.9]` to `[0.05, 1.0]`.
+
+When a prior is supplied, it takes precedence and prediction-file maximum
+caps are not applied. Missing labels in an explicit mapping remain
+unconstrained; the preset must cover every output label. The workflow checks
+invalid or infeasible bounds before candidate expression generation.
+
+Without a prior, `paths.pred_cell_prop_file_path` or its dataset-level override
+provides caps. SimuTME requires a numeric, nonnegative column for every
 output cell type, normalizes each row to sum to one, and uses the maximum
-normalized value in each column as that cell type's cap. Extra metadata columns
-are ignored. If `cell_prop_prior` is also set, SimuTME intersects its ranges
-with these caps. Incompatible or infeasible bounds fail before candidate
-expression generation.
+normalized value in each column as that cell type's cap. Extra metadata
+columns are ignored.
 
 These caps constrain marginal maxima across the complete file; they do not
 condition on its `cancer_type` column or reproduce the joint distribution of
 observed cell fractions. Segment proposals are rejection-sampled before
-expression aggregation, and capped runs log proposal acceptance. If proposal
+expression aggregation, and constrained runs log proposal acceptance. If proposal
 acceptance is too low, fraction generation stops at a bounded attempt count
 with an error rather than looping indefinitely. The DeSide file contains
 predicted proportions, so these maxima define a sampling constraint rather

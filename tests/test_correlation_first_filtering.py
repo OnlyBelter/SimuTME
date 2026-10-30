@@ -256,6 +256,30 @@ def test_workflow_selection_export_and_cache_reuse(workflow_case):
     assert len(batches) == 1
 
 
+def test_filtered_segment_prior_is_saved_in_cache_identity(workflow_case):
+    config, params, _, _ = workflow_case
+    params.update(
+        gep_filtering=True,
+        gep_filtering_method="mgep",
+        filtering_in_pca_space=False,
+        cell_prop_prior={"CT1": [0.1, 0.9]},
+        enlarge_cell_prop_prior=0.05,
+    )
+
+    output = workflow.run_bulk_simulation("target", params, config)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    metadata = json.loads((result_dir / "filtering_metadata.json").read_text())
+    generation = metadata["identity"]["generation"]
+    assert generation["cell_prop_prior"]["CT1"] == pytest.approx([0.05, 0.95])
+    assert generation["pred_cell_prop_file_path"] is None
+    assert generation["segment_fraction_cap_metadata"] is None
+    assert workflow.run_bulk_simulation("target", params, config) == output
+
+    params["enlarge_cell_prop_prior"] = 0.1
+    with pytest.raises(ValueError, match="new dataset name/output location"):
+        workflow.run_bulk_simulation("target", params, config)
+
+
 @pytest.mark.parametrize("change", ["gene_list", "range", "distance", "missing_metadata"])
 @pytest.mark.parametrize("resume", [False, True])
 def test_workflow_rejects_incompatible_outputs(workflow_case, change, resume):

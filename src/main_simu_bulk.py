@@ -40,6 +40,7 @@ def main(argv=None):
     # and invalid paths work even without the simulation dependencies.
     import yaml
     from simutme import SimuConfig, run_bulk_simulation
+    from simutme.workflow import preflight_segment_cell_prop_priors
 
     with config_path.open(encoding="utf-8") as f:
         yaml_data = yaml.safe_load(f)
@@ -53,6 +54,7 @@ def main(argv=None):
             parser.error(f"Dataset '{dataset_name}' must contain a parameter mapping.")
 
     config = SimuConfig.from_yaml(str(config_path))
+    preflight_segment_cell_prop_priors(config, datasets_to_run)
     try:
         mp.set_start_method("spawn")
     except (RuntimeError, NotImplementedError):

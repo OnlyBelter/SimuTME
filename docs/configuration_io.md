@@ -36,8 +36,9 @@ then reads `datasets` separately when executing the workflow.
 
 These paths let Mixed datasets share expression references and predicted
 proportion data. Dataset-level fields with the same names override the shared
-paths. The shared prediction path is unused unless a dataset uses Dirichlet
-sampling or segment sampling with GEP filtering enabled.
+paths. Dirichlet sampling uses the shared prediction path to estimate alpha.
+GEP-filtered segment sampling uses it for maximum caps only when no explicit
+`cell_prop_prior` is configured.
 
 - `gep_filtering_reference_file`
   Reference expression matrix for Mixed GEP filtering. Defaults to
@@ -51,9 +52,9 @@ sampling or segment sampling with GEP filtering enabled.
 - `pred_cell_prop_file_path`
   Optional predicted cell-proportion CSV shared by Mixed datasets. Dirichlet
   sampling uses it to estimate concentration parameters. Segment sampling
-  uses it to cap proportions only when GEP filtering is enabled. A Mixed
-  dataset using another sampling mode leaves the shared path unused. A
-  dataset can override it with its own `pred_cell_prop_file_path`.
+  uses it for caps only when GEP filtering is enabled and no `cell_prop_prior`
+  is supplied. Other sampling modes leave the shared path unused. A dataset
+  can override it with its own `pred_cell_prop_file_path`.
 
 ### Optional sorted-bulk-guided SCT imputation paths
 
@@ -148,12 +149,35 @@ Dataset-level Mixed fields can override them.
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
 
-When you use `paths.pred_cell_prop_file_path` with segment sampling, SimuTME
-normalizes each row over the output cell types and caps each generated fraction
-at that cell type's global observed maximum. This requires GEP filtering.
-Dirichlet sampling uses the same file to estimate alpha values. A dataset-level
-`pred_cell_prop_file_path` overrides the shared path; the global path is
-ignored by other sampling modes.
+For GEP-filtered segment sampling, `cell_prop_prior` accepts either a mapping
+from output cell types to `[minimum, maximum]` pairs or the
+`"DeSide_predicted_TCGA_range"` preset. The preset selects raw per-cell-type
+minimum and maximum values from
+`simutme.config.DESIDE_TCGA_CELL_PROPORTION_RANGES`. An explicit mapping may
+constrain only selected output cell types; omitted cell types remain
+unconstrained. Unknown cell types and invalid ranges fail validation.
+
+`enlarge_cell_prop_prior` optionally expands every configured range by the
+same additive amount before sampling. It defaults to `0`, must be a finite
+nonnegative number, and clips expanded bounds to `[0, 1]`. For example, `0.15`
+expands `[0.2, 0.9]` to `[0.05, 1.0]`. This setting requires an explicit
+`cell_prop_prior`.
+
+An explicit `cell_prop_prior` takes precedence over the shared or
+dataset-level `pred_cell_prop_file_path`: SimuTME does not read that file or
+apply its segment maximum caps for this dataset. Without a prior, GEP-filtered
+segment sampling uses the prediction file to cap each output cell type at its
+global maximum. SimuTME normalizes each prediction row over the output cell
+types before calculating these caps. Dirichlet sampling continues to use the
+file to estimate alpha values.
+
+`simutme.config.DESIDE_TCGA_CELL_PROPORTION_RANGES` records raw minimum and
+maximum predictions for each cell type from DeSide `Table_S3.csv` (7,699
+samples). Import it with
+`from simutme.config import DESIDE_TCGA_CELL_PROPORTION_RANGES`. These values
+are a reference snapshot and are not applied automatically; unlike segment
+caps, they are not row-normalized. Set `cell_prop_prior` to
+`"DeSide_predicted_TCGA_range"` to use them explicitly.
 
 `gene_filtering_reference_variance_threshold` accepts a finite, nonnegative
 number in TPM squared or `null` to disable selection (the code default).
@@ -266,6 +290,7 @@ Each entry under `datasets:` defines one simulation task.
 - `filtering`
 - `filtering_ref_types`
 - `cell_prop_prior`
+- `enlarge_cell_prop_prior`
 - `zero_ratio_threshold`
 - `cell_type_col`
 - `cell_subtype_col`

@@ -490,14 +490,20 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     rng=dirichlet_rng,
                     max_segment_sampling_attempts=(
                         max(10000, candidate_batch_size * 500)
-                        if config.segment_fraction_max_caps else None
+                        if config.sampling_method_prop == "segment"
+                        and config.filtering and config.cell_prop_prior else None
                     ),
                 )
                 fractions_finished = perf_counter()
                 fraction_stats = generated_cell_frac.attrs.get("segment_sampling_stats")
-                if config.segment_fraction_max_caps and fraction_stats:
+                if (
+                    config.sampling_method_prop == "segment"
+                    and config.filtering
+                    and config.cell_prop_prior
+                    and fraction_stats
+                ):
                     logger.info(
-                        "Segment fraction cap proposals: requested=%d, attempted=%d, "
+                        "Segment fraction prior proposals: requested=%d, attempted=%d, "
                         "rejected=%d, acceptance=%.3g%%.",
                         fraction_stats["requested"], fraction_stats["attempted"],
                         fraction_stats["rejected"],

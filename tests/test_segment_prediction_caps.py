@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 import sys
 
 import numpy as np
@@ -15,10 +16,12 @@ from simutme.simulation.sampling import (
     format_segment_fraction_caps,
     generate_cell_fraction,
     merge_cell_prop_prior_with_maxima,
+    resolve_segment_cell_prop_prior,
     segment_sampling,
 )
 from simutme.simulation.simulator import GEPGenerationConfig
 from simutme.workflow import _save_cancer_cell_fraction_distribution
+from simutme.config import DESIDE_TCGA_CELL_PROPORTION_RANGES
 
 
 def _write_predictions(path, rows):
@@ -99,6 +102,57 @@ def test_manual_segment_ranges_intersect_empirical_caps():
             ["A", "B"], {"A": (0.0, 0.4), "B": (0.0, 0.4)}, {"A": 0.8, "B": 0.8})
     with pytest.raises(ValueError, match="absent from segment outputs"):
         merge_cell_prop_prior_with_maxima(["A"], {"other": (0, 1)}, {"A": 1.0})
+
+
+def test_deside_preset_expands_and_clips_without_changing_constant():
+    original = DESIDE_TCGA_CELL_PROPORTION_RANGES.copy()
+    resolved = resolve_segment_cell_prop_prior(
+        list(original), "DeSide_predicted_TCGA_range", 0.15,
+    )
+
+    assert resolved["Cancer Cells"] == pytest.approx((0.0, 1.0))
+    assert resolved["CD4 T"] == pytest.approx((0.0, 0.256))
+    assert resolved["CAFs"] == pytest.approx((0.0, 0.866))
+    assert DESIDE_TCGA_CELL_PROPORTION_RANGES == original
+
+
+def test_manual_segment_prior_expands_partial_mapping():
+    source = {"A": [0.2, 0.6]}
+    resolved = resolve_segment_cell_prop_prior(["A", "B"], source, 0.15)
+
+    assert resolved["A"] == pytest.approx((0.05, 0.75))
+    assert "B" not in resolved
+    assert source == {"A": [0.2, 0.6]}
+
+
+@pytest.mark.parametrize(
+    "cell_types, prior, enlargement, message",
+    [
+        (["A"], "unknown", 0, "Unknown cell_prop_prior preset"),
+        (["unknown"], "DeSide_predicted_TCGA_range", 0, "missing output cell types"),
+        (["A"], {"B": (0, 1)}, 0, "absent from segment outputs"),
+        (["A"], {"A": (0.8, 0.2)}, 0, "0 <= minimum <= maximum"),
+        (["A"], {"A": (0, np.nan)}, 0, "finite"),
+        (["A"], {"A": (0, 1)}, -0.1, "finite nonnegative"),
+        (["A"], {"A": (0, 1)}, np.inf, "finite nonnegative"),
+        (["A"], {"A": (0, 1)}, True, "finite nonnegative"),
+        (["A", "B"], {"A": (0.8, 1), "B": (0.4, 1)}, 0, "minima sum"),
+        (["A", "B"], {"A": (0, 0.4), "B": (0, 0.4)}, 0, "maxima sum"),
+    ],
+)
+def test_segment_prior_rejects_invalid_inputs(cell_types, prior, enlargement, message):
+    with pytest.raises(ValueError, match=message):
+        resolve_segment_cell_prop_prior(cell_types, prior, enlargement)
+
+
+def test_expanded_segment_prior_constrains_samples():
+    prior = resolve_segment_cell_prop_prior(
+        ["A", "B", "C"], {"A": (0.1, 0.6), "B": (0.1, 0.5)}, 0.05,
+    )
+    np.random.seed(42)
+    values = segment_sampling(100, ["A", "B", "C"], cell_prop_prior=prior, max_attempts=50000)
+    for cell_type, (lower, upper) in prior.items():
+        assert values[cell_type].between(lower, upper).all()
 
 
 def test_segment_sampling_respects_caps_and_reports_rejections():
@@ -182,7 +236,7 @@ def test_mixed_workflow_resolves_caps_only_for_filtered_segment(
     params.update(
         gep_filtering=True,
         pred_cell_prop_file_path=str(predictions),
-        cell_prop_prior={"CT1": (0.1, 0.7)},
+        cell_prop_prior=None,
     )
     captured = {}
 
@@ -217,8 +271,126 @@ def test_mixed_workflow_resolves_caps_only_for_filtered_segment(
     assert generation.sampling_method_prop == "segment"
     assert generation.filtering is True
     assert generation.segment_fraction_max_caps == {"CT1": 0.8, "CT2": 0.8}
-    assert generation.cell_prop_prior == {"CT1": (0.1, 0.7), "CT2": (0.0, 0.8)}
+    assert generation.cell_prop_prior == {"CT1": (0.0, 0.8), "CT2": (0.0, 0.8)}
     assert generation.segment_fraction_cap_metadata["segment_fraction_cap_source_n_rows"] == 2
+
+
+@pytest.mark.parametrize("source", ["global", "dataset"])
+@pytest.mark.parametrize("prior", ["preset", "manual", "empty"])
+def test_filtered_segment_prior_overrides_prediction_caps(
+    workflow_case, tmp_path, monkeypatch, source, prior,
+):
+    import simutme.workflow as workflow
+
+    config, params, _, _ = workflow_case
+    config.cell_type2subtypes = {"Cancer Cells": ["Cancer Cells"], "CD4 T": ["CD4 T"]}
+    config.output_types = ["Cancer Cells", "CD4 T"]
+    unused_prediction = tmp_path / "missing_predictions.csv"
+    if source == "global":
+        config.pred_cell_prop_file_path = unused_prediction
+    else:
+        params["pred_cell_prop_file_path"] = str(unused_prediction)
+    configured_prior = {
+        "preset": "DeSide_predicted_TCGA_range",
+        "manual": {"Cancer Cells": (0.2, 0.9)},
+        "empty": {},
+    }[prior]
+    params.update(
+        sampling_method_prop="segment",
+        gep_filtering=True,
+        gene_filtering=False,
+        cell_prop_prior=configured_prior,
+        enlarge_cell_prop_prior=0.15,
+    )
+    captured = {}
+
+    class DummySpace:
+        additional_artifacts = []
+
+    class FakeBulkGEPGenerator:
+        def __init__(self, **kwargs):
+            self.generated_bulk_gep_fp = tmp_path / "generated.h5ad"
+            self.generated_cell_fraction_fp = tmp_path / "fractions.csv"
+            self.gep_filtering_input_n_samples = None
+            self.gep_filtering_kept_n_samples = None
+            self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_pca_target = None
+            self.gep_filtering_n_pcs = None
+
+        def generate_gep(self, config):
+            captured["generation"] = config
+
+    def unexpected_caps(*args, **kwargs):
+        raise AssertionError("Prediction-file caps must not be computed when a prior is provided.")
+
+    monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
+    monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
+                        lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "estimate_cell_prop_maxima_from_pred_cell_props", unexpected_caps)
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda **kwargs: None)
+    monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess", lambda **kwargs: {})
+    monkeypatch.setattr(workflow, "_build_mixed_dataset_summary", lambda **kwargs: None)
+
+    workflow.run_bulk_simulation("target", params, config)
+
+    generation = captured["generation"]
+    assert generation.pred_cell_prop_file_path is None
+    assert generation.segment_fraction_max_caps is None
+    assert generation.segment_fraction_cap_metadata is None
+    if prior == "preset":
+        assert generation.cell_prop_prior["Cancer Cells"] == pytest.approx((0, 1))
+        assert generation.cell_prop_prior["CD4 T"] == pytest.approx((0, 0.256))
+    elif prior == "manual":
+        assert generation.cell_prop_prior["Cancer Cells"] == pytest.approx((0.05, 1))
+        assert "CD4 T" not in generation.cell_prop_prior
+    else:
+        assert generation.cell_prop_prior == {}
+
+
+@pytest.mark.parametrize(
+    "params, message",
+    [
+        ({"cell_prop_prior": "DeSide_predicted_TCGA_range", "gep_filtering": False}, "require segment"),
+        ({"cell_prop_prior": "DeSide_predicted_TCGA_range", "sampling_method_prop": "dirichlet"}, "require segment"),
+        ({"enlarge_cell_prop_prior": 0.15}, "requires an explicit cell_prop_prior"),
+        ({"cell_prop_prior": {"CT1": (0, 1)}, "enlarge_cell_prop_prior": -0.1}, "finite nonnegative"),
+    ],
+)
+def test_segment_prior_configuration_fails_early(workflow_case, params, message):
+    import simutme.workflow as workflow
+
+    config, default_params, _, _ = workflow_case
+    default_params.update({"gep_filtering": True, **params})
+    with pytest.raises(ValueError, match=message):
+        workflow.preflight_segment_cell_prop_priors(config, {"target": default_params})
+
+
+def test_cli_preflights_segment_prior_before_running_any_dataset(workflow_case, tmp_path, monkeypatch):
+    import simutme
+
+    config, _, _, _ = workflow_case
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "datasets": {
+            "first": {"dataset_type": "SCT"},
+            "target": {
+                "dataset_type": "Mixed", "sampling_method_prop": "segment",
+                "gep_filtering": True, "cell_prop_prior": "DeSide_predicted_TCGA_range",
+            },
+        },
+    }, sort_keys=False), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "simutme_cli", Path(__file__).resolve().parents[1] / "src/main_simu_bulk.py",
+    )
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    called = []
+    monkeypatch.setattr(simutme.SimuConfig, "from_yaml", lambda path: config)
+    monkeypatch.setattr(simutme, "run_bulk_simulation", lambda *args: called.append(args))
+
+    with pytest.raises(ValueError, match="missing output cell types"):
+        cli.main(["-c", str(config_path)])
+    assert called == []
 
 
 @pytest.mark.parametrize(

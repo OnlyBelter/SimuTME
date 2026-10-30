@@ -4,6 +4,29 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 30, 2026
+
+### DeSide range priors for segment sampling
+
+GEP-filtered Mixed segment sampling accepts
+`cell_prop_prior: "DeSide_predicted_TCGA_range"` to use the raw per-cell-type
+DeSide TCGA ranges recorded in `simutme.config`. Explicit mappings of
+`[minimum, maximum]` ranges are also supported.
+
+- Expand configured bounds with `enlarge_cell_prop_prior`, clipped to `[0, 1]`.
+- Give explicit priors precedence over prediction-file maximum caps.
+- Validate prior values, output cell types, and composition feasibility before
+  dataset generation.
+- Preflight all configured datasets before the CLI starts running them.
+- Include resolved ranges in filtering-cache identity and bound rejection
+  sampling attempts.
+- Keep prediction-file caps for filtered segment datasets with no explicit
+  prior; preserve Dirichlet alpha estimation.
+
+The example configuration
+`SimuTME_example/config_n_neighborGEP_nbase_30_eps1e-pan_cancer_filtered_imputation_1%_mgep_no_gene_gep_filtering_1K_3_var1_segment_new_sct.yaml`
+uses the DeSide preset with `enlarge_cell_prop_prior: 0.15`.
+
 ## October 25, 2026
 
 Mixed runs with GEP filtering disabled use the method-independent
@@ -38,7 +61,7 @@ When GEP filtering is enabled, segment sampling can use
 predicted fraction.
 
 - Normalize prediction rows before deriving maxima.
-- Combine empirical caps with any configured `cell_prop_prior`.
+- Apply empirical caps when no explicit `cell_prop_prior` is configured.
 - Record cap provenance and bound rejection-sampling attempts.
 - Preserve the existing Dirichlet alpha behavior.
 

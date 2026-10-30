@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
+from numbers import Real
 from pathlib import Path
 from typing import List, Dict, Optional, Union
+
+from ..config import DESIDE_TCGA_CELL_PROPORTION_RANGES
 
 
 def flatten_cell_type2subtype(cell_type2subtype: Dict[str, List[str]]) -> List[str]:
@@ -150,6 +153,59 @@ def format_segment_fraction_caps(caps: Dict[str, float]) -> str:
     return f"{{{formatted_caps}}}"
 
 
+def resolve_segment_cell_prop_prior(cell_types, cell_prop_prior, enlargement=0.0):
+    """Resolve and expand a segment prior without changing its source."""
+    cell_types = list(cell_types)
+    if not cell_types or len(cell_types) != len(set(cell_types)):
+        raise ValueError("Segment fraction priors require unique output cell-type labels.")
+    if (
+        isinstance(enlargement, bool)
+        or not isinstance(enlargement, Real)
+        or not np.isfinite(enlargement)
+        or enlargement < 0
+    ):
+        raise ValueError('"enlarge_cell_prop_prior" must be a finite nonnegative number.')
+    if isinstance(cell_prop_prior, str):
+        if cell_prop_prior != "DeSide_predicted_TCGA_range":
+            raise ValueError(
+                f'Unknown cell_prop_prior preset: {cell_prop_prior!r}. '
+                'Supported preset: "DeSide_predicted_TCGA_range".'
+            )
+        missing = [name for name in cell_types if name not in DESIDE_TCGA_CELL_PROPORTION_RANGES]
+        if missing:
+            raise ValueError(f"DeSide TCGA range preset is missing output cell types: {missing}")
+        prior = {name: DESIDE_TCGA_CELL_PROPORTION_RANGES[name] for name in cell_types}
+    elif isinstance(cell_prop_prior, dict):
+        prior = cell_prop_prior
+    else:
+        raise ValueError("cell_prop_prior must be a mapping or a supported preset.")
+
+    unknown = set(prior).difference(cell_types)
+    if unknown:
+        raise ValueError(f"cell_prop_prior contains cell types absent from segment outputs: {sorted(unknown)}.")
+    resolved = {}
+    for cell_type, bounds in prior.items():
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2
+                or any(isinstance(value, bool) or not isinstance(value, Real)
+                       or not np.isfinite(value) for value in bounds)):
+            raise ValueError(f'cell_prop_prior for "{cell_type}" must be a finite [minimum, maximum] pair.')
+        lower, upper = map(float, bounds)
+        if not 0 <= lower <= upper <= 1:
+            raise ValueError(f'cell_prop_prior for "{cell_type}" must satisfy 0 <= minimum <= maximum <= 1.')
+        resolved[cell_type] = (
+            max(lower - float(enlargement), 0.0),
+            min(upper + float(enlargement), 1.0),
+        )
+
+    lower_sum = sum(resolved.get(name, (0.0, 1.0))[0] for name in cell_types)
+    upper_sum = sum(resolved.get(name, (0.0, 1.0))[1] for name in cell_types)
+    if lower_sum > 1.0 + 1e-12:
+        raise ValueError("Segment fraction prior minima sum to more than one.")
+    if upper_sum < 1.0 - 1e-12:
+        raise ValueError("Segment fraction prior maxima sum to less than one.")
+    return resolved
+
+
 def merge_cell_prop_prior_with_maxima(cell_types, cell_prop_prior, maxima):
     """Intersect optional segment prior ranges with empirical upper caps."""
     cell_types = list(cell_types)
@@ -225,9 +281,9 @@ def segment_sampling(n_samples: int,
         attempts += 1
         if max_attempts is not None and attempts > max_attempts:
             raise RuntimeError(
-                f"Segment fraction cap sampling accepted {len(valid_samples)}/{n_samples} "
-                f"proposals after {max_attempts} attempts. Check the predicted maxima "
-                "and any cell_prop_prior constraints."
+                f"Segment fraction prior sampling accepted {len(valid_samples)}/{n_samples} "
+                f"proposals after {max_attempts} attempts. Check the configured "
+                "cell_prop_prior or predicted maximum caps."
             )
         # 1. Generate fragments using iterative subtraction
         # This logic mimics the original: pick a random chunk of the *current remainder*

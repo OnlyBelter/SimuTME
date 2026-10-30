@@ -23,6 +23,7 @@ from .simulation.sampling import (
     format_segment_fraction_caps,
     get_default_dirichlet_alpha,
     merge_cell_prop_prior_with_maxima,
+    resolve_segment_cell_prop_prior,
     restrict_cell_type2subtype_to_output_types,
 )
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
@@ -1057,6 +1058,45 @@ def _resolve_selected_subtypes_by_cell_type(
     return normalized
 
 
+def _resolve_configured_segment_prior(
+    dataset_name: str, params: Dict[str, Any], config: SimuConfig,
+):
+    """Validate and resolve explicitly configured filtered-segment priors."""
+    prior = params.get("cell_prop_prior")
+    enlargement = params.get("enlarge_cell_prop_prior")
+    if prior is None and enlargement is None:
+        return None
+    dataset_type = str(params.get("dataset_type", "mixed")).lower()
+    sampling_method = params.get("sampling_method_prop", "segment")
+    filtering = bool(_resolve_dataset_override(
+        params, config, "gep_filtering", getattr(config, "gep_filtering_enabled_default", False),
+    ))
+    supported = dataset_type == "mixed" and sampling_method == "segment" and filtering
+    if (isinstance(prior, str) or enlargement is not None) and not supported:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}": the cell_prop_prior preset and '
+            '"enlarge_cell_prop_prior" require segment sampling with gep_filtering: true.'
+        )
+    if enlargement is not None and prior is None:
+        raise ValueError('"enlarge_cell_prop_prior" requires an explicit cell_prop_prior.')
+    if prior is None or not supported:
+        return prior
+    mapping = _resolve_dataset_override(
+        params, config, "cell_type2subtypes", config.cell_type2subtypes,
+    )
+    output_mapping = restrict_cell_type2subtype_to_output_types(mapping, config.output_types)
+    cell_types = flatten_cell_type2subtype(output_mapping)
+    return resolve_segment_cell_prop_prior(
+        cell_types, prior, 0.0 if enlargement is None else enlargement,
+    )
+
+
+def preflight_segment_cell_prop_priors(config: SimuConfig, datasets: Dict[str, Dict[str, Any]]) -> None:
+    """Validate segment prior settings for all datasets before simulation."""
+    for dataset_name, params in datasets.items():
+        _resolve_configured_segment_prior(dataset_name, params, config)
+
+
 # --- 2. Main Workflow Function ---
 def run_bulk_simulation(dataset_name: str,
                         params: Dict[str, Any],
@@ -1073,6 +1113,7 @@ def run_bulk_simulation(dataset_name: str,
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
     dataset_type = params.get('dataset_type', 'mixed').lower()
+    configured_cell_prop_prior = _resolve_configured_segment_prior(dataset_name, params, config)
     dirichlet_only_keys = {
         "dirichlet_alpha",
         "dirichlet_sampling_seed",
@@ -1271,7 +1312,7 @@ def run_bulk_simulation(dataset_name: str,
                     f'Mixed dataset "{dataset_name}" must set "gene_filtering: false" when '
                     "calculating a reusable gene/cell-fraction correlation file."
                 )
-        resolved_cell_prop_prior = params.get('cell_prop_prior', None)
+        resolved_cell_prop_prior = configured_cell_prop_prior
         dataset_pred_cell_prop_file_path = params.get("pred_cell_prop_file_path")
         configured_pred_cell_prop_file_path = params.get(
             "pred_cell_prop_file_path",
@@ -1303,8 +1344,20 @@ def run_bulk_simulation(dataset_name: str,
                         '"pred_cell_prop_file_path" with segment sampling only when '
                         '"gep_filtering: true".'
                     )
-                if resolved_gep_filtering.enabled:
+                if resolved_gep_filtering.enabled and resolved_cell_prop_prior is None:
                     pred_cell_prop_file_path = configured_pred_cell_prop_file_path
+                elif resolved_gep_filtering.enabled and configured_pred_cell_prop_file_path not in (None, ""):
+                    logging.info(
+                        'Mixed dataset %s uses explicit cell_prop_prior; prediction-file caps are ignored.',
+                        dataset_name,
+                    )
+                if resolved_gep_filtering.enabled and resolved_cell_prop_prior is not None:
+                    logging.info(
+                        'Segment cell proportion prior for %s: %s',
+                        dataset_name,
+                        {name: (f"{lower:.3g}", f"{upper:.3g}")
+                         for name, (lower, upper) in resolved_cell_prop_prior.items()},
+                    )
             if pred_cell_prop_file_path not in (None, ""):
                 output_type_mapping = restrict_cell_type2subtype_to_output_types(
                     resolved_cell_type2subtypes,
