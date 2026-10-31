@@ -481,37 +481,71 @@ def test_mgep_requires_pca_space_filtering_to_be_disabled(tmp_path):
         make_space(tmp_path, filtering_method="mgep")
 
 
-def test_mgep_rejects_a_nonzero_lower_distance_quantile(tmp_path):
-    with pytest.raises(ValueError, match="uses only the upper quantile"):
+def test_mgep_uses_inclusive_lower_and_upper_distance_cutoffs(tmp_path):
+    space = make_space(
+        tmp_path, filtering_method="mgep", filtering_in_pca_space=False,
+        gep_filtering_quantile=(0.25, 0.75),
+    )
+    simulated = pd.DataFrame(
+        {"a": [4.0, 5.0, 6.0, 7.0], "b": [6.0, 5.0, 4.0, 3.0]},
+        index=["below", "lower", "upper", "above"],
+    )
+
+    assert space.filter(simulated).index.tolist() == ["lower", "upper"]
+    assert space.mgep_lower_cutoff == pytest.approx(200000)
+    assert space.mgep_cutoff == pytest.approx(400000)
+    assert space.stats()["mgep_distance_kept_n_samples"] == 2
+
+
+@pytest.mark.parametrize("lower", [None, 0.0])
+def test_mgep_zero_or_null_lower_quantile_keeps_center(tmp_path, lower):
+    space = make_space(
+        tmp_path, filtering_method="mgep", filtering_in_pca_space=False,
+        gep_filtering_quantile=(lower, 0.5),
+    )
+    simulated = pd.DataFrame({"a": [4.0, 7.0], "b": [6.0, 3.0]},
+                             index=["center", "outside"])
+    assert space.filter(simulated).index.tolist() == ["center"]
+    assert space.mgep_lower_cutoff is None
+
+
+@pytest.mark.parametrize("quantiles", [
+    (-0.1, 0.95), (0.96, 0.95), (0.1, 1.1), (0.1, None),
+    (np.nan, 0.95), (0.1, np.nan), (np.inf, 1.0), (0.1, np.inf),
+])
+def test_mgep_rejects_invalid_distance_quantiles(tmp_path, quantiles):
+    with pytest.raises(ValueError, match="gep_filtering_quantile must satisfy"):
         make_space(
             tmp_path,
             filtering_method="mgep",
             filtering_in_pca_space=False,
-            gep_filtering_quantile=(0.1, 0.95),
+            gep_filtering_quantile=quantiles,
         )
 
 
 @pytest.mark.parametrize(
-    "method,in_pca,norm",
+    "method,in_pca,norm,lower",
     [
-        ("median_gep", True, 2),
-        ("median_gep", False, 1),
-        ("mean_gep", True, 1),
-        ("linear_mmd", False, 1),
-        ("mgep", False, 2),
+        ("median_gep", True, 2, 0.0),
+        ("median_gep", False, 1, 0.0),
+        ("mean_gep", True, 1, 0.0),
+        ("linear_mmd", False, 1, 0.0),
+        ("mgep", False, 2, None),
+        ("mgep", False, 2, 0.0),
+        ("mgep", False, 2, 0.25),
     ],
 )
 def test_distance_diagnostic_uses_filter_reference_and_saved_samples(
-    tmp_path, monkeypatch, method, in_pca, norm
+    tmp_path, monkeypatch, method, in_pca, norm, lower
 ):
     from matplotlib.axes import Axes
     from scipy.sparse import csr_matrix
 
     space = make_space(
         tmp_path, filtering_method=method, filtering_in_pca_space=in_pca,
-        norm_ord=norm, gep_filtering_quantile=(0.0, 1.0),
+        norm_ord=norm, gep_filtering_quantile=(lower, 1.0),
     )
-    profiles = pd.DataFrame({"a": [2.0, 4.0], "b": [8.0, 6.0]}, index=["s1", "s2"])
+    profiles = pd.DataFrame({"a": [2.0, 6.0], "b": [8.0, 4.0]}, index=["s1", "s2"])
     normalized = normalize_selected(profiles, space.genes)
     assert space.filter(profiles).index.tolist() == profiles.index.tolist()
     reference = (
@@ -561,9 +595,10 @@ def test_distance_diagnostic_uses_filter_reference_and_saved_samples(
         "Reference (n=3)", "Kept simulated (n=2)"
     ]
     assert lines[0][0] == pytest.approx(np.quantile(expected_reference, 1.0))
-    assert len(lines) == (1 if method == "mgep" else 2)
-    if method != "mgep":
-        assert lines[1][0] == pytest.approx(np.quantile(expected_reference, 0.0))
+    has_lower = lower is not None and (method != "mgep" or lower > 0)
+    assert len(lines) == 1 + has_lower
+    if has_lower:
+        assert lines[1][0] == pytest.approx(np.quantile(expected_reference, lower))
     saved_log = np.log2(normalized.to_numpy() + 1).astype(np.float32).astype(np.float64)
     saved_linear = np.expm1(saved_log * np.log(2))
     saved_linear *= 1e6 / saved_linear.sum(axis=1, keepdims=True)
@@ -612,6 +647,26 @@ def test_workflow_mgep_uses_linear_filter_and_distinct_output_tag(workflow_case)
     resumed_summary = read_summary(output)
     assert resumed_summary["mgep_distance_input_n_samples"] == first_input
     assert resumed_summary["mgep_distance_kept_n_samples"] == first_kept
+
+
+@pytest.mark.parametrize("lower", [None, 0.0])
+def test_workflow_mgep_cache_preserves_upper_only_identity(workflow_case, lower):
+    config, params, _, batches = workflow_case
+    params.update(
+        gep_filtering=True, gep_filtering_method="mgep",
+        filtering_in_pca_space=False, gep_filtering_quantile=[lower, 1.0],
+    )
+    output = workflow.run_bulk_simulation("target", params, config)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    metadata = json.loads((result_dir / "filtering_metadata.json").read_text())
+    assert metadata["identity"]["distance_quantiles"] == [lower, 1.0]
+    assert workflow.run_bulk_simulation("target", params, config) == output
+    assert len(batches) == 1
+
+    params["gep_filtering_quantile"] = [0.25, 1.0]
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        workflow.run_bulk_simulation("target", params, config)
+    assert len(batches) == 1
 
 
 def test_workflow_without_gep_filtering_uses_method_independent_output_tag(workflow_case):

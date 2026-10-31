@@ -341,8 +341,9 @@ filter in linear TPM space. SimuTME normalizes reference and simulated
 profiles over G to 1,000,000, calculates the per-gene median across the
 resolved reference samples, and computes each reference profile's L1 distance
 to that mGEP. It keeps simulated profiles at or below the configured upper
-reference-distance quantile. Set the lower value in `gep_filtering_quantile`
-to `null` or `0`; this method applies no lower-distance cutoff.
+reference-distance quantile. A positive lower value in
+`gep_filtering_quantile` adds an inclusive lower-distance cutoff. Set the
+lower value to `null` or `0` to apply only the upper cutoff.
 
 The other centroid methods use `log2(TPM + 1)` values, either in G or in
 reference-fitted PCA space according to `filtering_in_pca_space`.

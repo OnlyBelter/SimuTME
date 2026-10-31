@@ -226,10 +226,11 @@ supported-method list.
 `mgep` computes a coordinate-wise median from all resolved reference samples
 using linear TPM values normalized over the selected genes to 1,000,000. It
 keeps simulated profiles whose L1 distance from this mGEP is at or below the
-upper quantile in `gep_filtering_quantile`. It does not apply a lower-distance
-cutoff, so set the lower quantile to `null` or `0`. It requires
-`filtering_in_pca_space: false`. Unlike `median_gep`, `mgep` does not transform
-expression to `log2(TPM + 1)` or project it into PCA space.
+upper quantile in `gep_filtering_quantile`. A positive lower quantile adds an
+inclusive lower-distance cutoff; `null` or `0` leaves the lower cutoff disabled.
+This method requires `filtering_in_pca_space: false`. Unlike `median_gep`,
+`mgep` does not transform expression to `log2(TPM + 1)` or project it into PCA
+space.
 
 ### SCT sample-diversity parameters
 

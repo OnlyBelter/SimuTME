@@ -163,7 +163,7 @@ datasets:
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     cell_prop_prior: null  # Optional mapping of cell type to [min, max], or "DeSide_predicted_TCGA_range"; overrides prediction-file caps
     enlarge_cell_prop_prior: null  # Optional nonnegative additive expansion of each configured range; clip to [0, 1]
-    gep_filtering_method: "mgep"  # Linear selected-gene TPM median with an upper-quantile L1 cutoff
+    gep_filtering_method: "mgep"  # Linear selected-gene TPM median with upper and optional lower L1 quantile cutoffs
     filtering_in_pca_space: false  # mGEP operates directly on normalized linear TPM values
     zero_ratio_threshold: 0.97  # Threshold for zero ratio filtering, only for "SCT" datasets and cells with higher zero ratio will be removed
     cell_type_col: "cell_type"  # Column name for cell types in single-cell dataset

@@ -197,6 +197,7 @@ class FixedGeneFilter:
         self.distance_input = self.distance_kept = 0
         self.mgep_center = None
         self.mgep_cutoff = None
+        self.mgep_lower_cutoff = None
         self.distance_center = None
         self.reference_distances = None
         self.mgep_distance_input = self.mgep_distance_kept = 0
@@ -213,11 +214,6 @@ class FixedGeneFilter:
                     '"filtering_in_pca_space: false".'
                 )
             q_low, q_high = self.gep.gep_filtering_quantile
-            if self.gep.filtering_method == "mgep" and q_low not in (None, 0, 0.0):
-                raise ValueError(
-                    'GEP filtering method "mgep" uses only the upper quantile; '
-                    'set the lower quantile to null or 0.'
-                )
             if (
                 q_high is None or not 0 <= q_high <= 1
                 or (q_low is not None and not 0 <= q_low <= q_high)
@@ -290,8 +286,15 @@ class FixedGeneFilter:
                 reference[start:stop] - self.mgep_center
             ).sum(axis=1)
         self.reference_distances = reference_distances
-        upper_quantile = self.gep.gep_filtering_quantile[1]
+        lower_quantile, upper_quantile = self.gep.gep_filtering_quantile
         self.mgep_cutoff = float(np.quantile(reference_distances, upper_quantile))
+        if lower_quantile is not None and lower_quantile > 0:
+            self.mgep_lower_cutoff = float(np.quantile(reference_distances, lower_quantile))
+            logger.info(
+                "Linear-TPM mGEP L1 lower cutoff at q=%.3g: %.3g",
+                lower_quantile,
+                self.mgep_lower_cutoff,
+            )
         logger.info(
             "Linear-TPM mGEP L1 cutoff at q=%.3g: %.3g",
             upper_quantile,
@@ -361,6 +364,8 @@ class FixedGeneFilter:
         if self.gep.filtering_method == "mgep":
             simulated_distances = self.distance_from_normalized(normalized)
             mask = simulated_distances <= self.mgep_cutoff
+            if self.mgep_lower_cutoff is not None:
+                mask &= simulated_distances >= self.mgep_lower_cutoff
             self.mgep_distance_input += len(normalized)
             self.mgep_distance_kept += int(mask.sum())
             logger.info(

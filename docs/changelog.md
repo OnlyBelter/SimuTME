@@ -6,6 +6,13 @@ that changed on a given date.
 
 ## October 31, 2026
 
+### mGEP lower-distance quantile
+
+The `mgep` filter accepts a positive lower reference-distance quantile and
+keeps profiles within both inclusive cutoffs. Its distance plot shows both
+cutoffs. A lower quantile of `null` or `0` retains upper-only filtering and
+existing compatible cache behavior.
+
 ### GEP filtering distance distributions
 
 Distance-filtered Mixed datasets automatically export PNG and SVG histograms

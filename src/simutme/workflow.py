@@ -1601,7 +1601,7 @@ def _save_gep_distance_distribution(
     upper_cutoff = float(np.quantile(reference_distances, upper))
     lower_cutoff = (
         float(np.quantile(reference_distances, lower))
-        if lower is not None and gep.filtering_method != "mgep" else None
+        if lower is not None and (gep.filtering_method != "mgep" or lower > 0) else None
     )
     bins = np.histogram_bin_edges(
         np.concatenate((reference_distances, simulated_distances)), bins=50
