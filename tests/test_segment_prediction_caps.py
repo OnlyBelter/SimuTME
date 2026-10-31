@@ -259,6 +259,7 @@ def test_mixed_workflow_resolves_caps_only_for_filtered_segment(
     monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
     monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
                         lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_gep_distance_distribution", lambda *args: {})
     monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution",
                         lambda **kwargs: None)
     monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess",
@@ -326,6 +327,7 @@ def test_filtered_segment_prior_overrides_prediction_caps(
     monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
     monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
                         lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_gep_distance_distribution", lambda *args: {})
     monkeypatch.setattr(workflow, "estimate_cell_prop_maxima_from_pred_cell_props", unexpected_caps)
     monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda **kwargs: None)
     monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess", lambda **kwargs: {})
@@ -448,6 +450,7 @@ def test_global_prediction_path_is_only_used_by_supported_modes(
     monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
     monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
                         lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_gep_distance_distribution", lambda *args: {})
     monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution",
                         lambda **kwargs: None)
     monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess",
@@ -523,6 +526,10 @@ def test_mixed_workflow_enables_all_cell_plots_for_dirichlet_or_gep_filtering(
     monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
                         lambda *args, **kwargs: DummySpace())
     monkeypatch.setattr(
+        workflow, "_save_gep_distance_distribution",
+        lambda *args: captured.update(distance_plot=True) or {},
+    )
+    monkeypatch.setattr(
         workflow, "_save_cancer_cell_fraction_distribution",
         lambda **kwargs: captured.update(plot_all_cell_types=kwargs["plot_all_cell_types"]),
     )
@@ -535,6 +542,7 @@ def test_mixed_workflow_enables_all_cell_plots_for_dirichlet_or_gep_filtering(
     assert captured["generation_filtering"] is (
         global_filter if dataset_filter is None else dataset_filter
     )
+    assert captured.get("distance_plot", False) is captured["generation_filtering"]
 
 
 def test_gep_filtered_mixed_workflow_writes_non_cancer_plots(
@@ -573,6 +581,7 @@ def test_gep_filtered_mixed_workflow_writes_non_cancer_plots(
     monkeypatch.setattr(workflow, "BulkGEPGenerator", FakeBulkGEPGenerator)
     monkeypatch.setattr(workflow, "_prepare_fixed_gene_filter",
                         lambda *args, **kwargs: DummySpace())
+    monkeypatch.setattr(workflow, "_save_gep_distance_distribution", lambda *args: {})
     monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", save_plots)
     monkeypatch.setattr(workflow, "_run_gene_filtering_postprocess", lambda **kwargs: {})
     monkeypatch.setattr(workflow, "_build_mixed_dataset_summary", lambda **kwargs: None)

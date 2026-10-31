@@ -347,6 +347,19 @@ to `null` or `0`; this method applies no lower-distance cutoff.
 The other centroid methods use `log2(TPM + 1)` values, either in G or in
 reference-fitted PCA space according to `filtering_in_pca_space`.
 
+Every distance-filtered Mixed dataset saves
+`gep_filtering_distance_distribution.png` and `.svg` in its result directory.
+The figure compares the filtering-reference distances with distances of the
+final saved simulated profiles. Dotted lines mark the applicable reference
+quantile cutoffs. The labels identify the distance space, metric, and sample
+counts. The reference is the cohort used for filtering, including any
+`filtering_ref_types` selection. Rejected candidates are not shown.
+
+The figure is regenerated for compatible cached outputs. Saved log-expression
+values are converted back to linear TPM and normalized on G before calculating
+distances, so rounding can cause small differences near a cutoff. The
+diagnostic does not change the filter or its accepted dataset.
+
 Set `gene_filtering_reference_variance_threshold: 1.0` to retain only reference
 genes with population variance strictly greater than 1 TPM squared
 (`ddof=0`, calculated in linear expression before subsetting or

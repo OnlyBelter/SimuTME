@@ -1488,6 +1488,11 @@ def run_bulk_simulation(dataset_name: str,
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
 
         mixed_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+        distance_plot_paths = {}
+        if resolved_gep_filtering.enabled and filtering_space is not None:
+            distance_plot_paths = _save_gep_distance_distribution(
+                generated_bulk_gep_fp, filtering_space
+            )
         full_gene_corr_file = mixed_result_dir / "full_gene_corr_with_cell_fraction.csv"
         if calculate_gene_cell_prop_correlation:
             _calculate_full_gene_cell_prop_correlation(
@@ -1528,6 +1533,7 @@ def run_bulk_simulation(dataset_name: str,
             resolved_params=resolved_gene_filtering,
             filtering_space=filtering_space,
         )
+        postprocess_outputs.update(distance_plot_paths)
         if full_gene_corr_file is not None:
             postprocess_outputs["full_gene_corr_with_cell_fraction_file"] = str(full_gene_corr_file)
         _build_mixed_dataset_summary(
@@ -1555,6 +1561,84 @@ def _safe_filename(text: str) -> str:
     while "__" in sanitized:
         sanitized = sanitized.replace("__", "_")
     return sanitized.strip("_") or "unknown"
+
+
+def _save_gep_distance_distribution(
+    generated_file: str | Path, filtering_space: FixedGeneFilter, batch_size: int = 256,
+) -> Dict[str, str]:
+    """Plot reference and final saved-profile distances in the filtering space."""
+    import anndata as ad
+    import matplotlib.pyplot as plt
+    from scipy.sparse import issparse
+
+    reference_distances = filtering_space.prepare_distance_reference()
+    bulk = ad.read_h5ad(generated_file, backed="r")
+    try:
+        if bulk.var_names.tolist() != filtering_space.genes:
+            raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
+        if bulk.n_obs == 0:
+            raise ValueError("Cannot plot GEP distances for an empty accepted dataset.")
+        simulated_distances = np.empty(bulk.n_obs, dtype=np.float64)
+        for start in range(0, bulk.n_obs, batch_size):
+            stop = min(start + batch_size, bulk.n_obs)
+            values = bulk.X[start:stop]
+            values = values.toarray() if issparse(values) else np.asarray(values)
+            values = np.asarray(values, dtype=np.float64)
+            if not np.isfinite(values).all() or (values < 0).any():
+                raise ValueError("Accepted artifact contains negative or non-finite log expression.")
+            linear = np.expm1(values * np.log(2))
+            normalized = normalize_selected(
+                pd.DataFrame(linear, columns=filtering_space.genes),
+                filtering_space.genes,
+                "Accepted profiles",
+            )
+            simulated_distances[start:stop] = filtering_space.distance_from_normalized(normalized)
+    finally:
+        bulk.file.close()
+
+    gep = filtering_space.gep
+    lower, upper = gep.gep_filtering_quantile
+    upper_cutoff = float(np.quantile(reference_distances, upper))
+    lower_cutoff = (
+        float(np.quantile(reference_distances, lower))
+        if lower is not None and gep.filtering_method != "mgep" else None
+    )
+    bins = np.histogram_bin_edges(
+        np.concatenate((reference_distances, simulated_distances)), bins=50
+    )
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for distances, color, style, label in (
+        (reference_distances, "#0072b2", "-", "Reference"),
+        (simulated_distances, "#d55e00", "--", "Kept simulated"),
+    ):
+        density, _ = np.histogram(distances, bins=bins, density=True)
+        ax.stairs(density, bins, color=color, linestyle=style, linewidth=1.6,
+                  label=f"{label} (n={len(distances):,})")
+    ax.axvline(upper_cutoff, color="black", linestyle=":", linewidth=1.5,
+               label=f"Upper q={upper:g}: {upper_cutoff:.3g}")
+    if lower_cutoff is not None:
+        ax.axvline(lower_cutoff, color="#666666", linestyle=":", linewidth=1.5,
+                   label=f"Lower q={lower:g}: {lower_cutoff:.3g}")
+    if gep.filtering_method == "mgep":
+        space_label, metric = "linear TPM", "L1"
+    else:
+        space_label = "PCA" if gep.filtering_in_pca_space else "log2(TPM + 1)"
+        metric = "squared L2" if gep.filtering_method == "linear_mmd" else f"L{gep.norm_ord}"
+    ax.set_xlabel(f"{metric} distance in {space_label} space")
+    ax.set_ylabel("Density")
+    ax.set_title(f"GEP filtering: {gep.filtering_method}")
+    ax.legend(fontsize="small")
+    fig.tight_layout()
+    filtering_space.result_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    try:
+        for suffix in ("png", "svg"):
+            output = filtering_space.result_dir / f"gep_filtering_distance_distribution.{suffix}"
+            fig.savefig(output, dpi=300, bbox_inches="tight")
+            paths[f"gep_filtering_distance_plot_{suffix}"] = str(output)
+    finally:
+        plt.close(fig)
+    return paths
 
 
 def _save_estimated_dirichlet_alpha_from_pred_cell_props(
@@ -2203,6 +2287,8 @@ def _build_mixed_dataset_summary(
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
         "pca_gene_loadings_PC1_file": postprocess_outputs.get("pca_gene_loadings_PC1_file"),
+        "gep_filtering_distance_plot_png": postprocess_outputs.get("gep_filtering_distance_plot_png"),
+        "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }
     if filtering_space is not None:
         summary.update(getattr(filtering_space, "reference_variance_metadata", {}))

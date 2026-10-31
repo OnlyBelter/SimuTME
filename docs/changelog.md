@@ -4,6 +4,15 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## October 31, 2026
+
+### GEP filtering distance distributions
+
+Distance-filtered Mixed datasets automatically export PNG and SVG histograms
+comparing filtering-reference distances with the final saved simulated
+profiles. The plots label the filtering metric and applicable quantile
+cutoffs, and are regenerated for compatible cached datasets.
+
 ## October 30, 2026
 
 ### DeSide range priors for segment sampling

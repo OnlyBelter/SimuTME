@@ -197,6 +197,8 @@ class FixedGeneFilter:
         self.distance_input = self.distance_kept = 0
         self.mgep_center = None
         self.mgep_cutoff = None
+        self.distance_center = None
+        self.reference_distances = None
         self.mgep_distance_input = self.mgep_distance_kept = 0
         if self.gep.enabled:
             if self.gep.filtering_method not in self.supported_methods:
@@ -287,6 +289,7 @@ class FixedGeneFilter:
             reference_distances[start:stop] = np.abs(
                 reference[start:stop] - self.mgep_center
             ).sum(axis=1)
+        self.reference_distances = reference_distances
         upper_quantile = self.gep.gep_filtering_quantile[1]
         self.mgep_cutoff = float(np.quantile(reference_distances, upper_quantile))
         logger.info(
@@ -294,6 +297,47 @@ class FixedGeneFilter:
             upper_quantile,
             self.mgep_cutoff,
         )
+
+    def prepare_distance_reference(self):
+        """Prepare the same reference distances and center used for filtering."""
+        if self.reference_distances is not None:
+            return self.reference_distances
+        if self.gep.filtering_method == "mgep":
+            self._prepare_mgep()
+            return self.reference_distances
+        if self.gep.filtering_in_pca_space:
+            self._prepare_pca()
+            reference = self.reference_coordinates
+        else:
+            reference = self.reference_log.to_numpy()
+        self.distance_center = (
+            np.median(reference, axis=0) if self.gep.filtering_method == "median_gep"
+            else np.mean(reference, axis=0)
+        )
+        norm = 2 if self.gep.filtering_method == "linear_mmd" else self.gep.norm_ord
+        self.reference_distances = np.linalg.norm(
+            reference - self.distance_center, ord=norm, axis=1
+        )
+        if self.gep.filtering_method == "linear_mmd":
+            self.reference_distances = self.reference_distances ** 2
+        return self.reference_distances
+
+    def distance_from_normalized(self, normalized):
+        """Calculate profile distances from selected-gene linear TPM."""
+        self.prepare_distance_reference()
+        if self.gep.filtering_method == "mgep":
+            return np.linalg.norm(
+                normalized.to_numpy(dtype=np.float64) - self.mgep_center, ord=1, axis=1
+            )
+        if self.gep.filtering_in_pca_space:
+            simulated = safe_pca_transform(
+                self.pca, np.log2(normalized + 1), label="Simulated log2(TPM + 1)"
+            )
+        else:
+            simulated = np.log2(normalized + 1).to_numpy()
+        norm = 2 if self.gep.filtering_method == "linear_mmd" else self.gep.norm_ord
+        distances = np.linalg.norm(simulated - self.distance_center, ord=norm, axis=1)
+        return distances ** 2 if self.gep.filtering_method == "linear_mmd" else distances
 
     def filter(self, simulated_linear):
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
@@ -315,11 +359,7 @@ class FixedGeneFilter:
         if normalized.empty:
             return normalized
         if self.gep.filtering_method == "mgep":
-            self._prepare_mgep()
-            simulated = normalized.to_numpy(dtype=np.float64)
-            simulated_distances = np.linalg.norm(
-                simulated - self.mgep_center, ord=1, axis=1
-            )
+            simulated_distances = self.distance_from_normalized(normalized)
             mask = simulated_distances <= self.mgep_cutoff
             self.mgep_distance_input += len(normalized)
             self.mgep_distance_kept += int(mask.sum())
@@ -329,23 +369,8 @@ class FixedGeneFilter:
                 len(mask),
             )
             return normalized.loc[mask].copy()
-        elif self.gep.filtering_in_pca_space:
-            self._prepare_pca()
-            reference = self.reference_coordinates
-            simulated = safe_pca_transform(
-                self.pca, np.log2(normalized + 1), label="Simulated log2(TPM + 1)"
-            )
-        else:
-            reference = self.reference_log.to_numpy()
-            simulated = np.log2(normalized + 1).to_numpy()
-        center = (np.median(reference, axis=0) if self.gep.filtering_method == "median_gep"
-                  else np.mean(reference, axis=0))
-        norm = 2 if self.gep.filtering_method == "linear_mmd" else self.gep.norm_ord
-        ref_distance = np.linalg.norm(reference - center, ord=norm, axis=1)
-        sim_distance = np.linalg.norm(simulated - center, ord=norm, axis=1)
-        if self.gep.filtering_method == "linear_mmd":
-            ref_distance = ref_distance ** 2
-            sim_distance = sim_distance ** 2
+        ref_distance = self.prepare_distance_reference()
+        sim_distance = self.distance_from_normalized(normalized)
         lower, upper = self.gep.gep_filtering_quantile
         mask = sim_distance <= np.quantile(ref_distance, upper)
         if lower is not None:

@@ -323,6 +323,7 @@ def test_reference_subset_and_empty_subset(workflow_case):
     args = ("target", params["sct_reference"]["file_path"], config.output_types)
     space = workflow._prepare_fixed_gene_filter(*args, gep, gene, config, config.simu_bulk_dir / "target")
     assert space.reference_log.index.tolist() == ["r1", "r2"]
+    assert len(space.prepare_distance_reference()) == 2
     with pytest.raises(ValueError, match="No reference samples"):
         workflow._prepare_fixed_gene_filter(
             *args, replace(gep, filtering_ref_types=["missing"]), gene, config,
@@ -338,7 +339,12 @@ def test_workflow_pca_summary_and_cached_totals(workflow_case):
     assert summary["gep_pca_n_components"] == summary["gep_filtering_n_pcs"] == 1
     assert summary["gep_filtering_input_n_samples"] == 90
     assert ad.read_h5ad(output).n_obs == 3
+    png = Path(summary["gep_filtering_distance_plot_png"])
+    svg = Path(summary["gep_filtering_distance_plot_svg"])
+    assert png.exists() and svg.exists()
+    png.unlink()
     workflow.run_bulk_simulation("target", params, config)
+    assert png.exists()
     assert read_summary(output)["gep_filtering_input_n_samples"] == 90
     assert ad.read_h5ad(output).n_obs == 3
     assert len(batches) == 1
@@ -483,6 +489,104 @@ def test_mgep_rejects_a_nonzero_lower_distance_quantile(tmp_path):
             filtering_in_pca_space=False,
             gep_filtering_quantile=(0.1, 0.95),
         )
+
+
+@pytest.mark.parametrize(
+    "method,in_pca,norm",
+    [
+        ("median_gep", True, 2),
+        ("median_gep", False, 1),
+        ("mean_gep", True, 1),
+        ("linear_mmd", False, 1),
+        ("mgep", False, 2),
+    ],
+)
+def test_distance_diagnostic_uses_filter_reference_and_saved_samples(
+    tmp_path, monkeypatch, method, in_pca, norm
+):
+    from matplotlib.axes import Axes
+    from scipy.sparse import csr_matrix
+
+    space = make_space(
+        tmp_path, filtering_method=method, filtering_in_pca_space=in_pca,
+        norm_ord=norm, gep_filtering_quantile=(0.0, 1.0),
+    )
+    profiles = pd.DataFrame({"a": [2.0, 4.0], "b": [8.0, 6.0]}, index=["s1", "s2"])
+    normalized = normalize_selected(profiles, space.genes)
+    assert space.filter(profiles).index.tolist() == profiles.index.tolist()
+    reference = (
+        space.reference_linear.to_numpy() if method == "mgep"
+        else space.reference_coordinates if in_pca
+        else space.reference_log.to_numpy()
+    )
+    center = (
+        np.median(reference, axis=0) if method in ("mgep", "median_gep")
+        else np.mean(reference, axis=0)
+    )
+    expected_norm = 1 if method == "mgep" else 2 if method == "linear_mmd" else norm
+    expected_reference = np.linalg.norm(reference - center, ord=expected_norm, axis=1)
+    if method == "linear_mmd":
+        expected_reference **= 2
+    np.testing.assert_allclose(space.prepare_distance_reference(), expected_reference)
+
+    saved = tmp_path / "accepted.h5ad"
+    ad.AnnData(
+        X=csr_matrix(np.log2(normalized.to_numpy() + 1).astype(np.float32)),
+        obs=pd.DataFrame(index=profiles.index),
+        var=pd.DataFrame(index=space.genes),
+    ).write_h5ad(saved)
+    lines, histograms, simulated_chunks = [], [], []
+    original_line, original_stairs = Axes.axvline, Axes.stairs
+    original_distance = space.distance_from_normalized
+
+    def capture_distance(values):
+        distances = original_distance(values)
+        simulated_chunks.extend(distances.tolist())
+        return distances
+
+    def capture_line(ax, x, *args, **kwargs):
+        lines.append((x, kwargs["label"]))
+        return original_line(ax, x, *args, **kwargs)
+
+    def capture_stairs(ax, values, edges, *args, **kwargs):
+        histograms.append((np.asarray(values), kwargs["label"]))
+        return original_stairs(ax, values, edges, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "axvline", capture_line)
+    monkeypatch.setattr(Axes, "stairs", capture_stairs)
+    monkeypatch.setattr(space, "distance_from_normalized", capture_distance)
+    paths = workflow._save_gep_distance_distribution(saved, space, batch_size=1)
+    assert all(Path(path).is_file() for path in paths.values())
+    assert [label for _, label in histograms] == [
+        "Reference (n=3)", "Kept simulated (n=2)"
+    ]
+    assert lines[0][0] == pytest.approx(np.quantile(expected_reference, 1.0))
+    assert len(lines) == (1 if method == "mgep" else 2)
+    if method != "mgep":
+        assert lines[1][0] == pytest.approx(np.quantile(expected_reference, 0.0))
+    saved_log = np.log2(normalized.to_numpy() + 1).astype(np.float32).astype(np.float64)
+    saved_linear = np.expm1(saved_log * np.log(2))
+    saved_linear *= 1e6 / saved_linear.sum(axis=1, keepdims=True)
+    expected_profiles = (
+        saved_linear if method == "mgep"
+        else space.pca.transform(np.log2(saved_linear + 1)) if in_pca
+        else np.log2(saved_linear + 1)
+    )
+    expected_simulated = np.linalg.norm(expected_profiles - center, ord=expected_norm, axis=1)
+    if method == "linear_mmd":
+        expected_simulated **= 2
+    np.testing.assert_allclose(simulated_chunks, expected_simulated, rtol=1e-5, atol=1e-5)
+
+
+def test_distance_plot_rejects_mismatched_saved_gene_order(tmp_path):
+    space = make_space(tmp_path, filtering_in_pca_space=False)
+    saved = tmp_path / "wrong.h5ad"
+    ad.AnnData(
+        X=np.array([[1.0, 2.0]]),
+        var=pd.DataFrame(index=["b", "a"]),
+    ).write_h5ad(saved)
+    with pytest.raises(ValueError, match="gene order"):
+        workflow._save_gep_distance_distribution(saved, space)
 
 
 def test_workflow_mgep_uses_linear_filter_and_distinct_output_tag(workflow_case):
