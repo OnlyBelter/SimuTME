@@ -395,6 +395,8 @@ class SimuConfig:
     stratify_by_dataset: Literal["none", "balanced_quota"] = "none"
     mixed_sct_loading_mode: Literal["auto", "eager", "lazy"] = "auto"
     mixed_sct_auto_eager_max_gb: float = 4.0
+    mixed_candidate_workers: int = 0
+    mixed_candidate_seed: int | None = None
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -1095,6 +1097,37 @@ def preflight_segment_cell_prop_priors(config: SimuConfig, datasets: Dict[str, D
     """Validate segment prior settings for all datasets before simulation."""
     for dataset_name, params in datasets.items():
         _resolve_configured_segment_prior(dataset_name, params, config)
+        _resolve_parallel_candidate_settings(dataset_name, params, config)
+
+
+def _resolve_parallel_candidate_settings(dataset_name, params, config):
+    if str(params.get("dataset_type", "mixed")).lower() == "sct":
+        return 0, None
+    workers = _resolve_dataset_override(params, config, "mixed_candidate_workers", 0)
+    seed = _resolve_dataset_override(params, config, "mixed_candidate_seed", None)
+    if isinstance(workers, bool) or not isinstance(workers, (int, np.integer)) or workers < 0:
+        raise ValueError('"mixed_candidate_workers" must be a non-negative integer.')
+    if seed is not None and (
+        isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or seed < 0
+    ):
+        raise ValueError('"mixed_candidate_seed" must be a non-negative integer or null.')
+    if workers:
+        if seed is None:
+            raise ValueError(f'Mixed dataset "{dataset_name}" requires "mixed_candidate_seed".')
+        enabled = _resolve_dataset_override(
+            params, config, "gep_filtering", getattr(config, "gep_filtering_enabled_default", False)
+        )
+        method = _resolve_dataset_override(
+            params, config, "gep_filtering_method", getattr(config, "gep_filtering_method", "median_gep")
+        )
+        if params.get("sampling_method_prop", "segment") != "segment" or not enabled or method != "mgep":
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" requires segment sampling and mgep GEP filtering '
+                "for parallel candidates."
+            )
+        if getattr(config, "mixed_sct_loading_mode", "auto") == "lazy":
+            raise ValueError("Parallel candidates require an eager SCT reference, not lazy loading.")
+    return int(workers), None if seed is None else int(seed)
 
 
 # --- 2. Main Workflow Function ---
@@ -1114,6 +1147,9 @@ def run_bulk_simulation(dataset_name: str,
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
     dataset_type = params.get('dataset_type', 'mixed').lower()
     configured_cell_prop_prior = _resolve_configured_segment_prior(dataset_name, params, config)
+    mixed_candidate_workers, mixed_candidate_seed = _resolve_parallel_candidate_settings(
+        dataset_name, params, config
+    )
     dirichlet_only_keys = {
         "dirichlet_alpha",
         "dirichlet_sampling_seed",
@@ -1434,6 +1470,16 @@ def run_bulk_simulation(dataset_name: str,
             mixed_sct_loading_mode=config.mixed_sct_loading_mode,
             mixed_sct_auto_eager_max_gb=config.mixed_sct_auto_eager_max_gb,
         )
+        if mixed_candidate_workers:
+            probe = ReadH5AD(resolved_sct_dataset_file_path, backed="r")
+            try:
+                if bulk_generator._resolve_sct_loading_mode(probe) != "eager":
+                    raise ValueError(
+                        "Parallel candidates require an eager SCT reference; set "
+                        '"mixed_sct_loading_mode: eager" or increase the auto threshold.'
+                    )
+            finally:
+                bulk_generator._close_backed_reader(probe)
 
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
         filtering_space = None
@@ -1482,6 +1528,8 @@ def run_bulk_simulation(dataset_name: str,
                 norm_ord=resolved_gep_filtering.norm_ord,
                 pca_n_components=resolved_gep_filtering.pca_n_components,
                 filtering_space=filtering_space,
+                mixed_candidate_workers=mixed_candidate_workers,
+                mixed_candidate_seed=mixed_candidate_seed,
             )
             bulk_generator.generate_gep(config=gep_gen_config)
         else:

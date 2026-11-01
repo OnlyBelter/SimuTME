@@ -312,6 +312,43 @@ Dataset-local diagnostic outputs under:
 The plots use the fraction table of accepted samples after GEP filtering.
 Gene filtering or PCA visualization alone does not enable all-cell-type plots.
 
+## Parallel candidate generation
+
+The optional CPU engine processes independent Mixed candidate batches in
+parallel. It supports segment sampling with `mgep` GEP filtering and an eager
+SCT reference. The default `mixed_candidate_workers: 0` retains the existing
+serial workflow, including its loading mode. To enable parallel generation
+for one dataset, add a worker count and seed to that dataset:
+
+```yaml
+mixed_candidate_workers: 8
+mixed_candidate_seed: 42
+```
+
+Start with a fresh dataset name and output location. Set
+`mixed_sct_loading_mode: "eager"` globally, or set the auto eager threshold
+high enough for the SCT reference. The temporary directory specified by
+`TMPDIR` must have space for a shared copy of the SCT expression matrix.
+Parallel workers preserve the configured filtering and sampling rules, but
+their seeded random draws differ from existing serial runs.
+
+Benchmark before choosing a worker count. From the directory used to run the
+configuration, run the following command with paths for the real SCT file,
+TCGA configuration, and previously selected fixed gene list:
+
+```bash
+python /path/to/SimuTME/scripts/benchmark_parallel_candidates.py --config /path/to/config.yaml --dataset Mixed_N100K --sct /path/to/sct.h5ad --gene-list /path/to/fixed_filtering_gene_list.csv --workers 0 1 4 8 16 --batch-size 5000 --batches 10 --repeats 3
+```
+
+The benchmark uses temporary files and prints JSON with setup time,
+throughput, acceptance, speedup, and process-tree RSS. It includes CSV writes
+but excludes checkpoint writes, final H5AD creation, PCA, and plotting. The
+optional `psutil` package is required for process-tree RSS; summed RSS counts
+shared pages more than once. `--workers 0` measures the serial candidate
+stages with the same batch seeds, and positive counts measure the parallel
+engine. Shared-matrix setup and worker warm-up are reported separately from
+steady-state timings. Synthetic results do not establish server performance.
+
 ## Optional Filtering And PCA Outputs
 
 Gene selection runs before GEP-level profile filtering. With

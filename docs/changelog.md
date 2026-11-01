@@ -4,6 +4,16 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## November 1, 2026
+
+### Parallel Mixed candidate generation
+
+Mixed segment datasets using mGEP filtering can opt into deterministic CPU
+candidate workers with `mixed_candidate_workers` and `mixed_candidate_seed`.
+The default remains serial. Workers share an eager SCT reference, and one
+coordinator writes ordered outputs and validates checkpoints. A standalone
+benchmark compares candidate throughput and memory across worker counts.
+
 ## October 31, 2026
 
 ### mGEP lower-distance quantile

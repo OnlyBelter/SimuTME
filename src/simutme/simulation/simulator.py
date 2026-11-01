@@ -1,6 +1,8 @@
 import os
 import json
 import warnings
+import copy
+from contextlib import contextmanager
 from time import perf_counter
 import numpy as np
 import pandas as pd
@@ -92,6 +94,8 @@ class GEPGenerationConfig:
     segment_fraction_max_caps: Optional[Dict[str, float]] = None
     segment_fraction_cap_metadata: Optional[Dict[str, Any]] = None
     filtering_space: Optional[FixedGeneFilter] = None
+    mixed_candidate_workers: int = 0
+    mixed_candidate_seed: Optional[int] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -100,6 +104,25 @@ class GEPGenerationConfig:
         if self.simu_method not in ('ave', 'mul'):
             raise ValueError(f"Invalid simu_method: {self.simu_method}")
         validate_gep_filtering_method(self.filtering_method)
+        if (isinstance(self.mixed_candidate_workers, bool)
+                or not isinstance(self.mixed_candidate_workers, (int, np.integer))
+                or self.mixed_candidate_workers < 0):
+            raise ValueError('"mixed_candidate_workers" must be a non-negative integer.')
+        if self.mixed_candidate_seed is not None and (
+            isinstance(self.mixed_candidate_seed, bool)
+            or not isinstance(self.mixed_candidate_seed, (int, np.integer))
+            or self.mixed_candidate_seed < 0
+        ):
+            raise ValueError('"mixed_candidate_seed" must be a non-negative integer or null.')
+        if self.mixed_candidate_workers:
+            if self.mixed_candidate_seed is None:
+                raise ValueError('"mixed_candidate_seed" is required for parallel candidates.')
+            if (self.simu_method != "mul" or self.sampling_method_prop != "segment"
+                    or not self.filtering or self.filtering_method != "mgep"
+                    or self.filtering_space is None):
+                raise ValueError(
+                    "Parallel candidates require Mixed segment sampling with mgep filtering."
+                )
         if self.dirichlet_sampling_seed is not None and (
             isinstance(self.dirichlet_sampling_seed, bool)
             or not isinstance(self.dirichlet_sampling_seed, (int, np.integer))
@@ -397,10 +420,40 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self._logged_pca_variance.add(signature)
         logger.info('PCA reference space: %d PCs explain %.2f%% variance.', n_components, explained_variance_pct)
 
+    @contextmanager
+    def _parallel_run_lock(self):
+        path = self.simu_bulk_dir / f".{self.bulk_dataset_name}.parallel.lock"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ValueError(
+                f"Parallel run lock already exists: {path}. Another run may be active; "
+                "verify ownership before removing a stale lock."
+            ) from exc
+        lock_stat = os.fstat(descriptor)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(f"pid={os.getpid()}\n")
+                handle.flush()
+            yield
+        finally:
+            try:
+                current = path.stat()
+                if (current.st_dev, current.st_ino) == (lock_stat.st_dev, lock_stat.st_ino):
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+
     def generate_gep(self, config: GEPGenerationConfig) -> None:
         """
         Main method to generate simulated bulk GEPs.
         """
+        if config.mixed_candidate_workers:
+            with self._parallel_run_lock():
+                return self._generate_gep(config)
+        return self._generate_gep(config)
+
+    def _generate_gep(self, config: GEPGenerationConfig) -> None:
         self._reset_runtime_log_state()
         self._reset_gep_filtering_stats(config.filtering)
         self.n_samples = config.n_samples
@@ -415,12 +468,21 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             norm_ord = 2
 
         self.filtering_space = config.filtering_space
+        self.parallel_worker_count = config.mixed_candidate_workers
+        if config.mixed_candidate_workers:
+            self._validate_parallel_checkpoint()
         if self.filtering_space is not None:
             self._prepare_filtering_artifacts(config)
 
         if self.generated_bulk_gep_fp.exists():
             logger.info(f'Previous result existed: {self.generated_bulk_gep_fp}')
             logger.info(self.__str__())
+            return
+
+        if config.mixed_candidate_workers:
+            self._generate_parallel_candidates(config)
+            self._finalize_generation(config.sampling_method_prop, config.filtering_method, config.log_file_path)
+            self._save_filtering_metadata()
             return
 
         # Resume check
@@ -620,8 +682,17 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         generation = {
             item.name: getattr(config, item.name)
             for item in fields(config)
-            if item.name not in ("filtering_space", "log_file_path", "n_threads", "show_filtering_info")
+            if item.name not in (
+                "filtering_space", "log_file_path", "n_threads", "show_filtering_info",
+                "mixed_candidate_workers", "mixed_candidate_seed",
+            )
         }
+        if config.mixed_candidate_workers:
+            generation["parallel_candidates"] = {
+                "version": "parallel-candidates-v1",
+                "seed": config.mixed_candidate_seed,
+                "batch_size": _candidate_batch_size(config.n_samples, config.filtering),
+            }
         sct_file = Path(self.sct_dataset_file_path)
         generation.update(
             sct_file=str(sct_file.resolve()),
@@ -687,10 +758,121 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 "gep_filtering_n_pcs",
             )
         }
+        extra = {}
+        if getattr(self, "parallel_worker_count", 0):
+            extra["parallel_execution"] = {"workers": self.parallel_worker_count}
         write_metadata(
             self.filtering_metadata_path, self.filtering_space.identity,
-            stats=self.filtering_space.stats(), generator_stats=generator_stats,
+            stats=self.filtering_space.stats(), generator_stats=generator_stats, **extra,
         )
+
+    def _parallel_output_sizes(self):
+        paths = (
+            self.generated_bulk_gep_csv_fp,
+            self.generated_cell_fraction_fp,
+            self.sampled_sc_cell_id_file_path,
+        )
+        return {path.name: path.stat().st_size if path.exists() else None for path in paths}
+
+    def _validate_parallel_checkpoint(self):
+        checkpoint_path = self.filtering_space.result_dir / "parallel_candidate_checkpoint.json"
+        self._parallel_checkpoint = None
+        if not checkpoint_path.exists():
+            if any(value is not None for value in self._parallel_output_sizes().values()):
+                raise ValueError(
+                    "Parallel checkpoint is missing for existing intermediate files. "
+                    "Use a new dataset name/output location."
+                )
+            return
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            metadata_path = self.filtering_space.result_dir / "filtering_metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (checkpoint["output_sizes"] != self._parallel_output_sizes()
+                    or checkpoint["stats"] != metadata["stats"]
+                    or checkpoint["generator_stats"] != metadata["generator_stats"]):
+                raise ValueError("checkpoint and intermediate files differ")
+            if (not isinstance(checkpoint["next_batch"], int)
+                    or checkpoint["next_batch"] < 0
+                    or not isinstance(checkpoint["accepted"], int)
+                    or checkpoint["accepted"] < 0):
+                raise ValueError("invalid checkpoint counters")
+            if checkpoint["accepted"]:
+                expression_ids = pd.read_csv(
+                    self.generated_bulk_gep_csv_fp, usecols=[0], index_col=0,
+                ).index
+                fraction_ids = pd.read_csv(
+                    self.generated_cell_fraction_fp, usecols=[0], index_col=0,
+                ).index
+                selected_ids = pd.read_csv(
+                    self.sampled_sc_cell_id_file_path, usecols=[0], index_col=0,
+                ).index.unique()
+                if (len(fraction_ids) != checkpoint["accepted"]
+                        or not fraction_ids.is_unique
+                        or not expression_ids.equals(fraction_ids)
+                        or not selected_ids.equals(fraction_ids)):
+                    raise ValueError("checkpoint sample IDs differ")
+            elif any(value is not None for value in checkpoint["output_sizes"].values()):
+                raise ValueError("empty checkpoint has intermediate files")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(
+                "Parallel checkpoint or intermediate files are inconsistent. "
+                "Preserve the files and use a new dataset name/output location."
+            ) from exc
+        self._parallel_checkpoint = checkpoint
+
+    def _save_parallel_checkpoint(self):
+        metadata = json.loads(self.filtering_metadata_path.read_text(encoding="utf-8"))
+        checkpoint = {
+            "next_batch": self.n_round,
+            "accepted": self.generated_bulk_gep_counter,
+            "output_sizes": self._parallel_output_sizes(),
+            "stats": metadata["stats"],
+            "generator_stats": metadata["generator_stats"],
+        }
+        for path in (
+            self.generated_bulk_gep_csv_fp, self.generated_cell_fraction_fp,
+            self.sampled_sc_cell_id_file_path, self.filtering_metadata_path,
+        ):
+            if path.exists():
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+        checkpoint_path = self.filtering_space.result_dir / "parallel_candidate_checkpoint.json"
+        temporary = checkpoint_path.with_suffix(".json.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(checkpoint, handle, indent=2, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(checkpoint_path)
+
+    def _generate_parallel_candidates(self, config):
+        from .parallel_candidates import run_parallel_candidates
+
+        checkpoint = self._parallel_checkpoint
+        if checkpoint is not None:
+            self.n_round = checkpoint["next_batch"]
+            self.generated_bulk_gep_counter = checkpoint["accepted"]
+            if self.generated_bulk_gep_counter > self.n_samples:
+                raise ValueError("Parallel checkpoint contains too many accepted profiles.")
+        else:
+            self._save_parallel_checkpoint()
+
+        if self.generated_bulk_gep_counter >= self.n_samples:
+            return
+        obs_df, _, sc_dataset = self._load_sc_data_for_generation(config.simu_method)
+        if sc_dataset != DatasetType.SCT or self.sct_dataset_df is None:
+            raise ValueError(
+                'Parallel candidates require an eager SCT reference; set '
+                '"mixed_sct_loading_mode: eager" or increase the auto threshold.'
+            )
+        self.filtering_space.prepare_distance_reference()
+        if self.filtering_space.gep.filtering_by_gene_range:
+            lower, _, upper = self.filtering_space.gep.gene_quantile_range
+            self.filtering_space.range_bounds = self.filtering_space.reference_linear.quantile([lower, upper])
+        worker_filter = copy.copy(self.filtering_space)
+        worker_filter.reference_linear = None
+        worker_filter.reference_log = None
+        run_parallel_candidates(self, config, obs_df, worker_filter)
 
     def _load_sc_data_for_generation(
             self,

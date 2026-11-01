@@ -114,6 +114,37 @@ These parameters affect shared simulation behavior across workflows.
   Legacy global gene-filtering mode. It maps to `gene_filtering_type`
   and defaults to `high_corr_gene`.
 
+### Parallel Mixed candidates
+
+These optional parameters control candidate generation. A Mixed dataset can
+override the global `parameters` values with fields of the same names.
+
+- `mixed_candidate_workers` defaults to `0`, retaining the existing serial
+  path. A positive integer enables the parallel engine; `1` uses that engine
+  with one worker.
+- `mixed_candidate_seed` defaults to `null`. A nonnegative integer is
+  required when the parallel engine is enabled.
+
+Parallel generation supports segment sampling with `mgep` GEP filtering and an
+eager SCT reference. Set `mixed_sct_loading_mode: "eager"`, or ensure `auto`
+resolves to eager loading. Other combinations fail before generation. A
+dataset-level override can enable the engine for one target while the global
+default remains serial.
+
+The parallel engine uses deterministic batch seeds. For unchanged inputs,
+seed, and batch size, its output is independent of worker count, but does not
+reproduce historical serial random draws. Changing the seed requires a new
+output location. Do not use a serial intermediate as a parallel checkpoint.
+The coordinator validates checkpoints and intermediate files before resuming;
+inconsistent files cause an error and are not automatically removed.
+An exclusive lock prevents two parallel runs from writing the same target.
+After a forced termination, verify that no run is active before removing a
+stale `.parallel.lock` file.
+
+Workers share a temporary memory-mapped copy of the eager SCT matrix. Set
+`TMPDIR` to a filesystem with enough free space for this copy, in addition to
+the RAM needed by the parent and per-worker candidate batches.
+
 ### Mixed filtering parameters
 
 These parameters define the global defaults for Mixed dataset filtering.
