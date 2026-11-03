@@ -106,6 +106,9 @@ timings.
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+- `n_sample_for_pca`
+- `pca_sample_seed`
+- `incremental_pca_batch_size`
 - `dirichlet_alpha` for `sampling_method_prop: "dirichlet"`
 - `pred_cell_prop_file_path` as an optional dataset-level override of
   `paths.pred_cell_prop_file_path`
@@ -113,6 +116,26 @@ timings.
 
 The old Mixed-dataset key `filtering` is no longer supported. Use
 `gep_filtering` for GEP-level filtering instead.
+
+### Selecting TCGA reference cancer types
+
+When `gep_filtering` is enabled, `filtering_ref_types` optionally limits the
+TCGA expression samples used as the GEP-filtering reference. Set it to a YAML
+list of exact labels from the `cancer_type` column in
+`paths.tcga2cancer_type_file_path`:
+
+```yaml
+filtering_ref_types: ["BRCA", "LUAD"]
+```
+
+A single string such as `"BRCA"` is also accepted, but a list makes the
+selection explicit. Use `null` to leave the reference unrestricted. Use
+`["all"]` to select every nonmissing cancer type in the mapping file. In the
+provided TCGA files, `null` and `["all"]` select the same samples because
+every expression sample has a cancer-type annotation. With other files,
+`null` keeps all reference samples, while `["all"]` keeps only samples listed
+in the mapping. If no reference samples match an explicit selection, SimuTME
+stops with an error.
 
 ## Reference Source Used By Mixed Simulation
 
@@ -420,6 +443,19 @@ location because existing filtering caches are incompatible.
 the same normalized gene space. Its component count is separate from the
 reference-only GEP-filtering PCA target.
 
+Set `n_sample_for_pca` to a positive integer or a list of unique positive
+integers to create one comparison for each simulated sample count. For
+example, `n_sample_for_pca: [10000, 50000, 100000, 200000]` creates four
+figures when the dataset contains at least 200,000 simulated samples. Every
+comparison also includes all samples from the TCGA reference. SimuTME checks
+the counts against both configured `n_samples` and the generated dataset.
+The subsets are reproducible and nested, controlled by `pca_sample_seed`.
+`incremental_pca_batch_size` controls the IncrementalPCA batch size and must
+be at least twice the number of requested PCA components. This sampled mode
+uses approximate IncrementalPCA to process expression batches without
+materializing the full simulated matrix. Set `n_sample_for_pca: null` to
+retain the existing all-sample comparison.
+
 These artifacts are written under the dataset-local directory:
 
 `<mixed_output_dir>/<dataset_name>/`
@@ -434,6 +470,8 @@ Typical files include:
   `variance_TPM2`, `variance_pass`, and `selected_in_G` for each reference gene
 - `comparison_pca_<n_components>_gene_loadings_sorted_PC1.csv`
 - `<dataset_name>_PCA_with_TCGA_correlation-first-v1_PC0_PC1.png`
+- `pca_by_sample_count/` contains per-count PCA models, coordinates,
+  metadata, figures, and PC1 loadings when `n_sample_for_pca` is configured
 - `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
 - `mixed_dataset_summary.json`
 
@@ -441,7 +479,8 @@ The summary records the workflow version, cache identity, pre-selection,
 shared, and exported gene counts, and acceptance totals. It records
 `gep_pca_n_components` as the configured target and `gep_filtering_n_pcs`
 as the actual fitted count, not a second configuration setting. Both PCA
-fields are null when GEP filtering does not use PCA space.
+fields are null when GEP filtering does not use PCA space. Per-count
+comparison artifact paths are listed in `pca_runs`.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with
@@ -507,6 +546,9 @@ and `gene_filtering_reference_file` override their corresponding shared paths.
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+- `n_sample_for_pca`
+- `pca_sample_seed`
+- `incremental_pca_batch_size`
 
 Mixed datasets may override these defaults with the flat dataset-level fields
 listed above.

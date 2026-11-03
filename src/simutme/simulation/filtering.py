@@ -151,6 +151,7 @@ class FixedGeneFilter:
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
                  correlation_file=None):
         self.genes = list(genes)
+        self.reference_file = Path(reference_file)
         self.reference_linear = normalize_selected(reference_linear, self.genes, "Reference")
         self.reference_log = np.log2(self.reference_linear + 1)
         self.gep = gep_params

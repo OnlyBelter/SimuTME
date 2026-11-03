@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from joblib import load
+from joblib import dump, load
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any, Literal, Optional
 
@@ -373,6 +373,9 @@ class SimuConfig:
     gene_filtering_plot_pca: bool | None = None  # Deprecated alias for plot_pca_for_comparison
     gene_filtering_pca_n_components: int = 2
     gene_filtering_pca_figsize: Tuple[float, float] = (5.0, 5.0)
+    n_sample_for_pca: int | List[int] | None = None
+    pca_sample_seed: int = 42
+    incremental_pca_batch_size: int = 5000
     pred_cell_prop_file_path: Path | None = None
     sorted_bulk_expr_file_path: Path | None = None
     sorted_bulk_annot_file_path: Path | None = None
@@ -563,6 +566,9 @@ class ResolvedGeneFilteringParams:
     pca_figsize: Tuple[float, float]
     correlation_reference_dataset: str | None = None
     reference_variance_threshold: float | None = None
+    n_sample_for_pca: Tuple[int, ...] | None = None
+    pca_sample_seed: int = 42
+    incremental_pca_batch_size: int = 5000
 
 
 def _resolve_optional_path_value(value: Any) -> str | None:
@@ -582,6 +588,42 @@ def _resolve_dataset_override(
     if hasattr(config, field_name):
         return getattr(config, field_name)
     return default
+
+
+def _resolve_pca_sample_counts(value: Any, dataset_name: str, configured_n_samples: Any) -> Tuple[int, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f'"n_sample_for_pca" for Mixed dataset "{dataset_name}" must be a positive integer or a list of positive integers.'
+        )
+    if isinstance(value, int):
+        counts = [value]
+    elif isinstance(value, (list, tuple)):
+        counts = list(value)
+    else:
+        raise ValueError(
+            f'"n_sample_for_pca" for Mixed dataset "{dataset_name}" must be a positive integer or a list of positive integers.'
+        )
+    if not counts:
+        raise ValueError(f'"n_sample_for_pca" cannot be an empty list for Mixed dataset "{dataset_name}".')
+    if any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in counts):
+        raise ValueError(
+            f'"n_sample_for_pca" for Mixed dataset "{dataset_name}" must contain only positive integers.'
+        )
+    if len(set(counts)) != len(counts):
+        raise ValueError(f'"n_sample_for_pca" contains duplicate values for Mixed dataset "{dataset_name}".')
+    if isinstance(configured_n_samples, bool) or not isinstance(configured_n_samples, int) or configured_n_samples <= 0:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" must define a positive integer "n_samples" when PCA sample counts are set.'
+        )
+    oversized = [count for count in counts if count > configured_n_samples]
+    if oversized:
+        raise ValueError(
+            f'"n_sample_for_pca" values {oversized} exceed n_samples={configured_n_samples} '
+            f'for Mixed dataset "{dataset_name}".'
+        )
+    return tuple(counts)
 
 
 def _read_gene_list_file(file_path: str | Path) -> List[str]:
@@ -920,6 +962,26 @@ def _resolve_gene_filtering_params(
                 or not np.isfinite(variance_threshold) or variance_threshold < 0):
             raise ValueError("gene_filtering_reference_variance_threshold must be finite and >= 0, or null.")
         variance_threshold = float(variance_threshold)
+    n_sample_for_pca = (
+        _resolve_pca_sample_counts(
+            _resolve_dataset_override(params, config, "n_sample_for_pca", None),
+            dataset_name,
+            params.get("n_samples"),
+        )
+        if plot_pca
+        else None
+    )
+    pca_sample_seed = _resolve_dataset_override(params, config, "pca_sample_seed", 42)
+    if isinstance(pca_sample_seed, bool) or not isinstance(pca_sample_seed, int) or pca_sample_seed < 0:
+        raise ValueError(f'"pca_sample_seed" must be a nonnegative integer for Mixed dataset "{dataset_name}".')
+    incremental_pca_batch_size = _resolve_dataset_override(
+        params, config, "incremental_pca_batch_size", 5000)
+    if (isinstance(incremental_pca_batch_size, bool)
+            or not isinstance(incremental_pca_batch_size, int)
+            or incremental_pca_batch_size < 2):
+        raise ValueError(
+            f'"incremental_pca_batch_size" must be an integer >= 2 for Mixed dataset "{dataset_name}".'
+        )
     resolved = ResolvedGeneFilteringParams(
         enabled=enabled,
         reference_file=_resolve_optional_path_value(
@@ -948,6 +1010,9 @@ def _resolve_gene_filtering_params(
             float(v)
             for v in _resolve_dataset_override(params, config, "gene_filtering_pca_figsize", config.gene_filtering_pca_figsize)
         ),
+        n_sample_for_pca=n_sample_for_pca,
+        pca_sample_seed=pca_sample_seed,
+        incremental_pca_batch_size=incremental_pca_batch_size,
         correlation_reference_dataset=correlation_reference_dataset or None,
         reference_variance_threshold=variance_threshold,
     )
@@ -974,6 +1039,15 @@ def _resolve_gene_filtering_params(
     if resolved.plot_pca and resolved.pca_n_components < 2:
         raise ValueError(
             f'"gene_filtering_pca_n_components" must be >= 2 when plot_pca_for_comparison is enabled for Mixed dataset "{dataset_name}".'
+        )
+    if (
+        resolved.plot_pca
+        and resolved.n_sample_for_pca is not None
+        and resolved.incremental_pca_batch_size < 2 * resolved.pca_n_components
+    ):
+        raise ValueError(
+            f'"incremental_pca_batch_size" must be at least twice the number of '
+            f"PCA components for Mixed dataset {dataset_name!r}."
         )
     return resolved
 
@@ -1853,6 +1927,300 @@ def _build_filtered_h5ad_path(
     return generated_bulk_gep_fp.with_name(f"{generated_bulk_gep_fp.stem}_{postfix}{generated_bulk_gep_fp.suffix}")
 
 
+def _nested_pca_sample_indices(
+    n_samples: int, sample_counts: Tuple[int, ...], seed: int
+) -> Dict[int, np.ndarray]:
+    permutation = np.random.default_rng(seed).permutation(n_samples)
+    return {count: np.sort(permutation[:count]) for count in sample_counts}
+
+
+def _pca_batch_slices(n_rows: int, batch_size: int, min_batch_size: int) -> List[Tuple[int, int]]:
+    if n_rows < min_batch_size:
+        raise ValueError(
+            f"IncrementalPCA needs at least {min_batch_size} combined samples; found {n_rows}."
+        )
+    sizes = [batch_size] * (n_rows // batch_size)
+    remainder = n_rows % batch_size
+    if remainder:
+        sizes.append(remainder)
+    if sizes and sizes[-1] < min_batch_size:
+        if len(sizes) == 1:
+            sizes[0] = n_rows
+        else:
+            deficit = min_batch_size - sizes[-1]
+            if sizes[-2] - deficit < min_batch_size:
+                sizes[-2] += sizes[-1]
+                sizes.pop()
+            else:
+                sizes[-2] -= deficit
+                sizes[-1] = min_batch_size
+    slices = []
+    start = 0
+    for size in sizes:
+        slices.append((start, start + size))
+        start += size
+    return slices
+
+
+def _iter_sampled_pca_batches(
+    bulk,
+    selected_rows: np.ndarray,
+    reference_log: pd.DataFrame,
+    gene_indices: np.ndarray,
+    genes: List[str],
+    batch_size: int,
+    n_components: int,
+    simulated_is_normalized_log: bool,
+):
+    n_simulated = len(selected_rows)
+    n_reference = len(reference_log)
+    for start, stop in _pca_batch_slices(
+        n_simulated + n_reference, batch_size, n_components
+    ):
+        pieces = []
+        if start < n_simulated:
+            sim_stop = min(stop, n_simulated)
+            rows = selected_rows[start:sim_stop]
+            values = bulk.X[rows, :]
+            values = values.toarray() if hasattr(values, "toarray") else np.asarray(values)
+            values = np.asarray(values[:, gene_indices], dtype=np.float32)
+            if not simulated_is_normalized_log:
+                linear = np.expm1(values * np.float32(np.log(2.0)))
+                normalized = normalize_selected(
+                    pd.DataFrame(linear, columns=genes),
+                    genes,
+                    "Sampled comparison bulk",
+                )
+                values = np.log2(normalized.to_numpy(dtype=np.float32) + 1.0)
+            pieces.append(values)
+        if stop > n_simulated:
+            ref_start = max(start, n_simulated) - n_simulated
+            ref_stop = stop - n_simulated
+            pieces.append(
+                reference_log.iloc[ref_start:ref_stop].to_numpy(dtype=np.float32)
+            )
+        batch = pieces[0] if len(pieces) == 1 else np.vstack(pieces)
+        if batch.shape[1] != len(genes):
+            raise ValueError("PCA batch gene count differs from the selected gene list.")
+        if (
+            batch.shape[0] + n_components + 1
+        ) * batch.shape[1] > np.iinfo(np.int32).max:
+            raise ValueError(
+                "IncrementalPCA batch exceeds the installed LAPACK integer indexing "
+                "limit. Reduce incremental_pca_batch_size."
+            )
+        if not np.isfinite(batch).all():
+            raise ValueError("PCA input contains non-finite values.")
+        yield start, stop, batch
+
+
+def _run_sample_count_pca(
+    generated_file: str | Path,
+    reference_log: pd.DataFrame,
+    genes: List[str],
+    dataset_name: str,
+    result_dir: str | Path,
+    gene_params: ResolvedGeneFilteringParams,
+    *,
+    simulated_is_normalized_log: bool,
+) -> List[Dict[str, str | int]]:
+    import anndata as ad
+    from sklearn.decomposition import IncrementalPCA
+
+    pca_dir = Path(result_dir) / "pca_by_sample_count"
+    pca_dir.mkdir(parents=True, exist_ok=True)
+    generated_file = Path(generated_file)
+    generated_stat = generated_file.stat()
+    bulk = ad.read_h5ad(generated_file, backed="r")
+    try:
+        if not bulk.obs_names.is_unique:
+            raise ValueError("Generated PCA input contains duplicate sample IDs.")
+        if not bulk.var_names.is_unique:
+            raise ValueError("Generated PCA input contains duplicate gene names.")
+        gene_positions = pd.Index(bulk.var_names).get_indexer(genes)
+        if np.any(gene_positions < 0):
+            missing = [gene for gene, pos in zip(genes, gene_positions) if pos < 0]
+            raise ValueError(f"Generated PCA input is missing selected genes: {missing[:5]}.")
+        if not reference_log.columns.equals(pd.Index(genes)):
+            reference_log = reference_log.loc[:, genes]
+        if len(reference_log) < gene_params.pca_n_components:
+            raise ValueError("TCGA reference has too few samples for the requested PCA components.")
+        oversized = [
+            count for count in gene_params.n_sample_for_pca
+            if count > bulk.n_obs
+        ]
+        if oversized:
+            raise ValueError(
+                f'"n_sample_for_pca" values {oversized} exceed the generated dataset '
+                f"sample count ({bulk.n_obs}) for {dataset_name!r}."
+            )
+
+        selections = _nested_pca_sample_indices(
+            bulk.n_obs,
+            gene_params.n_sample_for_pca,
+            gene_params.pca_sample_seed,
+        )
+        pca_runs = []
+        reference_hash = identity_hash(
+            pd.util.hash_pandas_object(reference_log, index=True).astype(str).tolist()
+        )
+        sample_names = pd.Index(bulk.obs_names)
+        for sample_count in gene_params.n_sample_for_pca:
+            selected_rows = selections[sample_count]
+            selected_ids = sample_names.take(selected_rows).astype(str).tolist()
+            model_path = pca_dir / (
+                f"comparison_pca_{gene_params.pca_n_components}_n{sample_count}.joblib"
+            )
+            coordinates_path = pca_dir / (
+                f"comparison_pca_{gene_params.pca_n_components}_n{sample_count}.csv"
+            )
+            metadata_path = model_path.with_suffix(".metadata.json")
+            dataset_filename = _safe_filename(dataset_name)
+            figure_path = pca_dir / (
+                f"{dataset_filename}_PCA_with_TCGA_{FixedGeneFilter.workflow_version}_"
+                f"n{sample_count}_PC0_PC1.png"
+            )
+            identity = {
+                "workflow_version": FixedGeneFilter.workflow_version,
+                "model_scope": "sampled-joint-reference-and-simulated-diagnostic",
+                "ordered_genes": genes,
+                "gene_list_hash": identity_hash(genes),
+                "reference_hash": reference_hash,
+                "generated_file": str(generated_file.resolve()),
+                "generated_file_size": generated_stat.st_size,
+                "generated_file_mtime_ns": generated_stat.st_mtime_ns,
+                "sample_count": sample_count,
+                "selected_sample_ids_hash": identity_hash(selected_ids),
+                "pca_sample_seed": gene_params.pca_sample_seed,
+                "incremental_pca_batch_size": gene_params.incremental_pca_batch_size,
+                "comparison_components": gene_params.pca_n_components,
+            }
+            if any(path.exists() for path in (model_path, coordinates_path, metadata_path)):
+                validate_metadata(metadata_path, identity)
+                if not model_path.is_file() or not coordinates_path.is_file():
+                    raise ValueError(
+                        f"Incomplete sampled PCA artifacts under {pca_dir}; "
+                        "use a fresh dataset output directory."
+                    )
+                pca = load(model_path)
+                coordinates = pd.read_csv(coordinates_path, index_col=0)
+                if (
+                    pca.n_features_in_ != len(genes)
+                    or len(coordinates) != sample_count + len(reference_log)
+                ):
+                    raise ValueError(
+                        f"Incompatible sampled PCA artifacts under {pca_dir}; "
+                        "use a fresh dataset output directory."
+                    )
+            else:
+                pca = IncrementalPCA(
+                    n_components=gene_params.pca_n_components,
+                    batch_size=gene_params.incremental_pca_batch_size,
+                )
+                batch_args = (
+                    bulk,
+                    selected_rows,
+                    reference_log,
+                    gene_positions,
+                    genes,
+                    gene_params.incremental_pca_batch_size,
+                    gene_params.pca_n_components,
+                    simulated_is_normalized_log,
+                )
+                for _, _, batch in _iter_sampled_pca_batches(*batch_args):
+                    pca.partial_fit(batch)
+
+                n_saved_components = min(3, gene_params.pca_n_components)
+                simulated_scores = np.empty(
+                    (sample_count, n_saved_components), dtype=np.float32
+                )
+                reference_scores = np.empty(
+                    (len(reference_log), n_saved_components), dtype=np.float32
+                )
+                for start, stop, batch in _iter_sampled_pca_batches(*batch_args):
+                    scores = pca.transform(batch)[:, :n_saved_components]
+                    sim_stop = min(stop, sample_count)
+                    if start < sim_stop:
+                        simulated_scores[start:sim_stop] = scores[:sim_stop - start]
+                    if stop > sample_count:
+                        ref_start = max(start, sample_count) - sample_count
+                        ref_stop = stop - sample_count
+                        score_start = max(0, sample_count - start)
+                        reference_scores[ref_start:ref_stop] = scores[score_start:]
+
+                columns = [f"PC{i + 1}" for i in range(n_saved_components)]
+                coordinates = pd.concat(
+                    [
+                        pd.DataFrame(simulated_scores, index=selected_ids, columns=columns),
+                        pd.DataFrame(
+                            reference_scores, index=reference_log.index, columns=columns
+                        ),
+                    ]
+                )
+                coordinates.to_csv(coordinates_path)
+                dump(pca, model_path)
+
+            loading_paths = _export_pca_gene_loadings(pca, genes, model_path)
+            plot_pca(
+                data=coordinates.copy(),
+                figsize=gene_params.pca_figsize,
+                result_fp=str(
+                    pca_dir / (
+                        f"{dataset_filename}_PCA_with_TCGA_"
+                        f"{FixedGeneFilter.workflow_version}_n{sample_count}.png"
+                    )
+                ),
+                color_code=np.array(
+                    [dataset_name] * sample_count + ["TCGA"] * len(reference_log)
+                ),
+                explained_variance_ratio=pca.explained_variance_ratio_,
+            )
+            if not figure_path.is_file():
+                raise RuntimeError(f"Sample-count PCA figure was not written: {figure_path}")
+            write_metadata(metadata_path, identity)
+            pca_runs.append(
+                {
+                    "sample_count": sample_count,
+                    "pca_model_file": str(model_path),
+                    "pca_data_file": str(coordinates_path),
+                    "pca_plot_file": str(figure_path),
+                    "pca_gene_loadings_PC1_file": loading_paths["pca_gene_loadings_PC1_file"],
+                }
+            )
+        return pca_runs
+    finally:
+        bulk.file.close()
+
+
+def _load_full_comparison_reference_log(
+    filtering_space: FixedGeneFilter, genes: List[str]
+) -> pd.DataFrame:
+    reference_type = (
+        filtering_space.gep.ref_exp_type if filtering_space.gep.enabled else "TPM"
+    )
+    reference = ReadExp(
+        str(filtering_space.reference_file), exp_type=reference_type or "TPM"
+    ).exp
+    if reference_type == "log_space":
+        values = reference.to_numpy(dtype=np.float64)
+        if not np.isfinite(values).all() or (values < 0).any():
+            raise ValueError("Reference contains negative or non-finite log expression.")
+        reference = pd.DataFrame(
+            np.expm1(values * np.log(2)),
+            index=reference.index,
+            columns=reference.columns,
+        )
+    missing = [gene for gene in genes if gene not in reference.columns]
+    if missing:
+        raise ValueError(f"Comparison reference is missing selected genes: {missing[:5]}.")
+    normalized = normalize_selected(reference.loc[:, genes], genes, "Comparison reference")
+    return pd.DataFrame(
+        np.log2(normalized.to_numpy(dtype=np.float32) + 1.0),
+        index=reference.index,
+        columns=genes,
+    )
+
+
 def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, config, result_dir):
     reference_file = gep.reference_file if gep.enabled else gene.reference_file
     reference_type = gep.ref_exp_type if gep.enabled else "TPM"
@@ -1948,8 +2316,53 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         "pca_model_file": None,
         "pca_data_file": None,
         "pca_plot_file": None,
+        "pca_runs": [],
         "full_gene_corr_with_cell_fraction_file": filtering_space.correlation_file,
     }
+    if gene_params.plot_pca and gene_params.n_sample_for_pca is not None:
+        bulk = ad.read_h5ad(generated_file, backed="r")
+        try:
+            if bulk.var_names.tolist() != filtering_space.genes:
+                raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
+            if gene_params.enabled and gene_params.save_filtered_h5ad:
+                output = _build_filtered_h5ad_path(
+                    generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
+                )
+                metadata_path = output.with_suffix(".metadata.json")
+                if not output.exists():
+                    bulk.write_h5ad(output, compression="gzip")
+                    write_metadata(metadata_path, filtering_space.identity)
+                else:
+                    validate_metadata(metadata_path, filtering_space.identity)
+                    existing = ad.read_h5ad(output, backed="r")
+                    try:
+                        if (
+                            existing.var_names.tolist() != filtering_space.genes
+                            or existing.obs_names.tolist() != bulk.obs_names.tolist()
+                        ):
+                            raise ValueError(
+                                "Selected-gene export differs from G or sample IDs. "
+                                "Use a new output location."
+                            )
+                    finally:
+                        existing.file.close()
+                outputs["filtered_bulk_gep_file"] = str(output)
+            reference_log = _load_full_comparison_reference_log(
+                filtering_space, filtering_space.genes
+            )
+            outputs["pca_runs"] = _run_sample_count_pca(
+                generated_file,
+                reference_log,
+                filtering_space.genes,
+                dataset_name,
+                filtering_space.result_dir,
+                gene_params,
+                simulated_is_normalized_log=True,
+            )
+        finally:
+            bulk.file.close()
+        return outputs
+
     bulk = ad.read_h5ad(generated_file)
     if bulk.var_names.tolist() != filtering_space.genes:
         raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
@@ -2018,18 +2431,19 @@ def _run_gene_filtering_postprocess(
     config: SimuConfig,
     resolved_params: ResolvedGeneFilteringParams,
     filtering_space: FixedGeneFilter | None = None,
-) -> Dict[str, str | None]:
+) -> Dict[str, Any]:
     if filtering_space is not None:
         return _postprocess_fixed_gene_filter(
             dataset_name, generated_bulk_gep_fp, resolved_params, filtering_space
         )
-    outputs: Dict[str, str | None] = {
+    outputs: Dict[str, Any] = {
         "filtered_bulk_gep_file": None,
         "gene_list_file": None,
         "corr_result_file": None,
         "pca_model_file": None,
         "pca_data_file": None,
         "pca_plot_file": None,
+        "pca_runs": [],
         "full_gene_corr_with_cell_fraction_file": None,
     }
     current_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
@@ -2060,6 +2474,50 @@ def _run_gene_filtering_postprocess(
             return outputs
 
         check_dir(current_result_dir)
+        if resolved_params.n_sample_for_pca is not None:
+            import anndata as ad
+
+            bulk = ad.read_h5ad(generated_bulk_gep_fp, backed="r")
+            try:
+                tcga_exp = ReadExp(
+                    resolved_params.reference_file, exp_type="TPM"
+                ).get_exp()
+                gene_list = [
+                    gene for gene in bulk.var_names if gene in tcga_exp.columns
+                ]
+                if not gene_list:
+                    raise ValueError(
+                        f'No genes are shared between Mixed dataset "{dataset_name}" '
+                        "and the PCA reference."
+                    )
+                gene_list_file_path = current_result_dir / "gene_list_all_genes_for_pca.csv"
+                pd.DataFrame({"gene_name": gene_list}).to_csv(
+                    gene_list_file_path, index=False
+                )
+                reference_linear = normalize_selected(
+                    tcga_exp.loc[:, gene_list], gene_list, "Comparison reference"
+                )
+                reference_log = pd.DataFrame(
+                    np.log2(reference_linear.to_numpy(dtype=np.float32) + 1.0),
+                    index=reference_linear.index,
+                    columns=gene_list,
+                )
+                outputs.update(
+                    gene_list_file=str(gene_list_file_path),
+                    pca_runs=_run_sample_count_pca(
+                        generated_bulk_gep_fp,
+                        reference_log,
+                        gene_list,
+                        dataset_name,
+                        current_result_dir,
+                        resolved_params,
+                        simulated_is_normalized_log=False,
+                    ),
+                )
+            finally:
+                bulk.file.close()
+            return outputs
+
         bulk_exp = ReadH5AD(generated_bulk_gep_fp).get_df()
         tcga_exp = ReadExp(resolved_params.reference_file, exp_type="TPM").get_exp()
         gene_list = [gene for gene in bulk_exp.columns if gene in tcga_exp.columns]
@@ -2251,7 +2709,7 @@ def _build_mixed_dataset_summary(
     generated_cell_fraction_fp: str | Path,
     gep_filtering: ResolvedGEPFilteringParams,
     gene_filtering: ResolvedGeneFilteringParams,
-    postprocess_outputs: Dict[str, str | None],
+    postprocess_outputs: Dict[str, Any],
     gep_filtering_input_n_samples: int | None = None,
     gep_filtering_kept_n_samples: int | None = None,
     gep_filtering_removed_n_samples: int | None = None,
@@ -2335,6 +2793,7 @@ def _build_mixed_dataset_summary(
         "pca_data_file": postprocess_outputs.get("pca_data_file"),
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
         "pca_gene_loadings_PC1_file": postprocess_outputs.get("pca_gene_loadings_PC1_file"),
+        "pca_runs": postprocess_outputs.get("pca_runs", []),
         "gep_filtering_distance_plot_png": postprocess_outputs.get("gep_filtering_distance_plot_png"),
         "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }

@@ -179,6 +179,9 @@ Dataset-level Mixed fields can override them.
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+- `n_sample_for_pca`
+- `pca_sample_seed`
+- `incremental_pca_batch_size`
 
 For GEP-filtered segment sampling, `cell_prop_prior` accepts either a mapping
 from output cell types to `[minimum, maximum]` pairs or the
@@ -224,6 +227,27 @@ correlation sources remain unchanged.
 without gene filtering, the PCA comparison uses all genes shared by the Mixed
 dataset and TCGA. The legacy `gene_filtering_plot_pca` key remains supported;
 the new key takes precedence if both are set.
+
+`n_sample_for_pca` optionally limits each comparison PCA fit to selected
+simulated profiles. It accepts one positive integer or a nonempty list of
+unique positive integers; `null` keeps the existing all-sample PCA behavior.
+Each requested count applies to simulated profiles only, and every figure
+also includes the complete TCGA reference. Each count must not exceed the
+dataset's `n_samples` or its actual generated sample count. For example:
+
+```yaml
+n_sample_for_pca: [10000, 50000, 100000, 200000]
+pca_sample_seed: 42
+incremental_pca_batch_size: 5000
+```
+
+The counts use nested, seeded random subsets. SimuTME fits a separate
+IncrementalPCA model for each count and writes models, coordinates, plots,
+metadata, and PC1 loadings under
+`<mixed_output_dir>/<dataset_name>/pca_by_sample_count/`. The batch size must
+be at least twice the number of PCA components. `pca_sample_seed` defaults
+to `42`. `pca_runs` in `mixed_dataset_summary.json` lists the artifacts for
+each requested count.
 
 `calculate_gene_cell_prop_correlation` writes the complete, unfiltered
 gene-by-cell-type correlation table for a Mixed dataset. A target can name an
@@ -320,7 +344,6 @@ Each entry under `datasets:` defines one simulation task.
 - `dataset_type`
 - `n_samples`
 - `filtering`
-- `filtering_ref_types`
 - `cell_prop_prior`
 - `enlarge_cell_prop_prior`
 - `zero_ratio_threshold`
@@ -355,6 +378,7 @@ For SCT datasets:
 - `sct_reference`
 - `sampling_method_prop`
 - `gep_filtering`
+- `filtering_ref_types`
 - `gene_filtering`
 - `filtering_in_pca_space`
 - `gep_filtering_method`
@@ -377,6 +401,9 @@ For SCT datasets:
 - `plot_pca_for_comparison`
 - `gene_filtering_pca_n_components`
 - `gene_filtering_pca_figsize`
+- `n_sample_for_pca`
+- `pca_sample_seed`
+- `incremental_pca_batch_size`
 - `dirichlet_alpha` (only when `sampling_method_prop: "dirichlet"`)
 - `pred_cell_prop_file_path` as an optional dataset-level override of
   `paths.pred_cell_prop_file_path`
@@ -387,6 +414,16 @@ For Mixed datasets:
 - `sampling_method_gep` is ignored if provided; Mixed generation always uses `random`
   when drawing SCT profiles from the referenced SCT dataset
 - `gep_filtering` controls GEP-level filtering during Mixed generation
+- `filtering_ref_types` accepts a list of exact labels from the `cancer_type`
+  column in `paths.tcga2cancer_type_file_path`; a single string is also
+  accepted. `null` leaves the reference unrestricted, while `["all"]` selects
+  all nonmissing labels and only samples present in the mapping file. For the
+  provided TCGA files, these settings select the same samples because every
+  expression sample is mapped. They differ only when the expression reference
+  contains samples absent from the mapping. A selection with no matching
+  reference samples fails. See the
+  [Mixed workflow guide](workflow_mixed.md#selecting-tcga-reference-cancer-types)
+  for examples.
 - `gene_filtering` selects the fixed gene list before generation
 - `parameters.mixed_sct_loading_mode` controls whether the upstream SCT
   reference is loaded eagerly in memory, lazily in backed mode, or selected

@@ -109,6 +109,9 @@ parameters:
   plot_pca_for_comparison: true  # Optional Mixed-versus-TCGA PCA plotting switch; works with or without gene filtering
   gene_filtering_pca_n_components: 2  # Optional PCA component count for comparison plots; must be >= 2 when plotting is enabled
   gene_filtering_pca_figsize: [5, 5]  # Optional figure size for comparison plots
+  n_sample_for_pca: null  # Optional simulated sample count(s) for comparison PCA; null uses all samples
+  pca_sample_seed: 42  # Optional seed for reproducible, nested PCA sample subsets
+  incremental_pca_batch_size: 5000  # Optional IncrementalPCA batch size for sample-count comparisons
   n_base: 30
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
@@ -163,6 +166,7 @@ datasets:
     gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
+    n_sample_for_pca: [10, 50, 100]  # Example: save separate PCA comparisons at each simulated sample count
     cell_prop_prior: null  # Optional mapping of cell type to [min, max], or "DeSide_predicted_TCGA_range"; overrides prediction-file caps
     enlarge_cell_prop_prior: null  # Optional nonnegative additive expansion of each configured range; clip to [0, 1]
     gep_filtering_method: "mgep"  # Linear selected-gene TPM median with upper and optional lower L1 quantile cutoffs
