@@ -1,4 +1,4 @@
-"""Benchmark the serial and parallel mGEP candidate paths in temporary storage."""
+"""Benchmark serial and parallel filtered candidate paths in temporary storage."""
 
 import argparse
 import hashlib
@@ -57,8 +57,11 @@ def _workload(args, directory):
         config = SimuConfig.from_yaml(args.config)
         params = config._dataset_definitions[args.dataset]
         gep = _resolve_gep_filtering_params(args.dataset, params, config)
-        if gep.filtering_method != "mgep" or not gep.enabled:
-            raise ValueError("Benchmark target must enable mgep filtering.")
+        if not gep.enabled or gep.filtering_method not in ("mgep", "median_gep"):
+            raise ValueError("Benchmark target must enable mgep or median_gep filtering.")
+        if gep.filtering_method == "median_gep" and (
+                not gep.filtering_in_pca_space or gep.norm_ord != 1):
+            raise ValueError("Parallel median_gep benchmarking requires PCA-space L1 filtering.")
         if params.get("sampling_method_prop", "segment") != "segment":
             raise ValueError("Benchmark target must use segment sampling.")
         reference = ReadExp(gep.reference_file, exp_type=gep.ref_exp_type).exp
@@ -120,6 +123,7 @@ def _workload(args, directory):
         space.range_bounds = space.reference_linear.quantile([lower, upper])
     space.reference_linear = None
     space.reference_log = None
+    space.reference_coordinates = None
     attributes = {key: getattr(generator, key) for key in (
         "cell_fraction_type2subtype", "cell_type2subtype", "cell_subtype_used",
         "subtype_col_name", "cell_type_col_name", "total_rna_coefficient",
@@ -209,12 +213,15 @@ def main():
                     for path in sorted(run_dir.glob("*.csv")):
                         digest.update(path.read_bytes())
                     signatures.append(digest.hexdigest())
-                    repeats.append({"seconds": elapsed, "candidates": args.batches * args.batch_size,
-                                    "accepted": accepted, "fraction_proposals": proposals,
-                                    "mgep_acceptance_rate": accepted / (args.batches * args.batch_size),
-                                    "fraction_acceptance_rate": (
-                                        args.batches * args.batch_size / proposals
-                                    )})
+                    run = {"seconds": elapsed, "candidates": args.batches * args.batch_size,
+                           "accepted": accepted, "fraction_proposals": proposals,
+                           "filter_acceptance_rate": accepted / (args.batches * args.batch_size),
+                           "fraction_acceptance_rate": (
+                               args.batches * args.batch_size / proposals
+                           )}
+                    if space.gep.filtering_method == "mgep":
+                        run["mgep_acceptance_rate"] = run["filter_acceptance_rate"]
+                    repeats.append(run)
             finally:
                 if pool:
                     pool.shutdown(wait=True, cancel_futures=True)
@@ -239,11 +246,13 @@ def main():
             "platform": platform.platform(), "python": sys.version,
             "numpy": np.__version__, "pandas": pd.__version__,
             "logical_cpus": os.cpu_count(), "sct": args.sct or "synthetic",
+            "filtering_method": space.gep.filtering_method,
             "selected_genes": len(space.genes), "source_shape": generator.sct_dataset_df.shape,
             "batch_size": args.batch_size, "seed": args.seed, "setup_seconds": setup_seconds,
             "thread_limits": {key: os.environ[key] for key in thread_vars},
-            "notes": "Timings include candidate generation and CSV writes; exclude checkpoints, "
-                     "final H5AD, PCA, and plots. RSS sums processes and double-counts shared pages; "
+            "notes": "Candidate timings include generation and CSV writes; exclude checkpoints, "
+                     "final H5AD, PCA setup, and plots. PCA setup is included in setup_seconds. "
+                     "RSS sums processes and double-counts shared pages; "
                      "null means psutil is unavailable. Synthetic results are not server estimates.",
             "results": results,
         }, indent=2))

@@ -4,6 +4,15 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## November 7, 2026
+
+### Parallel PCA-space median-GEP filtering
+
+Mixed segment datasets can use parallel candidate workers with `median_gep`
+filtering in PCA space and L1 distance. Workers reuse the reference PCA and
+preserve the configured distance quantiles, filter counters, and checkpoint
+recovery. The benchmark also accepts this filtering mode.
+
 ## November 1, 2026
 
 ### Parallel Mixed candidate generation

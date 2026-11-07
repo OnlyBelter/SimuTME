@@ -118,10 +118,19 @@ class GEPGenerationConfig:
             if self.mixed_candidate_seed is None:
                 raise ValueError('"mixed_candidate_seed" is required for parallel candidates.')
             if (self.simu_method != "mul" or self.sampling_method_prop != "segment"
-                    or not self.filtering or self.filtering_method != "mgep"
+                    or not self.filtering or self.filtering_method not in ("mgep", "median_gep")
                     or self.filtering_space is None):
                 raise ValueError(
-                    "Parallel candidates require Mixed segment sampling with mgep filtering."
+                    "Parallel candidates require Mixed segment sampling with mgep or "
+                    "PCA-space L1 median_gep filtering."
+                )
+            if self.filtering_method == "median_gep" and (
+                    not self.filtering_in_pca_space or self.norm_ord != 1
+                    or not self.filtering_space.gep.filtering_in_pca_space
+                    or self.filtering_space.gep.norm_ord != 1
+                    or self.filtering_space.gep.filtering_method != "median_gep"):
+                raise ValueError(
+                    "Parallel median_gep requires matching PCA-space L1 filter settings."
                 )
         if self.dirichlet_sampling_seed is not None and (
             isinstance(self.dirichlet_sampling_seed, bool)
@@ -866,12 +875,18 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 '"mixed_sct_loading_mode: eager" or increase the auto threshold.'
             )
         self.filtering_space.prepare_distance_reference()
+        if self.filtering_space.pca is not None:
+            self.gep_filtering_pca_target = self.filtering_space.pca.n_components
+            self.gep_filtering_n_pcs = int(self.filtering_space.pca.n_components_)
+            self._save_filtering_metadata()
+            self._save_parallel_checkpoint()
         if self.filtering_space.gep.filtering_by_gene_range:
             lower, _, upper = self.filtering_space.gep.gene_quantile_range
             self.filtering_space.range_bounds = self.filtering_space.reference_linear.quantile([lower, upper])
         worker_filter = copy.copy(self.filtering_space)
         worker_filter.reference_linear = None
         worker_filter.reference_log = None
+        worker_filter.reference_coordinates = None
         run_parallel_candidates(self, config, obs_df, worker_filter)
 
     def _load_sc_data_for_generation(

@@ -338,15 +338,21 @@ Gene filtering or PCA visualization alone does not enable all-cell-type plots.
 ## Parallel candidate generation
 
 The optional CPU engine processes independent Mixed candidate batches in
-parallel. It supports segment sampling with `mgep` GEP filtering and an eager
-SCT reference. The default `mixed_candidate_workers: 0` retains the existing
-serial workflow, including its loading mode. To enable parallel generation
-for one dataset, add a worker count and seed to that dataset:
+parallel. It supports segment sampling with `mgep` or PCA-space L1
+`median_gep` GEP filtering and an eager SCT reference. The default
+`mixed_candidate_workers: 0` retains the existing serial workflow, including
+its loading mode. To enable parallel generation for one dataset, add a worker
+count and seed to that dataset:
 
 ```yaml
 mixed_candidate_workers: 8
 mixed_candidate_seed: 42
 ```
+
+For `median_gep`, also set `gep_filtering_in_pca_space: true` and
+`gep_norm_ord: 1`. The coordinator fits or loads the reference PCA once, and
+the workers apply that PCA and the configured reference-distance quantiles.
+Each spawned worker holds its own PCA state.
 
 Start with a fresh dataset name and output location. Set
 `mixed_sct_loading_mode: "eager"` globally, or set the auto eager threshold
@@ -364,8 +370,9 @@ python /path/to/SimuTME/scripts/benchmark_parallel_candidates.py --config /path/
 ```
 
 The benchmark uses temporary files and prints JSON with setup time,
-throughput, acceptance, speedup, and process-tree RSS. It includes CSV writes
-but excludes checkpoint writes, final H5AD creation, PCA, and plotting. The
+throughput, acceptance, speedup, and process-tree RSS. Candidate timings include
+CSV writes but exclude checkpoint writes, final H5AD creation, PCA setup, and
+plotting. PCA setup is included in the separate setup time. The
 optional `psutil` package is required for process-tree RSS; summed RSS counts
 shared pages more than once. `--workers 0` measures the serial candidate
 stages with the same batch seeds, and positive counts measure the parallel

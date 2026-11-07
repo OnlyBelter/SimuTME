@@ -1194,11 +1194,28 @@ def _resolve_parallel_candidate_settings(dataset_name, params, config):
         method = _resolve_dataset_override(
             params, config, "gep_filtering_method", getattr(config, "gep_filtering_method", "median_gep")
         )
-        if params.get("sampling_method_prop", "segment") != "segment" or not enabled or method != "mgep":
+        if (params.get("sampling_method_prop", "segment") != "segment"
+                or not enabled or method not in ("mgep", "median_gep")):
             raise ValueError(
-                f'Mixed dataset "{dataset_name}" requires segment sampling and mgep GEP filtering '
-                "for parallel candidates."
+                f'Mixed dataset "{dataset_name}" requires segment sampling and mgep or '
+                "PCA-space L1 median_gep filtering for parallel candidates."
             )
+        if method == "median_gep":
+            in_pca = _resolve_dataset_override(
+                params, config, "gep_filtering_in_pca_space",
+                getattr(config, "gep_filtering_in_pca_space", True),
+            )
+            if "gep_filtering_in_pca_space" not in params:
+                in_pca = params.get("filtering_in_pca_space", in_pca)
+            norm = _resolve_dataset_override(
+                params, config, "gep_norm_ord", getattr(config, "gep_norm_ord", 1),
+            )
+            if not in_pca or norm != 1:
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" requires PCA-space L1 median_gep '
+                    'filtering for parallel candidates: set "gep_filtering_in_pca_space: true" '
+                    'and "gep_norm_ord: 1".'
+                )
         if getattr(config, "mixed_sct_loading_mode", "auto") == "lazy":
             raise ValueError("Parallel candidates require an eager SCT reference, not lazy loading.")
     return int(workers), None if seed is None else int(seed)

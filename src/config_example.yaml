@@ -131,7 +131,7 @@ parameters:
   stratify_by_dataset: "none"   # Optional: "none" (default) or "balanced_quota". "balanced_quota" downsamples each (cell_type, dataset_id) group to the size of the smallest dataset still containing that cell type, preventing large datasets from dominating the candidate pool. Can also be overridden per-SCT dataset below.
   mixed_sct_loading_mode: "auto"  # Optional Mixed-only SCT loading mode: "auto" prefers eager loading for smaller SCT references and lazy backed loading for larger ones; use "eager" for maximum speed when RAM is sufficient, or "lazy" to minimize memory usage.
   mixed_sct_auto_eager_max_gb: 4.0  # Optional threshold used only when mixed_sct_loading_mode is "auto"; eager loading is selected when the estimated dense float32 SCT matrix size is <= this value in GiB.
-  mixed_candidate_workers: 0  # 0 keeps the current serial engine; positive values enable parallel mGEP segment batches
+  mixed_candidate_workers: 0  # 0 keeps serial generation; positive values enable segment batches with mgep or PCA-space L1 median_gep
   mixed_candidate_seed: null  # Required nonnegative seed when parallel candidate workers are enabled
 
 # --- Datasets to Generate ---

@@ -125,11 +125,12 @@ override the global `parameters` values with fields of the same names.
 - `mixed_candidate_seed` defaults to `null`. A nonnegative integer is
   required when the parallel engine is enabled.
 
-Parallel generation supports segment sampling with `mgep` GEP filtering and an
-eager SCT reference. Set `mixed_sct_loading_mode: "eager"`, or ensure `auto`
-resolves to eager loading. Other combinations fail before generation. A
-dataset-level override can enable the engine for one target while the global
-default remains serial.
+Parallel generation supports segment sampling with either `mgep` or
+PCA-space L1 `median_gep` GEP filtering and an eager SCT reference. For
+`median_gep`, set `gep_filtering_in_pca_space: true` and `gep_norm_ord: 1`.
+Set `mixed_sct_loading_mode: "eager"`, or ensure `auto` resolves to eager
+loading. Other combinations fail before generation. A dataset-level override
+can enable the engine for one target while the global default remains serial.
 
 The parallel engine uses deterministic batch seeds. For unchanged inputs,
 seed, and batch size, its output is independent of worker count, but does not
@@ -143,7 +144,8 @@ stale `.parallel.lock` file.
 
 Workers share a temporary memory-mapped copy of the eager SCT matrix. Set
 `TMPDIR` to a filesystem with enough free space for this copy, in addition to
-the RAM needed by the parent and per-worker candidate batches.
+the RAM needed by the parent and per-worker candidate batches. PCA-space
+`median_gep` also keeps a copy of the fitted PCA state in each worker.
 
 ### Mixed filtering parameters
 

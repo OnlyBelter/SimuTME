@@ -45,6 +45,7 @@ def _run_batch(batch_id):
     np.random.seed(seed)
     space = generator.filtering_space
     space.range_input = space.range_kept = 0
+    space.distance_input = space.distance_kept = 0
     space.mgep_distance_input = space.mgep_distance_kept = 0
     started = perf_counter()
     fractions = generate_cell_fraction(
@@ -168,6 +169,8 @@ def run_parallel_candidates(generator, config, obs, space):
                     attribute = {
                         "gene_range_input_n_samples": "range_input",
                         "gene_range_kept_n_samples": "range_kept",
+                        "pc_distance_input_n_samples": "distance_input",
+                        "pc_distance_kept_n_samples": "distance_kept",
                         "mgep_distance_input_n_samples": "mgep_distance_input",
                         "mgep_distance_kept_n_samples": "mgep_distance_kept",
                     }.get(name)
