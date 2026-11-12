@@ -18,6 +18,8 @@ from .nneighbors_shared_memory import CompactNeighborData, NeighborData
 from .all_cell_neighbors import AllCellNeighborSampler, validate_cell_cap
 from .simu_helper import (
     validate_generation_params_sct,
+    normalize_n_base_values,
+    draw_n_base_assignments,
     SimuMethod,
     SamplingMethodGEP,
     SampleType,
@@ -78,7 +80,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
     def generate_samples(self,
                          n_sample_each_cell_type: int = 10000,
-                         n_base_for_positive_samples: int = 100,
+                         n_base_for_positive_samples: int | List[int] = 100,
+                         n_base_seed: int = 42,
                          sample_type: str = 'positive',
                          sep_by_patient: bool = False,
                          simu_method: str = 'ave',
@@ -93,7 +96,8 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         Generate simulated samples (Positive: pure cell types; Negative: mixtures).
 
         :param n_sample_each_cell_type: Number of samples per cell type.
-        :param n_base_for_positive_samples: Number of single cells to average for 'positive' samples.
+        :param n_base_for_positive_samples: Fixed count or per-profile count values.
+        :param n_base_seed: Seed for independent per-profile count draws.
         :param sample_type: 'positive' (1 cell type) or 'negative' (mixed types).
         :param sep_by_patient: If True, sample from a single patient's cells.
         :param simu_method: 'ave' (average) or other simulation methods.
@@ -104,9 +108,30 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
         :param sampling_method: 'random' or 'n_neighbors' for cell selection.
             n_neighbors considers cell similarity to find (n_base - 1) nearest neighbors around 1 randomly selected cell within the same cell type.
         """
+        n_base_values = None
+        if isinstance(n_base_for_positive_samples, (list, tuple)):
+            if sample_type != SampleType.POSITIVE:
+                raise ValueError("n_base_values are only supported for positive SCT samples.")
+            n_base_values = normalize_n_base_values(n_base_for_positive_samples)
+            if min(n_base_values) < minimum_n_base:
+                raise ValueError(
+                    "Every n_base_values entry must be >= minimum_n_base "
+                    f"({minimum_n_base})."
+                )
+            max_n_base = max(n_base_values)
+            if (
+                isinstance(n_base_seed, (bool, np.bool_))
+                or not isinstance(n_base_seed, (int, np.integer))
+                or n_base_seed < 0
+            ):
+                raise ValueError('"n_base_seed" must be a nonnegative integer.')
+            n_base_seed = int(n_base_seed)
+        else:
+            max_n_base = n_base_for_positive_samples
+
         validate_generation_params_sct(
             n_sample_each_cell_type=n_sample_each_cell_type,
-            n_base_for_positive_samples=n_base_for_positive_samples,
+            n_base_for_positive_samples=max_n_base,
             sample_type=sample_type,
             simu_method=simu_method,
             sampling_method=sampling_method,
@@ -121,12 +146,17 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             return
         mode_path = Path(str(self.generated_bulk_gep_csv_fp) + ".sampling.json")
         mode = {"max_cells_per_cell_type": max_cells_per_cell_type}
+        if n_base_values is not None:
+            mode.update(
+                n_base_values=list(n_base_values),
+                n_base_seed=n_base_seed,
+            )
         if mode_path.exists():
             if json.loads(mode_path.read_text()) != mode:
                 raise ValueError("SCT sampling mode changed; use a new SCT dataset name.")
         elif max_cells_per_cell_type == "all" and self.generated_bulk_gep_csv_fp.exists():
             raise ValueError("Unmarked partial SCT output cannot resume in all-cell mode; use a new name.")
-        if max_cells_per_cell_type == "all" or mode_path.exists():
+        if max_cells_per_cell_type == "all" or mode_path.exists() or n_base_values is not None:
             mode_path.write_text(json.dumps(mode))
         self.all_cell_sampler = None
         if sampling_method == "n_neighbors" and max_cells_per_cell_type == "all":
@@ -145,6 +175,69 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
 
         # 2. Prepare Fractions (Manager Step)
         self._prepare_fractions(sample_type, n_sample_each_cell_type)
+        n_base_assignment = None
+        if n_base_values is not None:
+            fractions = pd.read_csv(self.generated_cell_fraction_fp, index_col=0)
+            sample_ids = fractions.index.astype(str).tolist()
+            n_base_assignment = draw_n_base_assignments(
+                sample_ids=sample_ids,
+                n_base_values=n_base_values,
+                seed=n_base_seed,
+            )
+            assignment_path = self.generated_bulk_gep_csv_fp.with_name(
+                f"{self.generated_bulk_gep_csv_fp.stem}_n_base_assignment.csv"
+            )
+            if assignment_path.exists():
+                saved_assignment = pd.read_csv(assignment_path, index_col=0)
+                saved_assignment.index = saved_assignment.index.astype(str)
+                if (
+                    saved_assignment.columns.tolist() != ["n_base"]
+                    or not saved_assignment.index.equals(n_base_assignment.index)
+                    or not np.array_equal(
+                        saved_assignment["n_base"].to_numpy(dtype=np.int64),
+                        n_base_assignment.to_numpy(),
+                    )
+                ):
+                    raise ValueError(
+                        "Saved SCT n_base assignments do not match the configured "
+                        "sample IDs, values, and seed. Use a new SCT dataset name."
+                    )
+            else:
+                n_base_assignment.to_frame().to_csv(assignment_path, index_label="sample_id")
+
+            cell_types = fractions.idxmax(axis=1).astype(str)
+            counts_by_cell_type = {}
+            for cell_type in sorted(cell_types.unique()):
+                counts = n_base_assignment.loc[cell_types == cell_type].value_counts().sort_index()
+                counts_by_cell_type[cell_type] = {
+                    str(value): int(count) for value, count in counts.items()
+                }
+            assignment_metadata = {
+                "distribution": "uniform_independent",
+                "n_base_values": list(n_base_values),
+                "n_base_seed": n_base_seed,
+                "sample_count": len(n_base_assignment),
+                "counts_by_cell_type": counts_by_cell_type,
+            }
+            metadata_path = assignment_path.with_suffix(".json")
+            if metadata_path.exists():
+                saved_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if saved_metadata != assignment_metadata:
+                    raise ValueError(
+                        "Saved SCT n_base assignment metadata differs from the "
+                        "configured values or seed. Use a new SCT dataset name."
+                    )
+            else:
+                metadata_path.write_text(
+                    json.dumps(assignment_metadata, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            logger.info(
+                "Assigned per-profile n_base values %s with seed %d: %s",
+                list(n_base_values),
+                n_base_seed,
+                counts_by_cell_type,
+            )
 
         # 3. Prepare Gene Expression Data (Manager Step)
         self._prepare_gene_expression(ref_gene_list_file_path)
@@ -157,7 +250,7 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             )
             self._get_cell_distance_dict(
                 max_cells_per_cell_type=max_cells_per_cell_type,
-                n_neighbors=n_base_for_positive_samples,
+                n_neighbors=max_n_base,
                 use_compact_neighbors=use_compact_neighbors,
             )
 
@@ -187,12 +280,16 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                     self._process_chunk(
                         rows=chunk_rows,
                         sample_type=sample_type,
-                        n_base=n_base_for_positive_samples,
+                        n_base=max_n_base,
                         min_n_base=minimum_n_base,
                         sep_by_patient=sep_by_patient,
                         simu_method=simu_method,
                         sampling_method_gep=sampling_method,
                         neighbor_sampling_scheme=neighbor_sampling_scheme,
+                        n_base_by_sample=(
+                            n_base_assignment.reindex(chunk_rows.index)
+                            if n_base_assignment is not None else None
+                        ),
                     )
                     processed_samples += chunk_rows.shape[0]
                     pbar.set_postfix({'processed': processed_samples, 'total': self.n_samples})
@@ -301,10 +398,17 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
             simu_method: str = 'ave',
             sampling_method_gep: str = 'random',
             neighbor_sampling_scheme: str = NeighborSamplingScheme.SINGLE_ANCHOR,
+            n_base_by_sample: Optional[pd.Series] = None,
     ) -> None:
         """Process a single chunk of samples: select cells -> aggregate -> save."""
         # Determine total cells to aggregate
-        total_cell_number = n_base if (sample_type == SampleType.POSITIVE and n_base > 1) else 0
+        if n_base_by_sample is not None:
+            total_cell_number = n_base_by_sample.reindex(rows.index)
+            if total_cell_number.isna().any():
+                raise ValueError("Missing n_base assignment for an SCT sample in this chunk.")
+            total_cell_number = total_cell_number.astype(int)
+        else:
+            total_cell_number = n_base if (sample_type == SampleType.POSITIVE and n_base > 1) else 0
 
         # Load base data
         current_obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(simu_method)
@@ -335,6 +439,17 @@ class SingleCellTypeGEPGenerator(BulkGEPGenerator):
                 cell_distance_dict=self.cell_distance_dict,
                 sampling_method_gep=sampling_method_gep,
                 neighbor_sampling_scheme=neighbor_sampling_scheme,
+            )
+        if n_base_by_sample is not None:
+            selected_cell_ids["n_base_requested"] = selected_cell_ids.index.map(
+                n_base_by_sample
+            ).astype(int)
+            selected_cell_ids["n_cell_actual"] = selected_cell_ids[
+                "selected_cell_id"
+            ].map(
+                lambda cell_ids: len(
+                    [cell_id for cell_id in str(cell_ids).split(";") if cell_id]
+                )
             )
         sampled = perf_counter()
 

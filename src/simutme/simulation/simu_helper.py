@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from .nneighbors_shared_memory import NeighborData, parallel_sample_with_nearest_neighbors
 
 
@@ -28,6 +28,44 @@ class SamplingMethodGEP:
 class NeighborSamplingScheme:
     SINGLE_ANCHOR = 'single_anchor'
     TWO_HALF_ANCHOR = 'two_half_anchor'
+
+
+def normalize_n_base_values(values: Any, context: str = "n_base_values") -> Tuple[int, ...]:
+    """Validate and normalize a nonempty list of distinct positive integers."""
+    if not isinstance(values, (list, tuple)) or not values:
+        raise ValueError(f'"{context}" must be a nonempty list of positive integers.')
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or value <= 0
+        for value in values
+    ):
+        raise ValueError(f'"{context}" must contain only positive integers.')
+    normalized = tuple(int(value) for value in values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f'"{context}" must not contain duplicate values.')
+    return normalized
+
+
+def draw_n_base_assignments(
+    sample_ids: List[str],
+    n_base_values: Any,
+    seed: int,
+) -> pd.Series:
+    """Draw a reproducible, uniform `n_base` value for each SCT sample ID."""
+    values = normalize_n_base_values(n_base_values)
+    if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)) or seed < 0:
+        raise ValueError('"n_base_seed" must be a nonnegative integer.')
+
+    sample_index = pd.Index(sample_ids, name="sample_id")
+    if not sample_index.is_unique or sample_index.hasnans:
+        raise ValueError("SCT sample IDs must be unique and nonmissing for n_base assignment.")
+    if not len(sample_index):
+        raise ValueError("At least one SCT sample ID is required for n_base assignment.")
+
+    rng = np.random.default_rng(int(seed))
+    assigned = rng.choice(np.asarray(values, dtype=np.int64), size=len(sample_index))
+    return pd.Series(assigned, index=sample_index, name="n_base", dtype=np.int64)
 
 
 def should_use_neighbor_sampling(

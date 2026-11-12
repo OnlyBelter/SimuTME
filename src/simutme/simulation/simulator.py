@@ -1195,7 +1195,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             cell_frac: pd.DataFrame,
             obs_df: pd.DataFrame,
             n_threads: int = 10,
-            total_cell_number: Optional[int] = None,
+            total_cell_number: Optional[int | pd.Series] = None,
             sep_by_patient: bool = False,
             sc_dataset: Optional[str] = None,
             minimum_n_base: int = 1,
@@ -1263,7 +1263,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         simulated_exp = {}
 
         if gep_type == 'SCT':
-            selected_cell_id = selected_cell_id.loc[selected_cell_id['n_cell'] > 1, :].copy()
+            min_n_cell = 0 if "n_base_requested" in selected_cell_id else 1
+            selected_cell_id = selected_cell_id.loc[
+                selected_cell_id['n_cell'] > min_n_cell, :
+            ].copy()
             # n_non_zero = 1000
             n_genes = sc_ds_df.shape[1]
             for cell_type, group in selected_cell_id.groupby('cell_type'):

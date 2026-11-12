@@ -10,6 +10,7 @@ from simutme.workflow import (
     _resolve_mixed_sct_dataset_path,
     _resolve_mixed_sct_loading_mode,
     _resolve_effective_sct_n_base,
+    _n_base_output_tag,
     _resolve_output_dir_naming_metadata,
     _resolve_sct_aux_output_dir,
     run_bulk_simulation,
@@ -131,6 +132,7 @@ def test_simu_config_from_yaml_defaults_shared_filtering_params(tmp_path: Path):
     assert config.gene_quantile_range == [0.005, 0.5, 0.995]
     assert config.pca_n_components == 0.9
     assert config.mixed_sct_auto_eager_max_gb == 6.5
+    assert config.n_base_seed == 42
 
 
 @pytest.mark.parametrize(
@@ -413,6 +415,84 @@ def test_sct_n_base_resolver_uses_global_fallback_and_dataset_override():
     assert _resolve_effective_sct_n_base("SCT_Override", {"n_base": 50}, config) == 50
 
 
+def test_sct_n_base_resolver_supports_per_profile_values_and_seed():
+    config = SimpleNamespace(n_base=30, n_base_seed=42)
+
+    policy = _resolve_effective_sct_n_base(
+        "SCT_Randomized",
+        {"n_base_values": [30, 40, 50], "n_base_seed": 17},
+        config,
+    )
+
+    assert policy.values == (30, 40, 50)
+    assert policy.seed == 17
+    assert _n_base_output_tag(policy) == "n_base_values_30_40_50_seed17"
+    assert _n_base_output_tag(30) == "n_base30"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[], [0, 30], [-1, 30], [30, 30], [30, 40.5], [True, 30], "30,40"],
+)
+def test_sct_n_base_resolver_rejects_invalid_value_lists(values):
+    config = SimpleNamespace(n_base=30, n_base_seed=42)
+
+    with pytest.raises(ValueError, match="n_base_values"):
+        _resolve_effective_sct_n_base(
+            "SCT_Invalid",
+            {"n_base_values": values},
+            config,
+        )
+
+
+def test_sct_n_base_resolver_rejects_conflicts_and_orphan_seed():
+    config = SimpleNamespace(n_base=30, n_base_seed=42)
+
+    with pytest.raises(ValueError, match="only one of"):
+        _resolve_effective_sct_n_base(
+            "SCT_Conflict",
+            {"n_base": 30, "n_base_values": [30, 50]},
+            config,
+        )
+    with pytest.raises(ValueError, match='requires "n_base_values"'):
+        _resolve_effective_sct_n_base(
+            "SCT_OrphanSeed",
+            {"n_base_seed": 7},
+            config,
+        )
+
+
+def test_mixed_output_name_inherits_sct_n_base_distribution_and_seed():
+    config = SimpleNamespace(
+        n_base=30,
+        sc_dataset_ids=["ds1", "ds2"],
+        n_base_seed=42,
+        _dataset_definitions={
+            "SCT_A": {
+                "dataset_type": "SCT",
+                "n_base_values": [30, 50, 100],
+                "n_base_seed": 9,
+            },
+        },
+    )
+
+    n_datasets, policy = _resolve_output_dir_naming_metadata(
+        params={
+            "dataset_type": "Mixed",
+            "sct_reference": {
+                "source_type": "generated_dataset",
+                "dataset_name": "SCT_A",
+            },
+        },
+        config=config,
+        dataset_type="mixed",
+    )
+
+    assert n_datasets == 2
+    assert policy.values == (30, 50, 100)
+    assert _n_base_output_tag(policy) == "n_base_values_30_50_100_seed9"
+
+
 @pytest.mark.parametrize("value", [0, -1, "not-a-number", None])
 def test_sct_n_base_resolver_rejects_invalid_overrides(value):
     config = SimpleNamespace(n_base=30)
@@ -453,6 +533,21 @@ def test_run_bulk_simulation_rejects_n_base_for_mixed():
         run_bulk_simulation(
             dataset_name="Mixed_Test",
             params={"dataset_type": "Mixed", "n_base": 50},
+            config=config,
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("n_base_values", [30, 50]), ("n_base_seed", 42)],
+)
+def test_run_bulk_simulation_rejects_random_n_base_settings_for_mixed(key, value):
+    config = SimpleNamespace(n_base=30)
+
+    with pytest.raises(ValueError, match=f'"{key}" is only supported for SCT datasets'):
+        run_bulk_simulation(
+            dataset_name="Mixed_Test",
+            params={"dataset_type": "Mixed", key: value},
             config=config,
         )
 

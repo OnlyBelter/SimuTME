@@ -28,6 +28,7 @@ from .simulation.sampling import (
 )
 from .sct_imputation import run_sorted_bulk_guided_sct_imputation
 from .simulation.sample_diversity import run_sct_sample_diversity_analysis
+from .simulation.simu_helper import normalize_n_base_values
 from .simulation.filtering import (
     FixedGeneFilter, NORMALIZATION_VERSION, identity_hash,
     normalize_selected, select_fixed_genes, reference_variance_mask, validate_metadata,
@@ -223,12 +224,45 @@ def _resolve_effective_sct_dataset_ids_for_naming(
     return list(params.get("sc_dataset_ids", config.sc_dataset_ids))
 
 
+@dataclass(frozen=True)
+class ResolvedNBaseValues:
+    values: Tuple[int, ...]
+    seed: int
+
+
 def _resolve_effective_sct_n_base(
     dataset_name: str,
     params: Dict[str, Any],
     config: "SimuConfig",
-) -> int:
-    """Resolve and validate the effective positive-sample base size."""
+) -> int | ResolvedNBaseValues:
+    """Resolve a fixed SCT base size or a per-profile value distribution."""
+    if "n_base_values" in params:
+        if "n_base" in params:
+            raise ValueError(
+                f'SCT dataset "{dataset_name}" must define only one of '
+                '"n_base" and "n_base_values".'
+            )
+        values = normalize_n_base_values(
+            params["n_base_values"],
+            f'n_base_values for SCT dataset "{dataset_name}"',
+        )
+        seed = params.get("n_base_seed", config.n_base_seed)
+        if (
+            isinstance(seed, (bool, np.bool_))
+            or not isinstance(seed, (int, np.integer))
+            or seed < 0
+        ):
+            raise ValueError(
+                f'Invalid "n_base_seed" for SCT dataset "{dataset_name}": '
+                f"{seed!r}. Expected a nonnegative integer."
+            )
+        return ResolvedNBaseValues(values=values, seed=int(seed))
+
+    if "n_base_seed" in params:
+        raise ValueError(
+            f'"n_base_seed" for SCT dataset "{dataset_name}" requires "n_base_values".'
+        )
+
     value = params.get("n_base", config.n_base)
     try:
         if isinstance(value, bool):
@@ -249,12 +283,19 @@ def _resolve_effective_sct_n_base(
     return resolved_n_base
 
 
+def _n_base_output_tag(n_base: int | ResolvedNBaseValues) -> str:
+    if isinstance(n_base, ResolvedNBaseValues):
+        values = "_".join(str(value) for value in n_base.values)
+        return f"n_base_values_{values}_seed{n_base.seed}"
+    return f"n_base{n_base}"
+
+
 def _resolve_output_dir_naming_metadata(
     params: Dict[str, Any],
     config: "SimuConfig",
     dataset_type: str,
     dataset_name: str = "<dataset>",
-) -> tuple[int, int]:
+) -> tuple[int, int | ResolvedNBaseValues]:
     """Return `(n_datasets, n_base)` for output directory naming."""
     if dataset_type == "sct":
         n_base = _resolve_effective_sct_n_base(dataset_name, params, config)
@@ -342,6 +383,7 @@ class SimuConfig:
 
     # Filtering parameters
     gep_filtering_quantile: Tuple[float, float]
+    n_base_seed: int = 42
     gene_quantile_range: List[float] = field(default_factory=lambda: [0.005, 0.5, 0.995])
     pca_n_components: float = 0.9
     gene_list_type: str = "high_corr_gene"
@@ -443,6 +485,13 @@ class SimuConfig:
         return config
 
     def __post_init__(self):
+        if (
+            isinstance(self.n_base_seed, bool)
+            or not isinstance(self.n_base_seed, int)
+            or self.n_base_seed < 0
+        ):
+            raise ValueError('"parameters.n_base_seed" must be a nonnegative integer.')
+
         required_path_fields = (
             "simu_bulk_dir",
             "tcga2cancer_type_file_path",
@@ -1251,6 +1300,16 @@ def run_bulk_simulation(dataset_name: str,
                 f'"n_base" is only supported for SCT datasets; '
                 f'Mixed dataset "{dataset_name}" must not define it.'
             )
+        if 'n_base_values' in params:
+            raise ValueError(
+                f'"n_base_values" is only supported for SCT datasets; '
+                f'Mixed dataset "{dataset_name}" must not define it.'
+            )
+        if 'n_base_seed' in params:
+            raise ValueError(
+                f'"n_base_seed" is only supported for SCT datasets; '
+                f'Mixed dataset "{dataset_name}" must not define it.'
+            )
         if 'cancer_cell_dataset_ids' in params or 'non_cancer_cell_dataset_ids' in params:
             raise ValueError(
                 '"cancer_cell_dataset_ids" and "non_cancer_cell_dataset_ids" are only supported for SCT datasets.'
@@ -1302,6 +1361,14 @@ def run_bulk_simulation(dataset_name: str,
     resolved_stratify = _resolve_stratify_by_dataset(params=params, config=config)
     if dataset_type == 'sct':
         logging.info(f"   > stratify_by_dataset: {resolved_stratify}")
+        if isinstance(n_base, ResolvedNBaseValues):
+            logging.info(
+                "   > n_base_values: %s; seed: %d",
+                list(n_base.values),
+                n_base.seed,
+            )
+        else:
+            logging.info(f"   > n_base: {n_base}")
     if dataset_type == 'sct':  # single-cell-type dataset
         logging.info(f"   > Using Single-Cell-Type GEP Generation for {dataset_name}")
         resolved_selected_subtypes = _resolve_selected_subtypes_by_cell_type(
@@ -1323,7 +1390,9 @@ def run_bulk_simulation(dataset_name: str,
         )
         logging.info(f"   > neighbor_sampling_scheme: {neighbor_sampling_scheme}")
 
-        sc_dataset_dir = simu_bulk_dir / f'generated_sct_dataset_{n_sc_datasets}ds_n_base{n_base}_all_subtypes'
+        sc_dataset_dir = simu_bulk_dir / (
+            f'generated_sct_dataset_{n_sc_datasets}ds_{_n_base_output_tag(n_base)}_all_subtypes'
+        )
         sct_generator = SingleCellTypeGEPGenerator(
             simu_bulk_dir=sc_dataset_dir,
             cell_type2subtype=config.cell_type2subtypes,
@@ -1343,11 +1412,18 @@ def run_bulk_simulation(dataset_name: str,
         )
         generated_sct_fp = sct_generator.generated_bulk_gep_fp
         if not generated_sct_fp.exists():
+            if isinstance(n_base, ResolvedNBaseValues):
+                n_base_for_sampling = list(n_base.values)
+                n_base_seed = n_base.seed
+            else:
+                n_base_for_sampling = n_base
+                n_base_seed = config.n_base_seed
             sct_generator.generate_samples(n_sample_each_cell_type=params['n_samples'],
                                            sample_type='positive',
                                            simu_method='ave',  # average multiple cells to get one sct GEP
                                            sep_by_patient=False,
-                                           n_base_for_positive_samples=n_base,
+                                           n_base_for_positive_samples=n_base_for_sampling,
+                                           n_base_seed=n_base_seed,
                                            sampling_method=sampling_method_gep, # sampling method for finding single cells
                                            neighbor_sampling_scheme=neighbor_sampling_scheme,
                                            max_cells_per_cell_type=max_cells_per_cell_type
@@ -1541,7 +1617,9 @@ def run_bulk_simulation(dataset_name: str,
             output_tag = f"{filtering_str}_mgep"
         else:
             output_tag = f"{filtering_str}_median_gep"
-        simu_bulk_dir = simu_bulk_dir / f'{sampling_method_prop}_{n_sc_datasets}ds_n_base{n_base}_{output_tag}'
+        simu_bulk_dir = simu_bulk_dir / (
+            f'{sampling_method_prop}_{n_sc_datasets}ds_{_n_base_output_tag(n_base)}_{output_tag}'
+        )
         bulk_generator = BulkGEPGenerator(
             simu_bulk_dir=simu_bulk_dir,
             merged_sc_dataset_file_path=config.merged_sc_dataset_file_path,

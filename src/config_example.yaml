@@ -113,6 +113,7 @@ parameters:
   pca_sample_seed: 42  # Optional seed for reproducible, nested PCA sample subsets
   incremental_pca_batch_size: 5000  # Optional IncrementalPCA batch size for sample-count comparisons
   n_base: 30
+  n_base_seed: 42  # Seed for reproducible per-profile n_base draws
   sorted_bulk_cell_type_col: "Tumor_model_annot"  # Optional: cell-type column in sorted_bulk_annot_file_path
   sorted_bulk_imputation_eps: 1.0e-8  # Optional: zero threshold for sparsity and imputation
   sorted_bulk_imputation_seed: 123  # Optional: random seed for diagnostic sampling during sorted-bulk-guided SCT imputation
@@ -142,6 +143,7 @@ parameters:
 datasets:
   SCT_N10_hnscc_07Jan_01:  # Dataset name
     dataset_type: "SCT"  # Type of dataset: "SCT" or "Mixed"
+    n_base_values: [30, 40, 50, 60, 70, 80, 90, 100]  # Optional per-profile SCT averaging depths
     n_samples: 10  # Number of bulk samples to simulate for each cell type
     sampling_method_gep: "n_neighbors"  # Required for SCT datasets: sampling method for finding single cells, either "random" or "n_neighbors"
     neighbor_sampling_scheme: "single_anchor"  # Optional SCT-only: "single_anchor" (default) keeps the existing one-anchor neighbor sampling; "two_half_anchor" builds one SCT sample from two half-sized neighbor groups and softly prefers different datasets for the two halves when feasible.

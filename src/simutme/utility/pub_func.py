@@ -332,15 +332,25 @@ def get_cell_num(cell_type_frac, total_num=500):
     and fraction of each cell type
     :param cell_type_frac: dataFrame
         the fraction of each cell type, sum to 1 for each row, samples by cell types
-    :param total_num: the total number of cells contributing to one simulated RNA-seq sample
+    :param total_num: scalar total or sample-indexed totals for simulated samples
     :return:
     """
     assert type(cell_type_frac) is pd.DataFrame
-    cell_num = cell_type_frac * total_num
-    if total_num == 1:  # assign 1 for all cell types for matrix multiplication
-        cell_num = cell_type_frac * 0 + 1
-    elif total_num == 0:
-        cell_num = np.ceil(cell_type_frac)  # assign 1 for the cell types with non-zero cell fractions
+    if isinstance(total_num, pd.Series):
+        if not total_num.index.equals(cell_type_frac.index):
+            raise ValueError("Sample-indexed total_num must match cell_type_frac row order.")
+        if total_num.isna().any() or (total_num < 0).any():
+            raise ValueError("Sample-indexed total_num values must be nonnegative.")
+        cell_num = cell_type_frac.mul(total_num, axis=0)
+        zero_mask = total_num == 0
+        if zero_mask.any():
+            cell_num.loc[zero_mask] = np.ceil(cell_type_frac.loc[zero_mask])
+    else:
+        cell_num = cell_type_frac * total_num
+        if total_num == 1:  # assign 1 for all cell types for matrix multiplication
+            cell_num = cell_type_frac * 0 + 1
+        elif total_num == 0:
+            cell_num = np.ceil(cell_type_frac)  # assign 1 for nonzero fractions
     return cell_num.round(0).astype(int)
 
 

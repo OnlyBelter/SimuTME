@@ -97,7 +97,18 @@ Per-cell-type scaling coefficients used during bulk simulation.
 These parameters affect shared simulation behavior across workflows.
 
 - `n_base`
-  Number of cells combined into each simulated profile.
+  Fixed number of source cells combined into each simulated profile. It remains
+  the global fallback when an SCT dataset does not set its own `n_base` or
+  `n_base_values`.
+
+- `n_base_seed`
+  Nonnegative seed for uniform per-profile draws from `n_base_values`. Defaults
+  to `42`; an SCT dataset can override it.
+
+- `datasets.<SCT dataset>.n_base_values`
+  Optional nonempty list of distinct positive integers. SimuTME draws one value
+  independently for each SCT GEP. A dataset cannot set both `n_base` and
+  `n_base_values`.
 
 - `gene_quantile_range`
   Legacy global quantile triplet still reused by some quantile-based

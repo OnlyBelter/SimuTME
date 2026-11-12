@@ -76,6 +76,7 @@ memory measurements, and production-benchmark limitations.
 - `constants.cell_type2subtypes`
 - `constants.output_types`
 - `parameters.n_base`
+- `parameters.n_base_seed`
 
 ### Dataset-level fields
 
@@ -86,6 +87,8 @@ memory measurements, and production-benchmark limitations.
 ### Common optional dataset-level fields
 
 - `zero_ratio_threshold`
+- `n_base_values`
+- `n_base_seed`
 - `cell_type_col`
 - `cell_subtype_col`
 - `max_cells_per_cell_type`
@@ -102,6 +105,36 @@ memory measurements, and production-benchmark limitations.
 
 `sampling_method_gep` is required for every SCT dataset and must be set
 explicitly to either `random` or `n_neighbors`.
+
+### Randomized SCT averaging depth
+
+Keep `parameters.n_base` or a dataset-level `n_base` override to use one fixed
+cell count for every SCT GEP. To vary the averaging depth per generated SCT
+profile, set `n_base_values` on an SCT dataset:
+
+```yaml
+parameters:
+  n_base: 30
+  n_base_seed: 42
+
+datasets:
+  SCT_N10K_pan_cancer:
+    dataset_type: "SCT"
+    n_base_values: [30, 40, 50, 60, 70, 80, 90, 100]
+```
+
+SimuTME draws one value independently and uniformly for each SCT sample ID.
+`n_base_values` cannot be combined with a dataset-level scalar `n_base`.
+`n_base_seed` controls the draw and defaults to `42`; an SCT dataset can
+override the global seed. The assignment is saved by sample ID, and its value
+counts are recorded in a metadata JSON file. If the eligible cell pool is
+smaller than a requested count, the sampler keeps the available cells when
+they meet `minimum_n_base`.
+
+The SCT output directory name includes the complete value list and seed. A
+Mixed dataset that references the generated SCT dataset inherits that policy
+in its output directory name. The configured maximum also determines the
+largest neighbor count prepared by compact nearest-neighbor sampling.
 
 ### `selected_subtypes_by_cell_type`
 
@@ -174,6 +207,10 @@ For a dataset named `<dataset_name>` and sampling method `<sampling_method_gep>`
 the SCT generator writes files under:
 
 `paths.simu_bulk_dir/generated_sct_dataset_<n_sc_datasets>ds_n_base<n_base>_all_subtypes/`
+
+For per-profile `n_base_values`, the directory uses the configured values and
+seed. Its policy suffix follows this pattern:
+`n_base_values_<values>_seed<seed>_all_subtypes/`.
 
 Main files:
 
