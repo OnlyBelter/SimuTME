@@ -139,6 +139,67 @@ def test_range_denominator_and_survivor_order(tmp_path):
     assert space.range_input == 3 and space.range_kept == 2
 
 
+def test_gene_range_uses_normalized_log_space_when_decisions_differ(tmp_path):
+    reference = pd.DataFrame(
+        {"a": [1.0, 1000.0, 1e6], "b": [999999.0, 999000.0, 0.0]},
+        index=["r1", "r2", "r3"],
+    )
+    space = FixedGeneFilter(
+        ["a", "b"], reference, tmp_path / "reference.csv", None,
+        gep_params(
+            filtering_method="mgep",
+            filtering_in_pca_space=False,
+            filtering_by_gene_range=True,
+            min_percentage_within_gene_range=0.5,
+            gene_quantile_range=[0.25, 0.5, 0.75],
+        ),
+        tmp_path / "target", 2, 2,
+    )
+    simulated = pd.DataFrame({"a": [100.0], "b": [999900.0]}, index=["candidate"])
+    normalized = normalize_selected(simulated, space.genes)
+    expected_bounds = np.log2(space.reference_linear + 1).quantile([0.25, 0.75])
+    pd.testing.assert_frame_equal(space.prepare_range_reference(), expected_bounds)
+
+    linear_bounds = space.reference_linear.quantile([0.25, 0.75])
+    linear_in_range = (
+        normalized.ge(linear_bounds.iloc[0], axis=1)
+        & normalized.le(linear_bounds.iloc[1], axis=1)
+    ).mean(axis=1)
+    assert linear_in_range.loc["candidate"] == 0
+
+    result = space.filter(simulated)
+    assert result.index.tolist() == ["candidate"]
+
+
+def test_gene_range_bounds_are_inclusive_in_log_space(tmp_path):
+    reference = pd.DataFrame(
+        {"a": [1.0, 5.0, 9.0], "b": [9.0, 5.0, 1.0]},
+        index=["r1", "r2", "r3"],
+    )
+    space = FixedGeneFilter(
+        ["a", "b"], reference, tmp_path / "reference.csv", None,
+        gep_params(
+            filtering_method="mgep",
+            filtering_in_pca_space=False,
+            filtering_by_gene_range=True,
+            min_percentage_within_gene_range=1.0,
+            gene_quantile_range=[0.0, 0.5, 1.0],
+        ),
+        tmp_path / "target", 2, 2,
+    )
+
+    result = space.filter(reference.loc[["r1", "r3"]])
+    assert result.index.tolist() == ["r1", "r3"]
+
+
+def test_range_space_identity_marker_is_enabled_only_when_needed(tmp_path):
+    disabled = make_space(tmp_path, filtering_by_gene_range=False)
+    enabled = make_space(tmp_path, filtering_by_gene_range=True)
+
+    assert "range_space" not in disabled.identity
+    assert enabled.identity["range_space"] == "normalized-log2-tpm-plus-1-v1"
+
+
 def test_empty_and_range_rejected_batches_skip_pca(tmp_path):
     space = make_space(tmp_path, filtering_by_gene_range=True)
     assert space.filter(pd.DataFrame(columns=["a", "b", "unused"], dtype=float)).empty
@@ -306,12 +367,35 @@ def test_workflow_rejects_incompatible_outputs(workflow_case, change, resume):
 
 def test_legacy_modes_and_missing_sources_rejected(workflow_case):
     config, params, _, _ = workflow_case
+    resolved = workflow._resolve_gene_filtering_params(
+        "target",
+        {
+            **params,
+            "gene_filtering_type": "high_corr_gene_and_quantile_range",
+            "gene_filtering_quantile_range": [0.05, 0.5, 0.95],
+        },
+        config,
+    )
+    assert resolved.enabled
+    assert resolved.filtering_type == "high_corr_gene_and_quantile_range"
+    assert resolved.quantile_range == [0.05, 0.5, 0.95]
+
     with pytest.raises(ValueError, match="Migrate"):
         workflow._resolve_gene_filtering_params(
-            "target", {**params, "gene_filtering_type": "high_corr_gene_and_quantile_range"}, config
+            "target", {**params, "gene_filtering_type": "quantile_range"}, config
         )
     with pytest.raises(ValueError, match="requires"):
         workflow._resolve_gene_filtering_params("target", {"gene_filtering": True}, config)
+    with pytest.raises(ValueError, match="requires"):
+        workflow._resolve_gene_filtering_params(
+            "target",
+            {
+                **params,
+                "gene_filtering_type": "high_corr_gene_and_quantile_range",
+                "gene_filtering_save_filtered_h5ad": False,
+            },
+            config,
+        )
 
 
 def test_reference_subset_and_empty_subset(workflow_case):

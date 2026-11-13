@@ -881,8 +881,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             self._save_filtering_metadata()
             self._save_parallel_checkpoint()
         if self.filtering_space.gep.filtering_by_gene_range:
-            lower, _, upper = self.filtering_space.gep.gene_quantile_range
-            self.filtering_space.range_bounds = self.filtering_space.reference_linear.quantile([lower, upper])
+            self.filtering_space.prepare_range_reference()
         worker_filter = copy.copy(self.filtering_space)
         worker_filter.reference_linear = None
         worker_filter.reference_log = None

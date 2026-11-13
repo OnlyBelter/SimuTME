@@ -46,6 +46,13 @@ def _build_sorted_bulk_imputed_sct_path(
     )
 
 
+def _build_sct_n_base_assignment_path(sct_dataset_file_path: str | Path) -> Path:
+    sct_dataset_file_path = Path(sct_dataset_file_path)
+    return sct_dataset_file_path.with_name(
+        f"{sct_dataset_file_path.stem}_n_base_assignment.csv"
+    )
+
+
 def _resolve_sct_aux_output_dir(
     sct_dataset_file_path: str | Path,
     dataset_name: str,
@@ -916,12 +923,19 @@ def _resolve_gene_filtering_params(
             config.high_corr_gene_file_path,
             f'Mixed dataset "{dataset_name}" shared gene filtering fallback',
         )
-    if enabled and high_corr_gene_file is None and filtering_type != "high_corr_gene":
+    supported_gene_filtering_types = {
+        "high_corr_gene",
+        "high_corr_gene_and_quantile_range",
+    }
+    if (
+        enabled
+        and high_corr_gene_file is None
+        and filtering_type not in supported_gene_filtering_types
+    ):
         raise ValueError(
             f'Mixed dataset "{dataset_name}" uses legacy gene_filtering_type={filtering_type!r}. '
-            'Migrate to gene_filtering_type: high_corr_gene and remove '
-            'gene_filtering_quantile_range and gene_filtering_q_col_name; '
-            'use gep_gene_quantile_range for profile acceptance.'
+            "Migrate to gene_filtering_type: high_corr_gene or "
+            "high_corr_gene_and_quantile_range."
         )
     correlation_reference_dataset = None
     if enabled and high_corr_gene_file is None and "high_corr_gene" in filtering_type:
@@ -1070,6 +1084,16 @@ def _resolve_gene_filtering_params(
     if resolved.enabled and not resolved.reference_file:
         raise ValueError(
             f'"gene_filtering_reference_file" must be set when gene filtering is enabled for Mixed dataset "{dataset_name}".'
+        )
+    if (
+        resolved.enabled
+        and resolved.filtering_type == "high_corr_gene_and_quantile_range"
+        and not resolved.save_filtered_h5ad
+    ):
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" uses '
+            '"high_corr_gene_and_quantile_range", which requires '
+            '"gene_filtering_save_filtered_h5ad: true".'
         )
     if resolved.plot_pca and not resolved.reference_file:
         raise ValueError(
@@ -1460,6 +1484,22 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
         )
+        n_base_values_for_distribution = None
+        n_base_assignment_file = None
+        if isinstance(n_base, ResolvedNBaseValues) and len(n_base.values) >= 2:
+            referenced_dataset_name = str(
+                params["sct_reference"]["dataset_name"]
+            ).strip()
+            original_sct_file = config._generated_sct_outputs[
+                referenced_dataset_name
+            ]["original"]
+            if original_sct_file in (None, ""):
+                raise ValueError(
+                    f'Mixed dataset "{dataset_name}" cannot find the original generated '
+                    f'SCT file for "{referenced_dataset_name}" to resolve its n_base assignment.'
+                )
+            n_base_values_for_distribution = list(n_base.values)
+            n_base_assignment_file = _build_sct_n_base_assignment_path(original_sct_file)
         resolved_cell_type2subtypes = _resolve_dataset_override(
             params,
             config,
@@ -1767,6 +1807,11 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
             preserve_existing_gep_pca_metadata=generated_bulk_gep_was_cached,
             filtering_space=filtering_space,
+            n_base_values=n_base_values_for_distribution,
+            n_base_assignment_file=n_base_assignment_file,
+            sampled_sct_cell_id_file=getattr(
+                bulk_generator, "sampled_sc_cell_id_file_path", None
+            ),
         )
 
         return str(generated_bulk_gep_fp)
@@ -2020,6 +2065,159 @@ def _build_filtered_h5ad_path(
         postfix = f"filtered_by_{filtering_type}"
     postfix = str(postfix).strip("_")
     return generated_bulk_gep_fp.with_name(f"{generated_bulk_gep_fp.stem}_{postfix}{generated_bulk_gep_fp.suffix}")
+
+
+def _post_gep_gene_quantile_filter(
+    generated_file: str | Path,
+    gene_params: ResolvedGeneFilteringParams,
+    filtering_space: FixedGeneFilter,
+) -> Dict[str, Any]:
+    """Filter accepted profiles by per-gene D1 quantiles and renormalize."""
+    import anndata as ad
+    from scipy.sparse import issparse
+
+    bulk = ad.read_h5ad(generated_file)
+    if bulk.var_names.tolist() != filtering_space.genes:
+        raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
+    if bulk.n_obs == 0:
+        raise ValueError("Post-GEP gene quantile filtering requires accepted samples.")
+    if bulk.obs_names.has_duplicates:
+        raise ValueError("Accepted Mixed artifact contains duplicate sample IDs.")
+    if filtering_space.reference_log.columns.tolist() != filtering_space.genes:
+        raise ValueError("TCGA reference gene order differs from the fixed gene list G.")
+
+    bulk_values = bulk.X.toarray() if issparse(bulk.X) else np.asarray(bulk.X)
+    bulk_log = pd.DataFrame(
+        bulk_values,
+        index=bulk.obs_names,
+        columns=bulk.var_names,
+    )
+    if not np.isfinite(bulk_values).all() or (bulk_values < 0).any():
+        raise ValueError("Accepted Mixed artifact contains negative or non-finite log expression.")
+
+    bulk_for_quantiles = bulk_log if len(bulk_log) > 1 else bulk_log.iloc[0]
+    passing_genes = get_gene_list_filtered_by_quantile_range(
+        bulk_exp=bulk_for_quantiles,
+        tcga_exp=filtering_space.reference_log,
+        quantile_range=gene_params.quantile_range,
+        q_col_name=gene_params.q_col_name,
+    )
+    passing = set(passing_genes)
+    final_genes = [gene for gene in filtering_space.genes if gene in passing]
+    if not final_genes:
+        raise ValueError(
+            "Post-GEP gene quantile filtering retained no genes. "
+            "Relax gene_filtering_quantile_range or use another dataset."
+        )
+
+    gene_list_file = filtering_space.result_dir / "gene_list_post_gep_quantile_range.csv"
+    if gene_list_file.exists():
+        existing_genes = _read_gene_list_file(gene_list_file)
+        if existing_genes != final_genes:
+            raise ValueError(
+                f"Stored post-GEP gene list differs from the current result: {gene_list_file}. "
+                "Use a new dataset name/output location."
+            )
+
+    bulk_hash = identity_hash(
+        pd.util.hash_pandas_object(bulk_log, index=True).tolist()
+    )
+    artifact_identity = {
+        "filtering_identity": filtering_space.identity,
+        "gene_filtering_type": gene_params.filtering_type,
+        "gene_filtering_quantile_range": list(gene_params.quantile_range),
+        "gene_filtering_quantile_columns": list(gene_params.q_col_name),
+        "accepted_bulk_file": str(Path(generated_file).resolve()),
+        "accepted_bulk_hash": bulk_hash,
+        "fixed_gene_list_hash": filtering_space.gene_hash,
+        "final_gene_list_hash": identity_hash(final_genes),
+        "output_definition": "post-gep-G2-row-sum-1e6-log2p1-v1",
+    }
+    output = _build_filtered_h5ad_path(
+        generated_file,
+        gene_params.filtering_type,
+        gene_params.filtered_dataset_postfix,
+    )
+    metadata_path = output.with_suffix(".metadata.json")
+    if output.exists() or metadata_path.exists():
+        validate_metadata(metadata_path, artifact_identity)
+        if not output.exists():
+            raise ValueError(
+                f"Post-GEP filtered H5AD is missing: {output}. "
+                "Use a new dataset name/output location."
+            )
+        existing = ad.read_h5ad(output, backed="r")
+        try:
+            if (
+                existing.var_names.tolist() != final_genes
+                or existing.obs_names.tolist() != bulk.obs_names.tolist()
+            ):
+                raise ValueError(
+                    "Stored post-GEP filtered H5AD differs from the current genes or samples. "
+                    "Use a new dataset name/output location."
+                )
+        finally:
+            existing.file.close()
+    else:
+        gene_positions = pd.Index(filtering_space.genes).get_indexer(final_genes)
+        filtered = bulk[:, final_genes].copy()
+        filtered.X = np.empty((bulk.n_obs, len(final_genes)), dtype=np.float32)
+        batch_size = 4096
+        for start in range(0, bulk.n_obs, batch_size):
+            stop = min(start + batch_size, bulk.n_obs)
+            source_values = bulk.X[start:stop, gene_positions]
+            if issparse(source_values):
+                source_values = source_values.toarray()
+            source_values = np.asarray(source_values, dtype=np.float64)
+            if not np.isfinite(source_values).all() or (source_values < 0).any():
+                raise ValueError(
+                    f"Accepted Mixed samples {bulk.obs_names[start:stop].tolist()[:5]} "
+                    "contain invalid expression values."
+                )
+            linear = np.expm1(source_values * np.log(2.0))
+            row_sums = linear.sum(axis=1)
+            invalid_rows = ~np.isfinite(row_sums) | (row_sums <= 0)
+            if invalid_rows.any():
+                sample_ids = bulk.obs_names[start:stop][invalid_rows].tolist()
+                raise ValueError(
+                    "Post-GEP gene filtering leaves nonpositive or non-finite "
+                    f"expression totals for samples: {sample_ids[:10]}."
+                )
+            linear_frame = pd.DataFrame(
+                linear,
+                index=bulk.obs_names[start:stop],
+                columns=final_genes,
+            )
+            normalized = normalize_selected(
+                linear_frame,
+                final_genes,
+                "Post-GEP filtered profiles",
+            )
+            filtered.X[start:stop] = log2_transform(normalized).to_numpy(
+                dtype=np.float32,
+                copy=False,
+            )
+        filtered.write_h5ad(output, compression="gzip")
+        write_metadata(metadata_path, artifact_identity)
+
+    if not gene_list_file.exists():
+        gene_list_file.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"gene_name": final_genes}).to_csv(gene_list_file, index=False)
+
+    return {
+        "filtered_bulk_gep_file": str(output),
+        "gene_list_file": str(gene_list_file),
+        "fixed_gene_list_file": str(filtering_space.gene_list_file),
+        "post_gep_gene_quantile_filter": {
+            "quantile_range": list(gene_params.quantile_range),
+            "gene_count_before": len(filtering_space.genes),
+            "gene_count_after": len(final_genes),
+            "gene_count_removed": len(filtering_space.genes) - len(final_genes),
+            "gene_list_file": str(gene_list_file),
+            "filtered_bulk_gep_file": str(output),
+            "expression_space": "normalized-log2-tpm-plus-1",
+        },
+    }
 
 
 def _nested_pca_sample_indices(
@@ -2404,9 +2602,11 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
     import anndata as ad
     from scipy.sparse import issparse
 
+    filtering_type = getattr(gene_params, "filtering_type", "high_corr_gene")
     outputs = {
         "filtered_bulk_gep_file": None,
         "gene_list_file": str(filtering_space.gene_list_file),
+        "fixed_gene_list_file": str(filtering_space.gene_list_file),
         "corr_result_file": None,
         "pca_model_file": None,
         "pca_data_file": None,
@@ -2414,12 +2614,27 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         "pca_runs": [],
         "full_gene_corr_with_cell_fraction_file": filtering_space.correlation_file,
     }
+    if (
+        gene_params.enabled
+        and filtering_type == "high_corr_gene_and_quantile_range"
+    ):
+        outputs.update(
+            _post_gep_gene_quantile_filter(
+                generated_file,
+                gene_params,
+                filtering_space,
+            )
+        )
     if gene_params.plot_pca and gene_params.n_sample_for_pca is not None:
         bulk = ad.read_h5ad(generated_file, backed="r")
         try:
             if bulk.var_names.tolist() != filtering_space.genes:
                 raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
-            if gene_params.enabled and gene_params.save_filtered_h5ad:
+            if (
+                gene_params.enabled
+                and gene_params.save_filtered_h5ad
+                and filtering_type == "high_corr_gene"
+            ):
                 output = _build_filtered_h5ad_path(
                     generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
                 )
@@ -2463,7 +2678,11 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
     values = bulk.X.toarray() if issparse(bulk.X) else bulk.X
     bulk_log = pd.DataFrame(values, index=bulk.obs_names, columns=bulk.var_names)
-    if gene_params.enabled and gene_params.save_filtered_h5ad:
+    if (
+        gene_params.enabled
+        and gene_params.save_filtered_h5ad
+        and filtering_type == "high_corr_gene"
+    ):
         output = _build_filtered_h5ad_path(
             generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
         )
@@ -2798,6 +3017,221 @@ def _load_gep_filtering_pca_metadata(
         return None, None
 
 
+def _write_mixed_n_base_distribution(
+    dataset_name: str,
+    result_dir: Path,
+    generated_n_samples: int | None,
+    generated_cell_fraction_fp: str | Path,
+    sampled_sct_cell_id_file: str | Path,
+    n_base_assignment_file: str | Path,
+    n_base_values: List[int],
+) -> Dict[str, Any]:
+    """Write the selected SCT n_base distribution grouped by Mixed fractions."""
+    fraction_path = Path(generated_cell_fraction_fp)
+    selected_path = Path(sampled_sct_cell_id_file)
+    assignment_path = Path(n_base_assignment_file)
+    for label, path in (
+        ("Mixed cell fractions", fraction_path),
+        ("selected SCT GEP metadata", selected_path),
+        ("SCT n_base assignments", assignment_path),
+    ):
+        if not path.exists():
+            raise FileNotFoundError(
+                f'Mixed dataset "{dataset_name}" cannot build its n_base distribution: '
+                f"{label} file is missing: {path}."
+            )
+
+    try:
+        fractions = pd.read_csv(fraction_path, index_col=0)
+        selected = pd.read_csv(selected_path, index_col=0)
+        assignments = pd.read_csv(assignment_path, index_col=0)
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}" cannot read the metadata required for '
+            f"its n_base distribution: {exc}"
+        ) from exc
+
+    required_selected_columns = {"cell_type", "selected_cell_id"}
+    missing_columns = required_selected_columns.difference(selected.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} is missing columns: "
+            f"{sorted(missing_columns)}."
+        )
+    if selected.index.hasnans or fractions.index.hasnans or assignments.index.hasnans:
+        raise ValueError("n_base distribution metadata contains missing sample or profile IDs.")
+
+    selected.index = selected.index.astype(str)
+    fractions.index = fractions.index.astype(str)
+    assignments.index = assignments.index.astype(str)
+    fractions.columns = fractions.columns.astype(str)
+    if not fractions.index.is_unique:
+        raise ValueError(f"Mixed cell-fraction file {fraction_path} has duplicate sample IDs.")
+    if not assignments.index.is_unique:
+        raise ValueError(f"SCT n_base assignment file {assignment_path} has duplicate profile IDs.")
+    if assignments.columns.tolist() != ["n_base"]:
+        raise ValueError(
+            f"SCT n_base assignment file {assignment_path} must contain only an n_base column."
+        )
+    if fractions.columns.has_duplicates:
+        raise ValueError(f"Mixed cell-fraction file {fraction_path} has duplicate cell-type columns.")
+
+    if selected["cell_type"].isna().any():
+        raise ValueError(f"Selected SCT GEP metadata {selected_path} has missing cell types.")
+    selected["cell_type"] = selected["cell_type"].astype(str)
+    selected_ids = selected["selected_cell_id"].astype(str)
+    invalid_selected_ids = (
+        selected["selected_cell_id"].isna()
+        | selected_ids.str.strip().eq("")
+        | selected_ids.str.contains(";", regex=False)
+    )
+    if invalid_selected_ids.any():
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} must contain exactly one "
+            "nonempty selected SCT GEP ID per sample and cell type."
+        )
+
+    if set(selected["cell_type"]) != set(fractions.columns):
+        raise ValueError(
+            f"Selected cell types in {selected_path} do not match fraction columns "
+            f"in {fraction_path}."
+        )
+    missing_samples = fractions.index.difference(selected.index)
+    extra_samples = selected.index.unique().difference(fractions.index)
+    if len(missing_samples) or len(extra_samples):
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} does not align with Mixed "
+            f"sample IDs in {fraction_path} (missing={missing_samples[:5].tolist()}, "
+            f"extra={extra_samples[:5].tolist()})."
+        )
+
+    pair_index = pd.MultiIndex.from_arrays(
+        [selected.index, selected["cell_type"]],
+        names=["sample_id", "cell_type"],
+    )
+    if pair_index.has_duplicates:
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} has duplicate sample/cell-type rows."
+        )
+    expected_rows = len(fractions) * len(fractions.columns)
+    if len(selected) != expected_rows:
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} has {len(selected)} rows; "
+            f"expected one row for each of {expected_rows} Mixed sample/cell-type pairs."
+        )
+
+    try:
+        fraction_matrix = fractions.to_numpy(dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Mixed cell-fraction file {fraction_path} contains nonnumeric values.") from exc
+    if (
+        not np.isfinite(fraction_matrix).all()
+        or (fraction_matrix < 0).any()
+        or (fraction_matrix > 1).any()
+    ):
+        raise ValueError(
+            f"Mixed cell-fraction file {fraction_path} contains values outside finite [0, 1]."
+        )
+    fraction_rows = fractions.index.get_indexer(selected.index)
+    fraction_columns = fractions.columns.get_indexer(selected["cell_type"])
+    if (fraction_rows < 0).any() or (fraction_columns < 0).any():
+        raise ValueError(
+            f"Selected SCT GEP metadata {selected_path} cannot be aligned to "
+            f"cell fractions in {fraction_path}."
+        )
+    selected_fractions = fraction_matrix[fraction_rows, fraction_columns]
+
+    try:
+        assignment_values = pd.to_numeric(
+            assignments["n_base"], errors="raise"
+        ).to_numpy(dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"SCT n_base assignment file {assignment_path} contains nonnumeric values."
+        ) from exc
+    if (
+        not np.isfinite(assignment_values).all()
+        or (assignment_values <= 0).any()
+        or (assignment_values != np.floor(assignment_values)).any()
+    ):
+        raise ValueError(
+            f"SCT n_base assignment file {assignment_path} must contain positive integers."
+        )
+    configured_values = [int(value) for value in n_base_values]
+    if len(configured_values) < 2 or len(set(configured_values)) != len(configured_values):
+        raise ValueError("n_base distribution requires at least two distinct configured values.")
+    assignments["n_base"] = assignment_values.astype(np.int64)
+    if not assignments["n_base"].isin(configured_values).all():
+        raise ValueError(
+            f"SCT n_base assignments in {assignment_path} do not match the configured "
+            f"values {configured_values}."
+        )
+
+    assignment_positions = assignments.index.get_indexer(selected_ids)
+    if (assignment_positions < 0).any():
+        missing_profiles = selected_ids.iloc[np.flatnonzero(assignment_positions < 0)].unique()
+        raise ValueError(
+            f"Selected SCT GEP IDs in {selected_path} are missing from assignment "
+            f"file {assignment_path}: {missing_profiles[:5].tolist()}."
+        )
+
+    observations = pd.DataFrame({
+        "cell_type": selected["cell_type"].to_numpy(),
+        "cell_fraction_group": np.where(selected_fractions >= 0.01, ">=0.01", "<0.01"),
+        "n_base": assignments["n_base"].to_numpy()[assignment_positions],
+    })
+    group_sample_counts = observations.groupby(
+        ["cell_type", "cell_fraction_group"], sort=False
+    ).size()
+    n_base_counts = observations.groupby(
+        ["cell_type", "cell_fraction_group", "n_base"], sort=False
+    ).size()
+
+    records = []
+    fraction_groups = [">=0.01", "<0.01"]
+    for cell_type in fractions.columns:
+        for fraction_group in fraction_groups:
+            group_sample_count = int(group_sample_counts.get((cell_type, fraction_group), 0))
+            for n_base in configured_values:
+                count = int(n_base_counts.get((cell_type, fraction_group, n_base), 0))
+                records.append({
+                    "cell_type": cell_type,
+                    "cell_fraction_group": fraction_group,
+                    "n_base": n_base,
+                    "count": count,
+                    "proportion": (
+                        count / group_sample_count if group_sample_count else np.nan
+                    ),
+                    "group_sample_count": group_sample_count,
+                })
+
+    if generated_n_samples is not None and len(fractions) != generated_n_samples:
+        raise ValueError(
+            f"Mixed cell-fraction file {fraction_path} has {len(fractions)} samples, "
+            f"but the generated dataset has {generated_n_samples}."
+        )
+    result_dir.mkdir(parents=True, exist_ok=True)
+    distribution_path = result_dir / "n_base_distribution_by_cell_type.csv"
+    pd.DataFrame.from_records(records).to_csv(distribution_path, index=False)
+    return {
+        "n_base_distribution_file": str(distribution_path),
+        "n_base_distribution": {
+            "n_base_values": configured_values,
+            "source_n_base_assignment_file": str(assignment_path),
+            "cell_fraction_threshold": 0.01,
+            "cell_fraction_groups": {
+                ">=0.01": {"operator": ">=", "threshold": 0.01},
+                "<0.01": {"operator": "<", "threshold": 0.01},
+            },
+            "counting_unit": (
+                "one selected SCT GEP per accepted Mixed sample and cell type; "
+                "repeated selections count each time"
+            ),
+            "sample_count": len(fractions),
+        },
+    }
+
+
 def _build_mixed_dataset_summary(
     dataset_name: str,
     generated_bulk_gep_fp: str | Path,
@@ -2812,6 +3246,9 @@ def _build_mixed_dataset_summary(
     gep_filtering_n_pcs: int | None = None,
     preserve_existing_gep_pca_metadata: bool = False,
     filtering_space: FixedGeneFilter | None = None,
+    n_base_values: List[int] | None = None,
+    n_base_assignment_file: str | Path | None = None,
+    sampled_sct_cell_id_file: str | Path | None = None,
 ) -> Path:
     summary_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
     check_dir(summary_dir)
@@ -2858,6 +3295,22 @@ def _build_mixed_dataset_summary(
         )
         if filtered_gene_count_for_summary is not None:
             removed_n_genes = generated_shape[1] - filtered_gene_count_for_summary
+    n_base_distribution_metadata = {}
+    if n_base_values is not None and len(n_base_values) >= 2:
+        if n_base_assignment_file is None or sampled_sct_cell_id_file is None:
+            raise ValueError(
+                f'Mixed dataset "{dataset_name}" needs SCT assignment and selected-source '
+                "metadata to report variable n_base usage."
+            )
+        n_base_distribution_metadata = _write_mixed_n_base_distribution(
+            dataset_name=dataset_name,
+            result_dir=summary_dir,
+            generated_n_samples=generated_shape[0] if generated_shape else None,
+            generated_cell_fraction_fp=generated_cell_fraction_fp,
+            sampled_sct_cell_id_file=sampled_sct_cell_id_file,
+            n_base_assignment_file=n_base_assignment_file,
+            n_base_values=n_base_values,
+        )
     summary = {
         "dataset_name": dataset_name,
         "dataset_type": "Mixed",
@@ -2892,6 +3345,15 @@ def _build_mixed_dataset_summary(
         "gep_filtering_distance_plot_png": postprocess_outputs.get("gep_filtering_distance_plot_png"),
         "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }
+    summary.update(n_base_distribution_metadata)
+    post_gep_gene_quantile_filter = postprocess_outputs.get(
+        "post_gep_gene_quantile_filter"
+    )
+    if post_gep_gene_quantile_filter is not None:
+        summary["fixed_gene_list_file"] = postprocess_outputs.get(
+            "fixed_gene_list_file"
+        )
+        summary["post_gep_gene_quantile_filter"] = post_gep_gene_quantile_filter
     if filtering_space is not None:
         summary.update(getattr(filtering_space, "reference_variance_metadata", {}))
         generation_identity = filtering_space.identity.get("generation", {})

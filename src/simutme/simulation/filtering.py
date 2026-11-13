@@ -185,6 +185,8 @@ class FixedGeneFilter:
             "distance_quantiles": list(self.gep.gep_filtering_quantile),
             "distance_norm": self.gep.norm_ord,
         }
+        if self.gep.filtering_by_gene_range:
+            self.identity["range_space"] = "normalized-log2-tpm-plus-1-v1"
         if self.gep.filtering_method == "mgep":
             self.identity["distance_space"] = "linear-tpm-selected-G-v1"
             self.identity["distance_norm"] = 1
@@ -343,17 +345,23 @@ class FixedGeneFilter:
         distances = np.linalg.norm(simulated - self.distance_center, ord=norm, axis=1)
         return distances ** 2 if self.gep.filtering_method == "linear_mmd" else distances
 
+    def prepare_range_reference(self):
+        """Prepare inclusive per-gene bounds in normalized log2(TPM + 1) space."""
+        if self.range_bounds is None:
+            lower, _, upper = self.gep.gene_quantile_range
+            self.range_bounds = self.reference_log.quantile([lower, upper])
+        return self.range_bounds
+
     def filter(self, simulated_linear):
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
             return normalized
         if self.gep.filtering_by_gene_range:
-            if self.range_bounds is None:
-                lower, _, upper = self.gep.gene_quantile_range
-                self.range_bounds = self.reference_linear.quantile([lower, upper])
+            range_values = np.log2(normalized + 1)
+            range_bounds = self.prepare_range_reference()
             mask = (
-                normalized.ge(self.range_bounds.iloc[0], axis=1)
-                & normalized.le(self.range_bounds.iloc[1], axis=1)
+                range_values.ge(range_bounds.iloc[0], axis=1)
+                & range_values.le(range_bounds.iloc[1], axis=1)
             ).mean(axis=1) >= self.gep.min_percentage_within_gene_range
             self.range_input += len(normalized)
             self.range_kept += int(mask.sum())

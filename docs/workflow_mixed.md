@@ -382,12 +382,22 @@ steady-state timings. Synthetic results do not establish server performance.
 ## Optional Filtering And PCA Outputs
 
 Gene selection runs before GEP-level profile filtering. With
-`gene_filtering: true`, use `gene_filtering_type: high_corr_gene`. A supplied
+`gene_filtering: true`, use `gene_filtering_type: high_corr_gene` for
+correlation-only selection or
+`high_corr_gene_and_quantile_range` to add a post-GEP gene filter. A supplied
 `gene_filtering_high_corr_gene_file`, falling back to
 `paths.high_corr_gene_file_path`, takes precedence over a correlation source.
 Otherwise, `gene_filtering_correlation_reference_dataset` is required.
 The reference-variance screen described below runs before correlation-based or
 supplied-list selection when either gene or GEP filtering is enabled.
+
+In the combined mode, SimuTME compares each gene's configured middle
+quantile across final accepted Mixed samples with that gene's lower and upper
+quantiles in the resolved TCGA reference. The comparison is inclusive. Set
+`gene_filtering_quantile_range: [0.05, 0.5, 0.95]` to use the q5-q95 interval.
+SimuTME saves a separate filtered `.h5ad`; the primary accepted dataset
+remains unchanged. Before export, each filtered sample is renormalized over
+the passing genes to 1,000,000 and transformed to `log2(TPM + 1)`.
 
 The fixed list G is shared by normalization, optional per-gene range checks,
 reference-only GEP-filtering PCA, and accepted-profile export. With
@@ -570,10 +580,10 @@ For backward compatibility, older global fields still work:
 - `pca_n_components` still feeds GEP-level PCA filtering defaults
 - `gene_filtering` is independent from `gep_filtering`
 
-Explicit legacy range-selection modes require migration to `high_corr_gene`
-unless a supplied gene list takes precedence. Remove
-`gene_filtering_quantile_range` and `gene_filtering_q_col_name`; retain
-`gep_gene_quantile_range` for profile acceptance.
+Use `high_corr_gene_and_quantile_range` only when you want the additional
+post-GEP gene filter. Keep `gep_gene_quantile_range` for the separate
+per-profile range acceptance check; it does not remove genes from the
+post-GEP output.
 
 ## When To Use This Workflow
 

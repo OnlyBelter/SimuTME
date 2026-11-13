@@ -279,11 +279,21 @@ PCA, and export. Each profile is normalized over G to 1,000,000 before
 reference space. Otherwise, SimuTME uses `paths.gene_filtering_reference_file`.
 Both paths default to `paths.tcga_merged_tpm_file_path`.
 
-Use `gene_filtering_type: high_corr_gene`. Without a supplied gene list,
-`gene_filtering_correlation_reference_dataset` is required. Explicit legacy
-range-selection modes fail with a migration message. Remove
-`gene_filtering_quantile_range` and `gene_filtering_q_col_name`; the separate
-`gep_gene_quantile_range` controls profile acceptance on G.
+Use `gene_filtering_type: high_corr_gene` for correlation-only gene
+selection. To also remove genes after GEP-level sample filtering, use
+`gene_filtering_type: high_corr_gene_and_quantile_range` and configure
+`gene_filtering_quantile_range`. Without a supplied gene list,
+`gene_filtering_correlation_reference_dataset` is required for either mode.
+The combined mode requires `gene_filtering_save_filtered_h5ad: true`; it
+writes a separate filtered `.h5ad` and preserves the primary accepted dataset.
+
+Set `gene_filtering_quantile_range: [0.05, 0.5, 0.95]` for the q5-q95
+criterion. The middle quantile is calculated across final accepted Mixed
+samples and compared inclusively with the lower and upper TCGA quantiles.
+After genes are removed, each sample is renormalized over the remaining genes
+to 1,000,000 and transformed to `log2(TPM + 1)`. This is distinct from
+`gep_gene_quantile_range`, which checks profiles against per-gene ranges on
+the fixed list G.
 
 `gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
 `gep_filtering_n_pcs` is read-only summary metadata obtained from the model.

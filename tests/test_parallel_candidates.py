@@ -299,6 +299,38 @@ def test_median_parallel_worker_resets_distance_stats(setup_parallel, monkeypatc
             assert result["stats"]["gene_range_kept_n_samples"] == result["input"]
 
 
+def test_parallel_setup_precomputes_gene_range_bounds_in_log_space(setup_parallel, monkeypatch):
+    generator, config = setup_parallel("parallel-log-range", method="median_gep")
+    space = config.filtering_space
+    space.gep = replace(
+        space.gep,
+        filtering_by_gene_range=True,
+        gene_quantile_range=[0.25, 0.5, 0.75],
+    )
+    generator.filtering_space = space
+    generator._parallel_checkpoint = {"next_batch": 0, "accepted": 0}
+    generator.n_samples = config.n_samples
+    generator.generated_bulk_gep_counter = 0
+    generator.n_round = 0
+    generator.sct_dataset_df = pd.DataFrame({"g1": [1.0], "g2": [1.0]})
+    generator._load_sc_data_for_generation = lambda method: (
+        pd.DataFrame(), ["g1", "g2"], simulator.DatasetType.SCT,
+    )
+    generator._save_parallel_checkpoint = lambda: None
+    space.prepare_distance_reference = lambda: None
+    captured = {}
+
+    def capture_worker_filter(_generator, _config, _obs, worker_filter):
+        captured["range_bounds"] = worker_filter.range_bounds.copy()
+        assert worker_filter.reference_log is None
+
+    monkeypatch.setattr(parallel, "run_parallel_candidates", capture_worker_filter)
+    generator._generate_parallel_candidates(config)
+
+    expected = space.reference_log.quantile([0.25, 0.75])
+    pd.testing.assert_frame_equal(captured["range_bounds"], expected)
+
+
 def test_median_worker_replays_filtered_candidates(setup_parallel, monkeypatch):
     generator, config = setup_parallel("median-filtered-replay", method="median_gep")
     generator.filtering_space = config.filtering_space
