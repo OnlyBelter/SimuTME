@@ -24,6 +24,7 @@ def _make_filtering_space(tmp_path):
         },
         index=["tcga_1", "tcga_2", "tcga_3"],
     )
+    reference.to_csv(tmp_path / "tcga.csv")
     gep = SimpleNamespace(
         enabled=True,
         reference_file=str(tmp_path / "tcga.csv"),
@@ -110,6 +111,7 @@ def test_combined_mode_writes_separate_renormalized_h5ad_and_summary(tmp_path):
         space,
     )
 
+    assert outputs["post_gep_quantile_pca_plot_file"] is None
     filtered_file = Path(outputs["filtered_bulk_gep_file"])
     filtered = ad.read_h5ad(filtered_file)
     assert filtered.var_names.tolist() == ["g1"]
@@ -244,3 +246,101 @@ def test_combined_mode_fails_when_a_sample_has_zero_expression_on_final_genes(
             _make_gene_params(),
             space,
         )
+
+
+def test_combined_mode_adds_separate_post_quantile_pca_figure(tmp_path, monkeypatch):
+    space = _make_filtering_space(tmp_path)
+    generated_file = tmp_path / "accepted_mixed.h5ad"
+    expression = np.array(
+        [
+            [200_000.0, 400_000.0, 400_000.0],
+            [200_000.0, 300_000.0, 500_000.0],
+            [200_000.0, 500_000.0, 300_000.0],
+        ]
+    )
+    fractions = _write_primary_h5ad(generated_file, expression)
+    monkeypatch.setattr(
+        workflow,
+        "get_gene_list_filtered_by_quantile_range",
+        lambda **kwargs: ["g1", "g2"],
+    )
+
+    gene_params = _make_gene_params(plot_pca=True)
+    outputs = workflow._postprocess_fixed_gene_filter(
+        "Target",
+        generated_file,
+        gene_params,
+        space,
+    )
+
+    pre_plot = Path(outputs["pca_plot_file"])
+    post_plot = Path(outputs["post_gep_quantile_pca_plot_file"])
+    pre_model = Path(outputs["pca_model_file"])
+    post_model = Path(outputs["post_gep_quantile_pca_model_file"])
+    post_coordinates = pd.read_csv(
+        outputs["post_gep_quantile_pca_data_file"],
+        index_col=0,
+    )
+    assert pre_plot.is_file()
+    assert post_plot.is_file()
+    assert pre_plot != post_plot
+    assert pre_model.is_file()
+    assert post_model.is_file()
+    assert pre_model != post_model
+    assert workflow.load(post_model).n_features_in_ == 2
+    assert len(post_coordinates) == len(fractions) + len(space.reference_log)
+    assert post_coordinates.columns.tolist() == ["PC1", "PC2"]
+    assert post_model.with_suffix(".metadata.json").is_file()
+    reused = workflow._postprocess_fixed_gene_filter(
+        "Target",
+        generated_file,
+        gene_params,
+        space,
+    )
+    assert reused["post_gep_quantile_pca_plot_file"] == str(post_plot)
+
+    fraction_file = tmp_path / "cell_fractions.csv"
+    fractions.to_csv(fraction_file, index_label="sample_id")
+    summary_path = workflow._build_mixed_dataset_summary(
+        dataset_name="Target",
+        generated_bulk_gep_fp=generated_file,
+        generated_cell_fraction_fp=fraction_file,
+        gep_filtering=SimpleNamespace(enabled=False, filtering_method="median_gep"),
+        gene_filtering=SimpleNamespace(
+            enabled=True,
+            filtering_type="high_corr_gene_and_quantile_range",
+            correlation_reference_dataset="source",
+        ),
+        postprocess_outputs=outputs,
+    )
+    summary = json.loads(summary_path.read_text())
+    assert summary["pca_plot_file"] == str(pre_plot)
+    assert summary["post_gep_quantile_pca_plot_file"] == str(post_plot)
+    assert summary["post_gep_quantile_pca_model_file"] == str(post_model)
+
+
+def test_high_corr_mode_does_not_create_post_quantile_pca_artifacts(tmp_path):
+    space = _make_filtering_space(tmp_path)
+    generated_file = tmp_path / "accepted_mixed.h5ad"
+    _write_primary_h5ad(
+        generated_file,
+        np.array(
+            [
+                [200_000.0, 400_000.0, 400_000.0],
+                [200_000.0, 300_000.0, 500_000.0],
+                [200_000.0, 500_000.0, 300_000.0],
+            ]
+        ),
+    )
+
+    outputs = workflow._postprocess_fixed_gene_filter(
+        "Target",
+        generated_file,
+        _make_gene_params(filtering_type="high_corr_gene"),
+        space,
+    )
+
+    assert outputs["post_gep_quantile_pca_plot_file"] is None
+    assert outputs["post_gep_quantile_pca_model_file"] is None
+    assert outputs["post_gep_quantile_pca_data_file"] is None
+    assert not list(space.result_dir.glob("*post_gep_quantile_range*"))

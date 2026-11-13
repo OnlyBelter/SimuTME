@@ -398,6 +398,10 @@ quantiles in the resolved TCGA reference. The comparison is inclusive. Set
 SimuTME saves a separate filtered `.h5ad`; the primary accepted dataset
 remains unchanged. Before export, each filtered sample is renormalized over
 the passing genes to 1,000,000 and transformed to `log2(TPM + 1)`.
+When PCA comparison is enabled, SimuTME also writes a second PCA figure using
+the filtered dataset and G2 with the matching TCGA reference. It fits this
+PCA separately from the existing pre-filter figure, so PC coordinates are
+not directly comparable between the two plots.
 
 The fixed list G is shared by normalization, optional per-gene range checks,
 reference-only GEP-filtering PCA, and accepted-profile export. With

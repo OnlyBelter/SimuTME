@@ -2213,10 +2213,129 @@ def _post_gep_gene_quantile_filter(
             "gene_count_before": len(filtering_space.genes),
             "gene_count_after": len(final_genes),
             "gene_count_removed": len(filtering_space.genes) - len(final_genes),
+            "artifact_identity_hash": identity_hash(artifact_identity),
             "gene_list_file": str(gene_list_file),
             "filtered_bulk_gep_file": str(output),
             "expression_space": "normalized-log2-tpm-plus-1",
         },
+    }
+
+
+def _plot_post_gep_gene_quantile_pca(
+    dataset_name: str,
+    filtered_file: str | Path,
+    genes: List[str],
+    gene_params: ResolvedGeneFilteringParams,
+    filtering_space: FixedGeneFilter,
+    filtered_identity_hash: str,
+) -> Dict[str, str]:
+    """Plot a fresh Mixed-versus-TCGA PCA on the post-filter gene universe."""
+    import anndata as ad
+    from scipy.sparse import issparse
+
+    filtered_file = Path(filtered_file)
+    bulk = ad.read_h5ad(filtered_file)
+    if bulk.var_names.tolist() != genes:
+        raise ValueError("Post-GEP PCA input gene order differs from G2.")
+    if bulk.obs_names.has_duplicates:
+        raise ValueError("Post-GEP PCA input contains duplicate Mixed sample IDs.")
+    values = bulk.X.toarray() if issparse(bulk.X) else np.asarray(bulk.X)
+    bulk_log = pd.DataFrame(values, index=bulk.obs_names, columns=bulk.var_names)
+    if not np.isfinite(values).all():
+        raise ValueError("Post-GEP PCA input contains non-finite expression values.")
+
+    full_reference_log = _load_full_comparison_reference_log(filtering_space, genes)
+    resolved_reference_ids = filtering_space.reference_log.index
+    missing_reference_ids = resolved_reference_ids.difference(full_reference_log.index)
+    if len(missing_reference_ids):
+        raise ValueError(
+            "TCGA comparison reference is missing samples from the resolved "
+            f"filtering cohort: {missing_reference_ids[:5].tolist()}."
+        )
+    reference_log = full_reference_log.loc[resolved_reference_ids]
+    n_components = int(gene_params.pca_n_components)
+    if len(genes) < n_components:
+        raise ValueError(
+            f"Post-GEP PCA needs at least {n_components} retained genes; "
+            f"found {len(genes)}."
+        )
+    if len(bulk_log) + len(reference_log) < n_components:
+        raise ValueError(
+            "Post-GEP PCA has too few combined Mixed and TCGA samples for "
+            f"{n_components} components."
+        )
+
+    result_dir = filtering_space.result_dir
+    model = result_dir / f"comparison_pca_{n_components}_post_gep_quantile_range.joblib"
+    coordinates = result_dir / f"comparison_pca_{n_components}_post_gep_quantile_range.csv"
+    metadata_path = model.with_suffix(".metadata.json")
+    postfix = f"{filtering_space.workflow_version}_post_gep_quantile_range"
+    figure = result_dir / f"{dataset_name}_PCA_with_TCGA_{postfix}_PC0_PC1.png"
+
+    reference_hash = identity_hash(
+        pd.util.hash_pandas_object(reference_log, index=True).astype(str).tolist()
+    )
+    bulk_hash = identity_hash(
+        pd.util.hash_pandas_object(bulk_log, index=True).tolist()
+    )
+    filtered_stat = filtered_file.stat()
+    pca_identity = {
+        "model_scope": "post-gep-quantile-joint-reference-and-mixed",
+        "filtering_identity": filtering_space.identity,
+        "filtered_gene_quantile_identity": filtered_identity_hash,
+        "filtered_bulk_file": str(filtered_file.resolve()),
+        "filtered_bulk_size": filtered_stat.st_size,
+        "filtered_bulk_mtime_ns": filtered_stat.st_mtime_ns,
+        "filtered_bulk_hash": bulk_hash,
+        "ordered_genes": genes,
+        "gene_list_hash": identity_hash(genes),
+        "reference_hash": reference_hash,
+        "comparison_components": n_components,
+        "normalization_version": "subset-row-sum-1e6-log2p1-v1",
+    }
+    artifacts = (model, coordinates, metadata_path, figure)
+    if any(path.exists() for path in artifacts):
+        validate_metadata(metadata_path, pca_identity)
+        if not all(path.is_file() for path in artifacts):
+            raise ValueError(
+                f"Incomplete post-GEP PCA artifacts under {result_dir}; "
+                "use a fresh dataset output directory."
+            )
+        cached_model = load(model)
+        cached_coordinates = pd.read_csv(coordinates, index_col=0)
+        expected_rows = len(bulk_log) + len(reference_log)
+        if (
+            cached_model.n_features_in_ != len(genes)
+            or len(cached_coordinates) != expected_rows
+        ):
+            raise ValueError(
+                f"Incompatible post-GEP PCA artifacts under {result_dir}; "
+                "use a fresh dataset output directory."
+            )
+
+    filtering_by_gene_list_and_pca_plot(
+        bulk_log,
+        reference_log,
+        genes,
+        str(result_dir),
+        dataset_name,
+        n_components=n_components,
+        pca_model_name_postfix=postfix,
+        pca_model_file_path=str(model),
+        pca_data_file_path=str(coordinates),
+        figsize=gene_params.pca_figsize,
+        if_plot_pca=True,
+        normalized_log_inputs=True,
+    )
+    if not all(path.is_file() for path in (model, coordinates, figure)):
+        raise RuntimeError(
+            f"Post-GEP PCA artifacts were not written under {result_dir}."
+        )
+    write_metadata(metadata_path, pca_identity)
+    return {
+        "post_gep_quantile_pca_model_file": str(model),
+        "post_gep_quantile_pca_data_file": str(coordinates),
+        "post_gep_quantile_pca_plot_file": str(figure),
     }
 
 
@@ -2612,6 +2731,9 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         "pca_data_file": None,
         "pca_plot_file": None,
         "pca_runs": [],
+        "post_gep_quantile_pca_model_file": None,
+        "post_gep_quantile_pca_data_file": None,
+        "post_gep_quantile_pca_plot_file": None,
         "full_gene_corr_with_cell_fraction_file": filtering_space.correlation_file,
     }
     if (
@@ -2625,6 +2747,20 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
                 filtering_space,
             )
         )
+        if gene_params.plot_pca:
+            post_genes = _read_gene_list_file(outputs["gene_list_file"])
+            outputs.update(
+                _plot_post_gep_gene_quantile_pca(
+                    dataset_name=dataset_name,
+                    filtered_file=outputs["filtered_bulk_gep_file"],
+                    genes=post_genes,
+                    gene_params=gene_params,
+                    filtering_space=filtering_space,
+                    filtered_identity_hash=outputs[
+                        "post_gep_gene_quantile_filter"
+                    ]["artifact_identity_hash"],
+                )
+            )
     if gene_params.plot_pca and gene_params.n_sample_for_pca is not None:
         bulk = ad.read_h5ad(generated_file, backed="r")
         try:
@@ -3346,6 +3482,13 @@ def _build_mixed_dataset_summary(
         "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }
     summary.update(n_base_distribution_metadata)
+    for key in (
+        "post_gep_quantile_pca_model_file",
+        "post_gep_quantile_pca_data_file",
+        "post_gep_quantile_pca_plot_file",
+    ):
+        if postprocess_outputs.get(key) is not None:
+            summary[key] = postprocess_outputs[key]
     post_gep_gene_quantile_filter = postprocess_outputs.get(
         "post_gep_gene_quantile_filter"
     )
