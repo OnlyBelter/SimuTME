@@ -160,6 +160,10 @@ def test_combined_mode_writes_separate_renormalized_h5ad_and_summary(tmp_path):
 
     fraction_file = tmp_path / "cell_fractions.csv"
     fractions.to_csv(fraction_file, index_label="sample_id")
+    space.identity["generation"] = {
+        "simu_method": "mul",
+        "total_cell_number": 100,
+    }
     summary_path = workflow._build_mixed_dataset_summary(
         dataset_name="Target",
         generated_bulk_gep_fp=generated_file,
@@ -171,12 +175,17 @@ def test_combined_mode_writes_separate_renormalized_h5ad_and_summary(tmp_path):
             correlation_reference_dataset="source",
         ),
         postprocess_outputs=outputs,
+        filtering_space=space,
     )
     summary = json.loads(summary_path.read_text())
     assert summary["filtered_bulk_gep_file"] == str(filtered_file)
     assert summary["gene_list_file"] == outputs["gene_list_file"]
     assert summary["fixed_gene_list_file"] == outputs["fixed_gene_list_file"]
     assert summary["post_gep_gene_quantile_filter"]["gene_count_removed"] == 2
+    generation = summary["filtering_identity"]["generation"]
+    assert generation["total_cell_number"] == 1
+    assert generation["configured_total_cell_number"] == 100
+    assert space.identity["generation"]["total_cell_number"] == 100
 
 
 @pytest.mark.parametrize("expression", [1.0, 3.0])

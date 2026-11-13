@@ -3499,6 +3499,18 @@ def _build_mixed_dataset_summary(
         summary["post_gep_gene_quantile_filter"] = post_gep_gene_quantile_filter
     if filtering_space is not None:
         summary.update(getattr(filtering_space, "reference_variance_metadata", {}))
+        summary_filtering_identity = json.loads(
+            json.dumps(filtering_space.identity, default=str)
+        )
+        summary_generation_identity = summary_filtering_identity.get("generation", {})
+        if summary_generation_identity.get("simu_method") == "mul":
+            configured_total_cell_number = summary_generation_identity.get(
+                "total_cell_number"
+            )
+            summary_generation_identity["configured_total_cell_number"] = (
+                configured_total_cell_number
+            )
+            summary_generation_identity["total_cell_number"] = 1
         generation_identity = filtering_space.identity.get("generation", {})
         segment_cap_metadata = generation_identity.get("segment_fraction_cap_metadata")
         if segment_cap_metadata:
@@ -3506,7 +3518,7 @@ def _build_mixed_dataset_summary(
         summary.update({
             "filtering_workflow_version": filtering_space.workflow_version,
             "normalization_version": NORMALIZATION_VERSION,
-            "filtering_identity": filtering_space.identity,
+            "filtering_identity": summary_filtering_identity,
             "filtering_cache_identity": identity_hash(filtering_space.identity),
             "fixed_gene_list_hash": filtering_space.gene_hash,
             "pre_selection_n_genes": filtering_space.generation_n_genes,
