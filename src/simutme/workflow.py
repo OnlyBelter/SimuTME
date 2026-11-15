@@ -35,6 +35,8 @@ from .simulation.filtering import (
     validate_gep_filtering_method, write_metadata,
 )
 
+AUTO_INCREMENTAL_PCA_SAMPLE_THRESHOLD = 50_000
+
 
 def _build_sorted_bulk_imputed_sct_path(
     sct_dataset_file_path: str | Path,
@@ -2228,21 +2230,21 @@ def _plot_post_gep_gene_quantile_pca(
     gene_params: ResolvedGeneFilteringParams,
     filtering_space: FixedGeneFilter,
     filtered_identity_hash: str,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """Plot a fresh Mixed-versus-TCGA PCA on the post-filter gene universe."""
     import anndata as ad
     from scipy.sparse import issparse
 
     filtered_file = Path(filtered_file)
-    bulk = ad.read_h5ad(filtered_file)
-    if bulk.var_names.tolist() != genes:
-        raise ValueError("Post-GEP PCA input gene order differs from G2.")
-    if bulk.obs_names.has_duplicates:
-        raise ValueError("Post-GEP PCA input contains duplicate Mixed sample IDs.")
-    values = bulk.X.toarray() if issparse(bulk.X) else np.asarray(bulk.X)
-    bulk_log = pd.DataFrame(values, index=bulk.obs_names, columns=bulk.var_names)
-    if not np.isfinite(values).all():
-        raise ValueError("Post-GEP PCA input contains non-finite expression values.")
+    bulk_backed = ad.read_h5ad(filtered_file, backed="r")
+    try:
+        if bulk_backed.var_names.tolist() != genes:
+            raise ValueError("Post-GEP PCA input gene order differs from G2.")
+        if bulk_backed.obs_names.has_duplicates:
+            raise ValueError("Post-GEP PCA input contains duplicate Mixed sample IDs.")
+        n_samples = bulk_backed.n_obs
+    finally:
+        bulk_backed.file.close()
 
     full_reference_log = _load_full_comparison_reference_log(filtering_space, genes)
     resolved_reference_ids = filtering_space.reference_log.index
@@ -2259,11 +2261,43 @@ def _plot_post_gep_gene_quantile_pca(
             f"Post-GEP PCA needs at least {n_components} retained genes; "
             f"found {len(genes)}."
         )
-    if len(bulk_log) + len(reference_log) < n_components:
+    if n_samples + len(reference_log) < n_components:
         raise ValueError(
             "Post-GEP PCA has too few combined Mixed and TCGA samples for "
             f"{n_components} components."
         )
+
+    sample_counts = _effective_pca_sample_counts(
+        n_samples, gene_params.n_sample_for_pca
+    )
+    if sample_counts is not None:
+        pca_runs = _run_sample_count_pca(
+            filtered_file,
+            reference_log,
+            genes,
+            dataset_name,
+            filtering_space.result_dir,
+            gene_params,
+            simulated_is_normalized_log=True,
+            sample_counts=sample_counts,
+            artifact_subdir="post_gep_quantile_pca_by_sample_count",
+        )
+        result: Dict[str, Any] = {
+            "post_gep_quantile_pca_runs": pca_runs,
+        }
+        if len(pca_runs) == 1:
+            result.update(
+                post_gep_quantile_pca_model_file=pca_runs[0]["pca_model_file"],
+                post_gep_quantile_pca_data_file=pca_runs[0]["pca_data_file"],
+                post_gep_quantile_pca_plot_file=pca_runs[0]["pca_plot_file"],
+            )
+        return result
+
+    bulk = ad.read_h5ad(filtered_file)
+    values = bulk.X.toarray() if issparse(bulk.X) else np.asarray(bulk.X)
+    bulk_log = pd.DataFrame(values, index=bulk.obs_names, columns=bulk.var_names)
+    if not np.isfinite(values).all():
+        raise ValueError("Post-GEP PCA input contains non-finite expression values.")
 
     result_dir = filtering_space.result_dir
     model = result_dir / f"comparison_pca_{n_components}_post_gep_quantile_range.joblib"
@@ -2336,6 +2370,7 @@ def _plot_post_gep_gene_quantile_pca(
         "post_gep_quantile_pca_model_file": str(model),
         "post_gep_quantile_pca_data_file": str(coordinates),
         "post_gep_quantile_pca_plot_file": str(figure),
+        "post_gep_quantile_pca_runs": [],
     }
 
 
@@ -2372,6 +2407,17 @@ def _pca_batch_slices(n_rows: int, batch_size: int, min_batch_size: int) -> List
         slices.append((start, start + size))
         start += size
     return slices
+
+
+def _effective_pca_sample_counts(
+    n_samples: int,
+    configured_counts: Tuple[int, ...] | None,
+) -> Tuple[int, ...] | None:
+    if configured_counts is not None:
+        return configured_counts
+    if n_samples > AUTO_INCREMENTAL_PCA_SAMPLE_THRESHOLD:
+        return (n_samples,)
+    return None
 
 
 def _iter_sampled_pca_batches(
@@ -2435,11 +2481,18 @@ def _run_sample_count_pca(
     gene_params: ResolvedGeneFilteringParams,
     *,
     simulated_is_normalized_log: bool,
+    sample_counts: Tuple[int, ...] | None = None,
+    artifact_subdir: str = "pca_by_sample_count",
 ) -> List[Dict[str, str | int]]:
     import anndata as ad
     from sklearn.decomposition import IncrementalPCA
 
-    pca_dir = Path(result_dir) / "pca_by_sample_count"
+    sample_counts = (
+        gene_params.n_sample_for_pca if sample_counts is None else sample_counts
+    )
+    if sample_counts is None:
+        raise ValueError("IncrementalPCA requires at least one simulated sample count.")
+    pca_dir = Path(result_dir) / artifact_subdir
     pca_dir.mkdir(parents=True, exist_ok=True)
     generated_file = Path(generated_file)
     generated_stat = generated_file.stat()
@@ -2458,7 +2511,7 @@ def _run_sample_count_pca(
         if len(reference_log) < gene_params.pca_n_components:
             raise ValueError("TCGA reference has too few samples for the requested PCA components.")
         oversized = [
-            count for count in gene_params.n_sample_for_pca
+            count for count in sample_counts
             if count > bulk.n_obs
         ]
         if oversized:
@@ -2469,7 +2522,7 @@ def _run_sample_count_pca(
 
         selections = _nested_pca_sample_indices(
             bulk.n_obs,
-            gene_params.n_sample_for_pca,
+            sample_counts,
             gene_params.pca_sample_seed,
         )
         pca_runs = []
@@ -2477,7 +2530,7 @@ def _run_sample_count_pca(
             pd.util.hash_pandas_object(reference_log, index=True).astype(str).tolist()
         )
         sample_names = pd.Index(bulk.obs_names)
-        for sample_count in gene_params.n_sample_for_pca:
+        for sample_count in sample_counts:
             selected_rows = selections[sample_count]
             selected_ids = sample_names.take(selected_rows).astype(str).tolist()
             model_path = pca_dir / (
@@ -2734,6 +2787,7 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
         "post_gep_quantile_pca_model_file": None,
         "post_gep_quantile_pca_data_file": None,
         "post_gep_quantile_pca_plot_file": None,
+        "post_gep_quantile_pca_runs": [],
         "full_gene_corr_with_cell_fraction_file": filtering_space.correlation_file,
     }
     if (
@@ -2761,53 +2815,58 @@ def _postprocess_fixed_gene_filter(dataset_name, generated_file, gene_params, fi
                     ]["artifact_identity_hash"],
                 )
             )
-    if gene_params.plot_pca and gene_params.n_sample_for_pca is not None:
+    if gene_params.plot_pca:
         bulk = ad.read_h5ad(generated_file, backed="r")
         try:
             if bulk.var_names.tolist() != filtering_space.genes:
                 raise ValueError("Accepted artifact gene order differs from the fixed gene list G.")
-            if (
-                gene_params.enabled
-                and gene_params.save_filtered_h5ad
-                and filtering_type == "high_corr_gene"
-            ):
-                output = _build_filtered_h5ad_path(
-                    generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
+            sample_counts = _effective_pca_sample_counts(
+                bulk.n_obs, gene_params.n_sample_for_pca
+            )
+            if sample_counts is not None:
+                if (
+                    gene_params.enabled
+                    and gene_params.save_filtered_h5ad
+                    and filtering_type == "high_corr_gene"
+                ):
+                    output = _build_filtered_h5ad_path(
+                        generated_file, "high_corr_gene", gene_params.filtered_dataset_postfix
+                    )
+                    metadata_path = output.with_suffix(".metadata.json")
+                    if not output.exists():
+                        bulk.write_h5ad(output, compression="gzip")
+                        write_metadata(metadata_path, filtering_space.identity)
+                    else:
+                        validate_metadata(metadata_path, filtering_space.identity)
+                        existing = ad.read_h5ad(output, backed="r")
+                        try:
+                            if (
+                                existing.var_names.tolist() != filtering_space.genes
+                                or existing.obs_names.tolist() != bulk.obs_names.tolist()
+                            ):
+                                raise ValueError(
+                                    "Selected-gene export differs from G or sample IDs. "
+                                    "Use a new output location."
+                                )
+                        finally:
+                            existing.file.close()
+                    outputs["filtered_bulk_gep_file"] = str(output)
+                reference_log = _load_full_comparison_reference_log(
+                    filtering_space, filtering_space.genes
                 )
-                metadata_path = output.with_suffix(".metadata.json")
-                if not output.exists():
-                    bulk.write_h5ad(output, compression="gzip")
-                    write_metadata(metadata_path, filtering_space.identity)
-                else:
-                    validate_metadata(metadata_path, filtering_space.identity)
-                    existing = ad.read_h5ad(output, backed="r")
-                    try:
-                        if (
-                            existing.var_names.tolist() != filtering_space.genes
-                            or existing.obs_names.tolist() != bulk.obs_names.tolist()
-                        ):
-                            raise ValueError(
-                                "Selected-gene export differs from G or sample IDs. "
-                                "Use a new output location."
-                            )
-                    finally:
-                        existing.file.close()
-                outputs["filtered_bulk_gep_file"] = str(output)
-            reference_log = _load_full_comparison_reference_log(
-                filtering_space, filtering_space.genes
-            )
-            outputs["pca_runs"] = _run_sample_count_pca(
-                generated_file,
-                reference_log,
-                filtering_space.genes,
-                dataset_name,
-                filtering_space.result_dir,
-                gene_params,
-                simulated_is_normalized_log=True,
-            )
+                outputs["pca_runs"] = _run_sample_count_pca(
+                    generated_file,
+                    reference_log,
+                    filtering_space.genes,
+                    dataset_name,
+                    filtering_space.result_dir,
+                    gene_params,
+                    simulated_is_normalized_log=True,
+                    sample_counts=sample_counts,
+                )
+                return outputs
         finally:
             bulk.file.close()
-        return outputs
 
     bulk = ad.read_h5ad(generated_file)
     if bulk.var_names.tolist() != filtering_space.genes:
@@ -2924,11 +2983,14 @@ def _run_gene_filtering_postprocess(
             return outputs
 
         check_dir(current_result_dir)
-        if resolved_params.n_sample_for_pca is not None:
-            import anndata as ad
+        import anndata as ad
 
-            bulk = ad.read_h5ad(generated_bulk_gep_fp, backed="r")
-            try:
+        bulk = ad.read_h5ad(generated_bulk_gep_fp, backed="r")
+        try:
+            sample_counts = _effective_pca_sample_counts(
+                bulk.n_obs, resolved_params.n_sample_for_pca
+            )
+            if sample_counts is not None:
                 tcga_exp = ReadExp(
                     resolved_params.reference_file, exp_type="TPM"
                 ).get_exp()
@@ -2962,11 +3024,12 @@ def _run_gene_filtering_postprocess(
                         current_result_dir,
                         resolved_params,
                         simulated_is_normalized_log=False,
+                        sample_counts=sample_counts,
                     ),
                 )
-            finally:
-                bulk.file.close()
-            return outputs
+                return outputs
+        finally:
+            bulk.file.close()
 
         bulk_exp = ReadH5AD(generated_bulk_gep_fp).get_df()
         tcga_exp = ReadExp(resolved_params.reference_file, exp_type="TPM").get_exp()
@@ -3478,6 +3541,9 @@ def _build_mixed_dataset_summary(
         "pca_plot_file": postprocess_outputs.get("pca_plot_file"),
         "pca_gene_loadings_PC1_file": postprocess_outputs.get("pca_gene_loadings_PC1_file"),
         "pca_runs": postprocess_outputs.get("pca_runs", []),
+        "post_gep_quantile_pca_runs": postprocess_outputs.get(
+            "post_gep_quantile_pca_runs", []
+        ),
         "gep_filtering_distance_plot_png": postprocess_outputs.get("gep_filtering_distance_plot_png"),
         "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }

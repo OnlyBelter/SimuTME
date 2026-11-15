@@ -328,6 +328,60 @@ def test_combined_mode_adds_separate_post_quantile_pca_figure(tmp_path, monkeypa
     assert summary["post_gep_quantile_pca_model_file"] == str(post_model)
 
 
+def test_large_post_quantile_pca_uses_incremental_batches(tmp_path, monkeypatch):
+    space = _make_filtering_space(tmp_path)
+    filtered_file = tmp_path / "post_quantile.h5ad"
+    expression = np.array(
+        [
+            [100_000.0, 200_000.0, 700_000.0],
+            [200_000.0, 200_000.0, 600_000.0],
+            [300_000.0, 300_000.0, 400_000.0],
+            [400_000.0, 200_000.0, 400_000.0],
+        ],
+        dtype=np.float32,
+    )
+    ad.AnnData(
+        X=np.log2(expression + 1.0),
+        obs=pd.DataFrame(index=[f"filtered_{index}" for index in range(4)]),
+        var=pd.DataFrame(index=GENES),
+    ).write_h5ad(filtered_file)
+    gene_params = _make_gene_params(
+        plot_pca=True,
+        n_sample_for_pca=None,
+        incremental_pca_batch_size=4,
+    )
+    gene_params.pca_sample_seed = 7
+    monkeypatch.setattr(workflow, "AUTO_INCREMENTAL_PCA_SAMPLE_THRESHOLD", 2)
+    monkeypatch.setattr(
+        workflow,
+        "filtering_by_gene_list_and_pca_plot",
+        lambda *args, **kwargs: pytest.fail("full-matrix PCA path was used"),
+    )
+
+    def fake_plot(data, result_fp, color_code, **kwargs):
+        Path(result_fp.replace(".png", "_PC0_PC1.png")).touch()
+
+    monkeypatch.setattr(workflow, "plot_pca", fake_plot)
+    outputs = workflow._plot_post_gep_gene_quantile_pca(
+        dataset_name="Target",
+        filtered_file=filtered_file,
+        genes=GENES,
+        gene_params=gene_params,
+        filtering_space=space,
+        filtered_identity_hash="post-filter-identity",
+    )
+
+    run = outputs["post_gep_quantile_pca_runs"][0]
+    coordinates = pd.read_csv(run["pca_data_file"], index_col=0)
+    assert run["sample_count"] == 4
+    assert len(coordinates) == 4 + len(space.reference_log)
+    assert Path(run["pca_model_file"]).parent.name == (
+        "post_gep_quantile_pca_by_sample_count"
+    )
+    assert Path(run["pca_plot_file"]).is_file()
+    assert outputs["post_gep_quantile_pca_model_file"] == run["pca_model_file"]
+
+
 def test_high_corr_mode_does_not_create_post_quantile_pca_artifacts(tmp_path):
     space = _make_filtering_space(tmp_path)
     generated_file = tmp_path / "accepted_mixed.h5ad"

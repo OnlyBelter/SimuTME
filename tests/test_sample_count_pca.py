@@ -68,6 +68,12 @@ def test_gene_filter_resolver_validates_configured_sample_counts(workflow_case):
     ).n_sample_for_pca is None
 
 
+def test_effective_pca_sample_counts_switches_above_threshold():
+    assert workflow._effective_pca_sample_counts(50_000, None) is None
+    assert workflow._effective_pca_sample_counts(50_001, None) == (50_001,)
+    assert workflow._effective_pca_sample_counts(80_000, (10_000,)) == (10_000,)
+
+
 def test_pca_sample_indices_are_reproducible_and_nested():
     first = workflow._nested_pca_sample_indices(50, (10, 25, 40), 17)
     second = workflow._nested_pca_sample_indices(50, (10, 25, 40), 17)
@@ -237,10 +243,11 @@ def test_fixed_filter_sample_pca_writes_filtered_h5ad_from_backed_input(
         plot_pca=True,
         pca_n_components=2,
         pca_figsize=(5.0, 5.0),
-        n_sample_for_pca=(2,),
+        n_sample_for_pca=None,
         pca_sample_seed=3,
         incremental_pca_batch_size=4,
     )
+    monkeypatch.setattr(workflow, "AUTO_INCREMENTAL_PCA_SAMPLE_THRESHOLD", 3)
 
     def fake_plot(data, result_fp, color_code, **kwargs):
         Path(result_fp.replace(".png", "_PC0_PC1.png")).touch()
@@ -252,9 +259,9 @@ def test_fixed_filter_sample_pca_writes_filtered_h5ad_from_backed_input(
 
     filtered = ad.read_h5ad(outputs["filtered_bulk_gep_file"])
     assert filtered.shape == (4, 2)
-    assert outputs["pca_runs"][0]["sample_count"] == 2
+    assert outputs["pca_runs"][0]["sample_count"] == 4
     coordinates = pd.read_csv(outputs["pca_runs"][0]["pca_data_file"], index_col=0)
-    assert len(coordinates) == 2 + len(reference_linear)
+    assert len(coordinates) == 4 + len(reference_linear)
     assert set(reference_linear.index).issubset(coordinates.index)
 
 
@@ -283,13 +290,14 @@ def test_unfiltered_comparison_uses_sample_count_pca(tmp_path, monkeypatch):
         correlation_reference_dataset=None,
         enabled=False,
         plot_pca=True,
-        n_sample_for_pca=(2,),
+        n_sample_for_pca=None,
         pca_sample_seed=9,
         incremental_pca_batch_size=4,
         pca_n_components=2,
         pca_figsize=(5.0, 5.0),
         reference_file=str(reference_path),
     )
+    monkeypatch.setattr(workflow, "AUTO_INCREMENTAL_PCA_SAMPLE_THRESHOLD", 3)
 
     def fake_plot(data, result_fp, color_code, **kwargs):
         Path(result_fp.replace(".png", "_PC0_PC1.png")).touch()
@@ -303,5 +311,5 @@ def test_unfiltered_comparison_uses_sample_count_pca(tmp_path, monkeypatch):
         resolved_params=params,
     )
 
-    assert outputs["pca_runs"][0]["sample_count"] == 2
-    assert len(pd.read_csv(outputs["pca_runs"][0]["pca_data_file"])) == 5
+    assert outputs["pca_runs"][0]["sample_count"] == 4
+    assert len(pd.read_csv(outputs["pca_runs"][0]["pca_data_file"])) == 7

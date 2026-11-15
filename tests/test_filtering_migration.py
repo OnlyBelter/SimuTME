@@ -1,7 +1,8 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import json
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
@@ -551,7 +552,11 @@ def test_run_pca_comparison_when_gene_filtering_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ):
     generated_h5ad = tmp_path / "simu_gep_Mixed_Test_log2cpm1p.h5ad"
-    generated_h5ad.write_text("placeholder", encoding="utf-8")
+    ad.AnnData(
+        X=np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        obs=pd.DataFrame(index=["sample_1"]),
+        var=pd.DataFrame(index=["G1", "G2", "G3"]),
+    ).write_h5ad(generated_h5ad)
     tcga_file = tmp_path / "tcga.csv"
     config = _make_filtering_config(tmp_path)
     captured = {}

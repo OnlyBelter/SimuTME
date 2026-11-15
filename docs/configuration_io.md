@@ -243,10 +243,13 @@ the new key takes precedence if both are set.
 
 `n_sample_for_pca` optionally limits each comparison PCA fit to selected
 simulated profiles. It accepts one positive integer or a nonempty list of
-unique positive integers; `null` keeps the existing all-sample PCA behavior.
-Each requested count applies to simulated profiles only, and every figure
-also includes the complete TCGA reference. Each count must not exceed the
-dataset's `n_samples` or its actual generated sample count. For example:
+unique positive integers. Each requested count applies to simulated profiles
+only, and every figure also includes the complete TCGA reference. When this
+setting is `null`, SimuTME uses full PCA for datasets with at most 50,000
+generated samples and automatically uses batched IncrementalPCA across all
+simulated samples above 50,000.
+Each explicit count must not exceed the dataset's `n_samples` or its actual
+generated sample count. For example:
 
 ```yaml
 n_sample_for_pca: [10000, 50000, 100000, 200000]
@@ -254,13 +257,17 @@ pca_sample_seed: 42
 incremental_pca_batch_size: 5000
 ```
 
-The counts use nested, seeded random subsets. SimuTME fits a separate
-IncrementalPCA model for each count and writes models, coordinates, plots,
-metadata, and PC1 loadings under
-`<mixed_output_dir>/<dataset_name>/pca_by_sample_count/`. The batch size must
-be at least twice the number of PCA components. `pca_sample_seed` defaults
-to `42`. `pca_runs` in `mixed_dataset_summary.json` lists the artifacts for
-each requested count.
+Explicit counts use nested, seeded random subsets. SimuTME fits a separate
+IncrementalPCA model for each explicit count and writes models, coordinates,
+plots, metadata, and PC1 loadings under
+`<mixed_output_dir>/<dataset_name>/pca_by_sample_count/`. Automatic
+IncrementalPCA uses the same artifact structure and includes all generated
+samples. Post-GEP gene-quantile PCA artifacts are stored separately.
+`incremental_pca_batch_size` must be at least twice the number of PCA
+components and applies to both explicit and automatic IncrementalPCA.
+`pca_sample_seed` defaults to `42`. The `pca_runs` and
+`post_gep_quantile_pca_runs` fields in `mixed_dataset_summary.json` list the
+corresponding artifacts.
 
 `calculate_gene_cell_prop_correlation` writes the complete, unfiltered
 gene-by-cell-type correlation table for a Mixed dataset. A target can name an

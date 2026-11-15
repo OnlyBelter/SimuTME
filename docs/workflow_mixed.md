@@ -471,11 +471,15 @@ figures when the dataset contains at least 200,000 simulated samples. Every
 comparison also includes all samples from the TCGA reference. SimuTME checks
 the counts against both configured `n_samples` and the generated dataset.
 The subsets are reproducible and nested, controlled by `pca_sample_seed`.
-`incremental_pca_batch_size` controls the IncrementalPCA batch size and must
-be at least twice the number of requested PCA components. This sampled mode
-uses approximate IncrementalPCA to process expression batches without
-materializing the full simulated matrix. Set `n_sample_for_pca: null` to
-retain the existing all-sample comparison.
+Explicit sample counts use batched IncrementalPCA.
+
+When `n_sample_for_pca` is `null`, SimuTME uses the actual generated sample
+count to choose the PCA method. Datasets with more than 50,000 samples use
+IncrementalPCA across all simulated samples; datasets with 50,000 samples or
+fewer retain full PCA. `incremental_pca_batch_size` controls the batch size
+for both explicit and automatic IncrementalPCA and must be at least twice the
+number of requested PCA components. IncrementalPCA processes expression
+batches without materializing the full simulated matrix.
 
 These artifacts are written under the dataset-local directory:
 
@@ -492,7 +496,10 @@ Typical files include:
 - `comparison_pca_<n_components>_gene_loadings_sorted_PC1.csv`
 - `<dataset_name>_PCA_with_TCGA_correlation-first-v1_PC0_PC1.png`
 - `pca_by_sample_count/` contains per-count PCA models, coordinates,
-  metadata, figures, and PC1 loadings when `n_sample_for_pca` is configured
+  metadata, figures, and PC1 loadings when counts are configured or automatic
+  IncrementalPCA is selected
+- `post_gep_quantile_pca_by_sample_count/` contains separate batched PCA
+  artifacts for the post-GEP gene-quantile dataset
 - `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
 - `mixed_dataset_summary.json`
 
@@ -501,7 +508,8 @@ shared, and exported gene counts, and acceptance totals. It records
 `gep_pca_n_components` as the configured target and `gep_filtering_n_pcs`
 as the actual fitted count, not a second configuration setting. Both PCA
 fields are null when GEP filtering does not use PCA space. Per-count
-comparison artifact paths are listed in `pca_runs`.
+comparison artifact paths are listed in `pca_runs`; post-GEP gene-quantile
+PCA paths are listed in `post_gep_quantile_pca_runs`.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with
