@@ -1747,6 +1747,39 @@ def run_bulk_simulation(dataset_name: str,
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
 
         mixed_result_dir = _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+        if generated_bulk_gep_was_cached and filtering_space is not None:
+            cached_summary = _load_completed_mixed_summary(
+                dataset_name=dataset_name,
+                generated_bulk_gep_fp=generated_bulk_gep_fp,
+                generated_cell_fraction_fp=bulk_generator.generated_cell_fraction_fp,
+                filtering_space=filtering_space,
+                n_samples=params["n_samples"],
+                gene_filtering=resolved_gene_filtering,
+                n_base_values=n_base_values_for_distribution,
+            )
+            if cached_summary is not None:
+                if not hasattr(config, "_generated_mixed_outputs"):
+                    config._generated_mixed_outputs = {}
+                cached_corr_file = cached_summary.get(
+                    "full_gene_corr_with_cell_fraction_file"
+                )
+                config._generated_mixed_outputs[dataset_name] = {
+                    "generated_bulk_gep_file": Path(generated_bulk_gep_fp),
+                    "generated_cell_fraction_file": Path(
+                        bulk_generator.generated_cell_fraction_fp
+                    ),
+                    "result_dir": mixed_result_dir,
+                    "full_gene_corr_with_cell_fraction_file": (
+                        Path(cached_corr_file) if cached_corr_file else None
+                    ),
+                }
+                logging.info(
+                    "   > Completed Mixed dataset cache is valid for %s; "
+                    "skipping post-processing.",
+                    dataset_name,
+                )
+                return str(generated_bulk_gep_fp)
+
         distance_plot_paths = {}
         if resolved_gep_filtering.enabled and filtering_space is not None:
             distance_plot_paths = _save_gep_distance_distribution(
@@ -1828,13 +1861,34 @@ def _safe_filename(text: str) -> str:
 
 
 def _save_gep_distance_distribution(
-    generated_file: str | Path, filtering_space: FixedGeneFilter, batch_size: int = 256,
+    generated_file: str | Path,
+    filtering_space: FixedGeneFilter,
+    batch_size: int | None = None,
 ) -> Dict[str, str]:
     """Plot reference and final saved-profile distances in the filtering space."""
+    filtering_space.result_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = {
+        suffix: filtering_space.result_dir / f"gep_filtering_distance_distribution.{suffix}"
+        for suffix in ("png", "svg")
+    }
+    if all(path.is_file() for path in output_paths.values()):
+        logging.info("GEP distance-distribution plots already exist; skipping recomputation.")
+        return {
+            f"gep_filtering_distance_plot_{suffix}": str(path)
+            for suffix, path in output_paths.items()
+        }
+
     import anndata as ad
     import matplotlib.pyplot as plt
     from scipy.sparse import issparse
 
+    if batch_size is None:
+        batch_size = _distance_plot_batch_size(len(filtering_space.genes))
+    logging.info(
+        "GEP distance-distribution batch size: %d profiles across %d genes.",
+        batch_size,
+        len(filtering_space.genes),
+    )
     reference_distances = filtering_space.prepare_distance_reference()
     bulk = ad.read_h5ad(generated_file, backed="r")
     try:
@@ -1843,7 +1897,9 @@ def _save_gep_distance_distribution(
         if bulk.n_obs == 0:
             raise ValueError("Cannot plot GEP distances for an empty accepted dataset.")
         simulated_distances = np.empty(bulk.n_obs, dtype=np.float64)
-        for start in range(0, bulk.n_obs, batch_size):
+        n_batches = (bulk.n_obs + batch_size - 1) // batch_size
+        log_every = max(1, n_batches // 20)
+        for batch_index, start in enumerate(range(0, bulk.n_obs, batch_size), start=1):
             stop = min(start + batch_size, bulk.n_obs)
             values = bulk.X[start:stop]
             values = values.toarray() if issparse(values) else np.asarray(values)
@@ -1857,6 +1913,12 @@ def _save_gep_distance_distribution(
                 "Accepted profiles",
             )
             simulated_distances[start:stop] = filtering_space.distance_from_normalized(normalized)
+            if batch_index % log_every == 0 or batch_index == n_batches:
+                logging.info(
+                    "GEP distance-distribution progress: %d/%d accepted profiles.",
+                    stop,
+                    bulk.n_obs,
+                )
     finally:
         bulk.file.close()
 
@@ -1893,16 +1955,24 @@ def _save_gep_distance_distribution(
     ax.set_title(f"GEP filtering: {gep.filtering_method}")
     ax.legend(fontsize="small")
     fig.tight_layout()
-    filtering_space.result_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
     try:
         for suffix in ("png", "svg"):
-            output = filtering_space.result_dir / f"gep_filtering_distance_distribution.{suffix}"
+            output = output_paths[suffix]
             fig.savefig(output, dpi=300, bbox_inches="tight")
             paths[f"gep_filtering_distance_plot_{suffix}"] = str(output)
     finally:
         plt.close(fig)
     return paths
+
+
+def _distance_plot_batch_size(n_genes: int) -> int:
+    """Bound dense float64 work batches while avoiding tiny PCA transforms."""
+    if n_genes <= 0:
+        raise ValueError("Distance-plot batch sizing requires at least one gene.")
+    target_bytes = 128 * 1024**2
+    bytes_per_row = n_genes * np.dtype(np.float64).itemsize
+    return max(256, min(2048, target_bytes // bytes_per_row))
 
 
 def _save_estimated_dirichlet_alpha_from_pred_cell_props(
@@ -2027,6 +2097,109 @@ def _save_cancer_cell_fraction_distribution(
 
 def _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp: str | Path, dataset_name: str) -> Path:
     return Path(generated_bulk_gep_fp).parent / dataset_name
+
+
+def _load_completed_mixed_summary(
+    dataset_name: str,
+    generated_bulk_gep_fp: str | Path,
+    generated_cell_fraction_fp: str | Path,
+    filtering_space: FixedGeneFilter,
+    n_samples: int,
+    gene_filtering: ResolvedGeneFilteringParams,
+    n_base_values: List[int] | None,
+) -> Dict[str, Any] | None:
+    """Return a matching completed-run summary when all recorded outputs exist."""
+    summary_path = (
+        _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+        / "mixed_dataset_summary.json"
+    )
+    if not Path(generated_bulk_gep_fp).is_file() or not Path(generated_cell_fraction_fp).is_file():
+        return None
+    try:
+        with summary_path.open(encoding="utf-8") as handle:
+            summary = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if (
+        summary.get("dataset_type") != "Mixed"
+        or summary.get("generated_bulk_gep_file") != str(generated_bulk_gep_fp)
+        or summary.get("generated_cell_fraction_file") != str(generated_cell_fraction_fp)
+        or summary.get("generated_n_samples") != n_samples
+        or summary.get("filtering_cache_identity") != identity_hash(filtering_space.identity)
+        or summary.get("gene_filtering_enabled") != gene_filtering.enabled
+        or summary.get("gene_filtering_type") != (
+            gene_filtering.filtering_type if gene_filtering.enabled else None
+        )
+    ):
+        return None
+
+    if (
+        gene_filtering.enabled
+        and "quantile_range" in gene_filtering.filtering_type
+    ):
+        quantile_filter = summary.get("post_gep_gene_quantile_filter") or {}
+        if quantile_filter.get("quantile_range") != list(gene_filtering.quantile_range or []):
+            return None
+    if n_base_values is not None and len(n_base_values) >= 2:
+        if summary.get("n_base_distribution_file") is None:
+            return None
+    if gene_filtering.plot_pca:
+        if not (
+            summary.get("pca_plot_file")
+            or summary.get("pca_runs")
+        ):
+            return None
+        if (
+            gene_filtering.enabled
+            and "quantile_range" in gene_filtering.filtering_type
+            and not (
+                summary.get("post_gep_quantile_pca_plot_file")
+                or summary.get("post_gep_quantile_pca_runs")
+            )
+        ):
+            return None
+
+    path_fields = (
+        "generated_bulk_gep_file",
+        "generated_cell_fraction_file",
+        "filtered_bulk_gep_file",
+        "gene_list_file",
+        "fixed_gene_list_file",
+        "full_gene_corr_with_cell_fraction_file",
+        "pca_model_file",
+        "pca_data_file",
+        "pca_plot_file",
+        "pca_gene_loadings_PC1_file",
+        "post_gep_quantile_pca_model_file",
+        "post_gep_quantile_pca_data_file",
+        "post_gep_quantile_pca_plot_file",
+        "gep_filtering_distance_plot_png",
+        "gep_filtering_distance_plot_svg",
+        "n_base_distribution_file",
+    )
+    recorded_paths = [
+        summary.get(key)
+        for key in path_fields
+        if summary.get(key) not in (None, "")
+    ]
+    for collection_name in ("pca_runs", "post_gep_quantile_pca_runs"):
+        for run in summary.get(collection_name, []):
+            recorded_paths.extend(
+                value
+                for key, value in run.items()
+                if key.endswith("_file") or key.endswith("_plot_file")
+                if value not in (None, "")
+            )
+    quantile_filter = summary.get("post_gep_gene_quantile_filter") or {}
+    recorded_paths.extend(
+        value
+        for key, value in quantile_filter.items()
+        if key.endswith("_file") and value not in (None, "")
+    )
+    if any(not Path(path).is_file() for path in recorded_paths):
+        return None
+    return summary
 
 
 def _calculate_full_gene_cell_prop_correlation(

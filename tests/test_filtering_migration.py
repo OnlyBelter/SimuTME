@@ -67,6 +67,105 @@ def _make_filtering_config(tmp_path: Path):
     )
 
 
+def test_completed_mixed_summary_requires_matching_identity_and_outputs(tmp_path: Path):
+    dataset_name = "Mixed_Test"
+    generated_file = tmp_path / "generated.h5ad"
+    fraction_file = tmp_path / "cell_fractions.csv"
+    result_dir = tmp_path / dataset_name
+    result_dir.mkdir()
+    pca_plot = result_dir / "comparison.png"
+    for path in (generated_file, fraction_file, pca_plot):
+        path.touch()
+
+    filtering_identity = {"generation": {"seed": 42}}
+    summary = {
+        "dataset_type": "Mixed",
+        "generated_bulk_gep_file": str(generated_file),
+        "generated_cell_fraction_file": str(fraction_file),
+        "generated_n_samples": 2,
+        "filtering_cache_identity": workflow_module.identity_hash(filtering_identity),
+        "gene_filtering_enabled": False,
+        "gene_filtering_type": None,
+        "pca_plot_file": str(pca_plot),
+    }
+    (result_dir / "mixed_dataset_summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+    filtering_space = SimpleNamespace(identity=filtering_identity)
+    gene_filtering = SimpleNamespace(
+        enabled=False,
+        filtering_type="high_corr_gene",
+        plot_pca=True,
+        quantile_range=None,
+    )
+
+    cached = workflow_module._load_completed_mixed_summary(
+        dataset_name=dataset_name,
+        generated_bulk_gep_fp=generated_file,
+        generated_cell_fraction_fp=fraction_file,
+        filtering_space=filtering_space,
+        n_samples=2,
+        gene_filtering=gene_filtering,
+        n_base_values=None,
+    )
+
+    assert cached == summary
+
+    filtering_space.identity = {"generation": {"seed": 43}}
+    assert workflow_module._load_completed_mixed_summary(
+        dataset_name=dataset_name,
+        generated_bulk_gep_fp=generated_file,
+        generated_cell_fraction_fp=fraction_file,
+        filtering_space=filtering_space,
+        n_samples=2,
+        gene_filtering=gene_filtering,
+        n_base_values=None,
+    ) is None
+
+    filtering_space.identity = filtering_identity
+    pca_plot.unlink()
+    assert workflow_module._load_completed_mixed_summary(
+        dataset_name=dataset_name,
+        generated_bulk_gep_fp=generated_file,
+        generated_cell_fraction_fp=fraction_file,
+        filtering_space=filtering_space,
+        n_samples=2,
+        gene_filtering=gene_filtering,
+        n_base_values=None,
+    ) is None
+
+
+def test_gep_distance_plot_reuses_existing_plot_pair(tmp_path: Path):
+    result_dir = tmp_path / "Mixed_Test"
+    result_dir.mkdir()
+    for suffix in ("png", "svg"):
+        (result_dir / f"gep_filtering_distance_distribution.{suffix}").touch()
+
+    filtering_space = SimpleNamespace(result_dir=result_dir)
+    outputs = workflow_module._save_gep_distance_distribution(
+        generated_file=tmp_path / "unused.h5ad",
+        filtering_space=filtering_space,
+    )
+
+    assert outputs == {
+        "gep_filtering_distance_plot_png": str(
+            result_dir / "gep_filtering_distance_distribution.png"
+        ),
+        "gep_filtering_distance_plot_svg": str(
+            result_dir / "gep_filtering_distance_distribution.svg"
+        ),
+    }
+
+
+def test_distance_plot_batch_size_adapts_to_gene_count():
+    assert 900 <= workflow_module._distance_plot_batch_size(17_000) <= 1_000
+    assert workflow_module._distance_plot_batch_size(34_000) < (
+        workflow_module._distance_plot_batch_size(17_000)
+    )
+    assert workflow_module._distance_plot_batch_size(100) == 2_048
+    assert workflow_module._distance_plot_batch_size(100_000) == 256
+
+
 def test_gene_range_filter_aligns_reference_quantiles_by_gene_label():
     reference = pd.DataFrame(
         {
