@@ -407,3 +407,103 @@ def test_high_corr_mode_does_not_create_post_quantile_pca_artifacts(tmp_path):
     assert outputs["post_gep_quantile_pca_model_file"] is None
     assert outputs["post_gep_quantile_pca_data_file"] is None
     assert not list(space.result_dir.glob("*post_gep_quantile_range*"))
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_rebuild_archives_and_refits_post_quantile_pca(tmp_path, monkeypatch, incremental):
+    space = _make_filtering_space(tmp_path)
+    generated_file = tmp_path / "accepted_mixed.h5ad"
+    _write_primary_h5ad(
+        generated_file,
+        np.array([
+            [200_000.0, 400_000.0, 400_000.0],
+            [200_000.0, 300_000.0, 500_000.0],
+            [200_000.0, 500_000.0, 300_000.0],
+        ]),
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range",
+        lambda **kwargs: GENES if kwargs["quantile_range"][0] == 0.05 else GENES[:2],
+    )
+    monkeypatch.setattr(
+        workflow, "plot_pca",
+        lambda data, result_fp, color_code, **kwargs:
+            Path(result_fp.replace(".png", "_PC0_PC1.png")).touch(),
+    )
+    params = _make_gene_params(
+        plot_pca=True, pca_sample_seed=7, incremental_pca_batch_size=4,
+        n_sample_for_pca=(3,) if incremental else None,
+    )
+    original = workflow._postprocess_fixed_gene_filter("Target", generated_file, params, space)
+    old_post_model = Path(original["post_gep_quantile_pca_model_file"])
+    old_post_data = Path(original["post_gep_quantile_pca_data_file"])
+    old_post_plot = Path(original["post_gep_quantile_pca_plot_file"])
+    old_model_bytes = old_post_model.read_bytes()
+    pre_model = Path(
+        original["pca_runs"][0]["pca_model_file"]
+        if incremental else original["pca_model_file"]
+    )
+    pre_model_bytes = pre_model.read_bytes()
+    filtered = Path(original["filtered_bulk_gep_file"])
+    filtered.unlink()
+    changed_range = [0.1, 0.5, 0.9]
+    changed = _make_gene_params(
+        plot_pca=True, pca_sample_seed=7, incremental_pca_batch_size=4,
+        n_sample_for_pca=(3,) if incremental else None,
+        quantile_range=changed_range,
+        q_col_name=workflow._resolve_quantile_col_names(None, changed_range, "quantiles"),
+    )
+
+    marker = workflow._prepare_post_gep_quantile_rebuild(
+        "Target", generated_file, changed, space
+    )
+    state = json.loads(marker.read_text())
+    backup = Path(state["backup_dir"])
+    assert list(backup.rglob(old_post_model.name))[0].read_bytes() == old_model_bytes
+    assert list(backup.rglob(old_post_data.name))
+    assert list(backup.rglob(old_post_plot.name))
+    assert pre_model.read_bytes() == pre_model_bytes
+    rebuilt = workflow._postprocess_fixed_gene_filter("Target", generated_file, changed, space)
+    new_model = workflow.load(rebuilt["post_gep_quantile_pca_model_file"])
+    assert new_model.n_features_in_ == 2
+    assert ad.read_h5ad(rebuilt["filtered_bulk_gep_file"]).var_names.tolist() == GENES[:2]
+    assert pre_model.read_bytes() == pre_model_bytes
+
+
+def test_rebuild_resumes_after_interrupted_artifact_move(tmp_path, monkeypatch):
+    space = _make_filtering_space(tmp_path)
+    generated_file = tmp_path / "accepted_mixed.h5ad"
+    _write_primary_h5ad(
+        generated_file,
+        np.array([
+            [200_000.0, 400_000.0, 400_000.0],
+            [200_000.0, 300_000.0, 500_000.0],
+            [200_000.0, 500_000.0, 300_000.0],
+        ]),
+    )
+    outputs = workflow._postprocess_fixed_gene_filter(
+        "Target", generated_file, _make_gene_params(), space
+    )
+    Path(outputs["filtered_bulk_gep_file"]).unlink()
+    original_replace = Path.replace
+
+    def interrupted_replace(source, target):
+        if source.name == "gene_list_post_gep_quantile_range.csv":
+            raise OSError("interrupted archive")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", interrupted_replace)
+    with pytest.raises(OSError, match="interrupted archive"):
+        workflow._prepare_post_gep_quantile_rebuild(
+            "Target", generated_file, _make_gene_params(), space
+        )
+    marker = workflow._post_gep_rebuild_marker_path(space.result_dir)
+    assert json.loads(marker.read_text())["phase"] == "archiving"
+    monkeypatch.setattr(Path, "replace", original_replace)
+    assert workflow._prepare_post_gep_quantile_rebuild(
+        "Target", generated_file, _make_gene_params(), space
+    ) == marker
+    state = json.loads(marker.read_text())
+    assert state["phase"] == "processing"
+    assert list(Path(state["backup_dir"]).rglob("gene_list_post_gep_quantile_range.csv"))
+    assert list(Path(state["backup_dir"]).rglob("accepted_mixed_filtered_by_high_corr_gene_and_quantile_range.metadata.json"))

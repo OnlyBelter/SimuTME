@@ -1,5 +1,8 @@
 import json
 import os
+import re
+import shutil
+import uuid
 import yaml
 import logging
 import numpy as np
@@ -1700,7 +1703,11 @@ def run_bulk_simulation(dataset_name: str,
                 resolved_gep_filtering, resolved_gene_filtering, config,
                 _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name),
             )
-            if resolved_gene_filtering.enabled and resolved_gene_filtering.save_filtered_h5ad:
+            if (
+                resolved_gene_filtering.enabled
+                and resolved_gene_filtering.save_filtered_h5ad
+                and resolved_gene_filtering.filtering_type == "high_corr_gene"
+            ):
                 filtering_space.additional_artifacts = [
                     _build_filtered_h5ad_path(
                         generated_bulk_gep_fp, "high_corr_gene",
@@ -1710,6 +1717,17 @@ def run_bulk_simulation(dataset_name: str,
 
         # 2. Generate GEP (if it doesn't exist)
         generated_bulk_gep_was_cached = os.path.exists(generated_bulk_gep_fp)
+        if (
+            filtering_space is not None
+            and not generated_bulk_gep_was_cached
+            and _post_gep_rebuild_marker_path(
+                _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+            ).exists()
+        ):
+            raise ValueError(
+                "The accepted Mixed H5AD is missing during an unfinished post-GEP "
+                "rebuild; restore it before resuming."
+            )
         if not generated_bulk_gep_was_cached or filtering_space is not None:
             gep_gen_config = GEPGenerationConfig(
                 n_samples=params['n_samples'],
@@ -1780,6 +1798,13 @@ def run_bulk_simulation(dataset_name: str,
                 )
                 return str(generated_bulk_gep_fp)
 
+        rebuild_marker = None
+        if generated_bulk_gep_was_cached and filtering_space is not None:
+            rebuild_marker = _prepare_post_gep_quantile_rebuild(
+                dataset_name, generated_bulk_gep_fp, resolved_gene_filtering,
+                filtering_space,
+            )
+
         distance_plot_paths = {}
         if resolved_gep_filtering.enabled and filtering_space is not None:
             distance_plot_paths = _save_gep_distance_distribution(
@@ -1848,6 +1873,8 @@ def run_bulk_simulation(dataset_name: str,
                 bulk_generator, "sampled_sc_cell_id_file_path", None
             ),
         )
+        if rebuild_marker is not None:
+            rebuild_marker.unlink()
 
         return str(generated_bulk_gep_fp)
 
@@ -2113,6 +2140,8 @@ def _load_completed_mixed_summary(
         _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
         / "mixed_dataset_summary.json"
     )
+    if _post_gep_rebuild_marker_path(summary_path.parent).exists():
+        return None
     if not Path(generated_bulk_gep_fp).is_file() or not Path(generated_cell_fraction_fp).is_file():
         return None
     try:
@@ -2122,7 +2151,8 @@ def _load_completed_mixed_summary(
         return None
 
     if (
-        summary.get("dataset_type") != "Mixed"
+        summary.get("status") == "post_gep_quantile_rebuild_in_progress"
+        or summary.get("dataset_type") != "Mixed"
         or summary.get("generated_bulk_gep_file") != str(generated_bulk_gep_fp)
         or summary.get("generated_cell_fraction_file") != str(generated_cell_fraction_fp)
         or summary.get("generated_n_samples") != n_samples
@@ -2140,6 +2170,13 @@ def _load_completed_mixed_summary(
     ):
         quantile_filter = summary.get("post_gep_gene_quantile_filter") or {}
         if quantile_filter.get("quantile_range") != list(gene_filtering.quantile_range or []):
+            return None
+        recorded_filtered = summary.get("filtered_bulk_gep_file")
+        expected_filtered = _build_filtered_h5ad_path(
+            generated_bulk_gep_fp, gene_filtering.filtering_type,
+            getattr(gene_filtering, "filtered_dataset_postfix", None),
+        )
+        if not recorded_filtered or Path(recorded_filtered).resolve() != expected_filtered.resolve():
             return None
     if n_base_values is not None and len(n_base_values) >= 2:
         if summary.get("n_base_distribution_file") is None:
@@ -2242,6 +2279,192 @@ def _build_filtered_h5ad_path(
     return generated_bulk_gep_fp.with_name(f"{generated_bulk_gep_fp.stem}_{postfix}{generated_bulk_gep_fp.suffix}")
 
 
+def _post_gep_rebuild_marker_path(result_dir: str | Path) -> Path:
+    return Path(result_dir) / ".post_gep_quantile_rebuild.json"
+
+
+def _write_json_atomically(path: Path, value: Dict[str, Any]) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _post_gep_rebuild_artifacts(
+    dataset_name: str, output: Path, filtering_space: FixedGeneFilter,
+) -> List[Path]:
+    """Find only artifacts owned by the post-GEP quantile workflow."""
+    result_dir = Path(filtering_space.result_dir)
+    artifacts = [
+        output, output.with_suffix(".metadata.json"),
+        output.with_name(output.name + ".tmp"),
+        result_dir / "gene_list_post_gep_quantile_range.csv",
+    ]
+    standard_model = re.compile(
+        r"comparison_pca_\d+_post_gep_quantile_range"
+        r"(?:\.joblib|\.csv|\.metadata\.json|_gene_loadings_sorted_PC1\.csv)"
+    )
+    standard_plot = re.compile(
+        re.escape(f"{dataset_name}_PCA_with_TCGA_{filtering_space.workflow_version}"
+                  "_post_gep_quantile_range")
+        + r"_PC\d+_PC\d+\.png"
+    )
+    if result_dir.exists():
+        artifacts.extend(
+            path for path in result_dir.iterdir()
+            if standard_model.fullmatch(path.name) or standard_plot.fullmatch(path.name)
+        )
+    sampled_dir = result_dir / "post_gep_quantile_pca_by_sample_count"
+    if sampled_dir.is_symlink():
+        raise ValueError(f"Post-GEP PCA directory must not be a symlink: {sampled_dir}")
+    if sampled_dir.is_dir():
+        sampled_model = re.compile(
+            r"comparison_pca_\d+_n\d+"
+            r"(?:\.joblib|\.csv|\.metadata\.json|_gene_loadings_sorted_PC1\.csv)"
+        )
+        sampled_plot = re.compile(
+            re.escape(f"{_safe_filename(dataset_name)}_PCA_with_TCGA_"
+                      f"{FixedGeneFilter.workflow_version}")
+            + r"_n\d+_PC\d+_PC\d+\.png"
+        )
+        artifacts.extend(
+            path for path in sampled_dir.iterdir()
+            if sampled_model.fullmatch(path.name) or sampled_plot.fullmatch(path.name)
+        )
+    for path in artifacts:
+        if path.is_symlink():
+            raise ValueError(f"Post-GEP artifact must not be a symlink: {path}")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"Post-GEP artifact must be a regular file: {path}")
+    return sorted({path.absolute() for path in artifacts if path.exists()})
+
+
+def _prepare_post_gep_quantile_rebuild(
+    dataset_name: str,
+    generated_file: str | Path,
+    gene_params: ResolvedGeneFilteringParams,
+    filtering_space: FixedGeneFilter,
+) -> Path | None:
+    """Archive old derived outputs after explicit removal of the filtered H5AD."""
+    generated_file = Path(generated_file).absolute()
+    result_dir = Path(filtering_space.result_dir).absolute()
+    marker = _post_gep_rebuild_marker_path(result_dir)
+    enabled = (
+        gene_params.enabled
+        and gene_params.filtering_type == "high_corr_gene_and_quantile_range"
+    )
+    if not enabled:
+        if marker.exists():
+            raise ValueError(
+                f"An unfinished post-GEP rebuild exists at {marker}; "
+                "resume it with the original filtering configuration."
+            )
+        return None
+    output = _build_filtered_h5ad_path(
+        generated_file, gene_params.filtering_type, gene_params.filtered_dataset_postfix
+    )
+    if not marker.exists():
+        summary_path = result_dir / "mixed_dataset_summary.json"
+        if summary_path.exists():
+            try:
+                previous_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Unreadable Mixed dataset summary: {summary_path}") from exc
+            recorded_filtered = previous_summary.get("filtered_bulk_gep_file")
+            if recorded_filtered and Path(recorded_filtered).resolve() != output.resolve():
+                raise ValueError(
+                    "The filtered output path differs from the previous Mixed summary. "
+                    "Keep the original filtered dataset postfix or use a new dataset name."
+                )
+        if output.exists():
+            return None
+
+    identity = json.loads(json.dumps({
+        "dataset_name": dataset_name,
+        "generated_file": str(generated_file),
+        "filtered_file": str(output),
+        "filtering_identity_hash": identity_hash(filtering_space.identity),
+        "quantile_range": gene_params.quantile_range,
+        "quantile_columns": gene_params.q_col_name,
+        "plot_pca": gene_params.plot_pca,
+        "pca_n_components": gene_params.pca_n_components,
+        "pca_figsize": gene_params.pca_figsize,
+        "n_sample_for_pca": gene_params.n_sample_for_pca,
+        "pca_sample_seed": getattr(gene_params, "pca_sample_seed", None),
+        "incremental_pca_batch_size": getattr(gene_params, "incremental_pca_batch_size", None),
+    }, default=str))
+    if marker.exists():
+        try:
+            state = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Unreadable post-GEP rebuild journal: {marker}") from exc
+        if state.get("identity") != identity:
+            raise ValueError(
+                f"Post-GEP rebuild configuration differs from unfinished journal {marker}; "
+                "resume with the original configuration."
+            )
+    else:
+        state = {"identity": identity, "phase": "new"}
+
+    if state.get("phase") in ("new", "processing"):
+        backup = result_dir / "post_gep_quantile_backups" / uuid.uuid4().hex
+        artifacts = _post_gep_rebuild_artifacts(
+            dataset_name, output, filtering_space
+        )
+        state.update(
+            phase="archiving",
+            backup_dir=str(backup),
+            artifacts=[str(path) for path in artifacts],
+        )
+        _write_json_atomically(marker, state)
+    elif state.get("phase") != "archiving":
+        raise ValueError(f"Invalid post-GEP rebuild journal state: {marker}")
+
+    backup = Path(state["backup_dir"])
+    backup_root = result_dir / "post_gep_quantile_backups"
+    if backup.parent != backup_root or not re.fullmatch(r"[0-9a-f]{32}", backup.name):
+        raise ValueError(f"Invalid post-GEP backup location in {marker}.")
+    if backup_root.is_symlink() or backup.is_symlink():
+        raise ValueError(f"Post-GEP backup directory must not be a symlink: {backup}")
+    backup.mkdir(parents=True, exist_ok=True)
+    summary_path = result_dir / "mixed_dataset_summary.json"
+    summary_backup = backup / "mixed_dataset_summary.json"
+    if summary_path.is_file() and not summary_backup.exists():
+        shutil.copy2(summary_path, summary_backup)
+
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Unreadable Mixed dataset summary: {summary_path}") from exc
+        summary["status"] = "post_gep_quantile_rebuild_in_progress"
+        _write_json_atomically(summary_path, summary)
+
+    owned = set(_post_gep_rebuild_artifacts(
+        dataset_name, output, filtering_space
+    ))
+    for source_str in state["artifacts"]:
+        source = Path(source_str)
+        try:
+            relative = source.relative_to(generated_file.parent)
+        except ValueError as exc:
+            raise ValueError(f"Invalid post-GEP artifact path in {marker}: {source}") from exc
+        if ".." in relative.parts:
+            raise ValueError(f"Invalid post-GEP artifact path in {marker}: {source}")
+        target = backup / "artifacts" / relative
+        if source.exists():
+            if source not in owned or target.exists():
+                raise ValueError(f"Invalid or conflicting post-GEP artifact in {marker}: {source}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(target)
+        elif not target.exists():
+            raise ValueError(f"Post-GEP rebuild artifact is missing from source and backup: {source}")
+
+    state["phase"] = "processing"
+    _write_json_atomically(marker, state)
+    logging.info("Archived post-GEP quantile artifacts in %s", backup)
+    return marker
+
+
 def _post_gep_gene_quantile_filter(
     generated_file: str | Path,
     gene_params: ResolvedGeneFilteringParams,
@@ -2280,6 +2503,12 @@ def _post_gep_gene_quantile_filter(
     passing = set(passing_genes)
     final_genes = [gene for gene in filtering_space.genes if gene in passing]
     if not final_genes:
+        if _post_gep_rebuild_marker_path(filtering_space.result_dir).exists():
+            raise ValueError(
+                "Post-GEP gene quantile filtering retained no genes. The unfinished "
+                "rebuild is bound to its current configuration; use a new dataset "
+                "name/output location to try a different quantile range."
+            )
         raise ValueError(
             "Post-GEP gene quantile filtering retained no genes. "
             "Relax gene_filtering_quantile_range or use another dataset."
@@ -2372,7 +2601,9 @@ def _post_gep_gene_quantile_filter(
                 dtype=np.float32,
                 copy=False,
             )
-        filtered.write_h5ad(output, compression="gzip")
+        temporary_output = output.with_name(output.name + ".tmp")
+        filtered.write_h5ad(temporary_output, compression="gzip")
+        temporary_output.replace(output)
         write_metadata(metadata_path, artifact_identity)
 
     if not gene_list_file.exists():
@@ -3770,8 +4001,7 @@ def _build_mixed_dataset_summary(
             ),
             **filtering_space.stats(),
         })
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    _write_json_atomically(summary_path, summary)
     return summary_path
 
 

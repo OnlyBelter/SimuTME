@@ -302,6 +302,13 @@ to 1,000,000 and transformed to `log2(TPM + 1)`. This is distinct from
 `gep_gene_quantile_range`, which checks profiles against per-gene ranges on
 the fixed list G.
 
+To change this range for an existing accepted Mixed dataset, remove only the
+post-filter H5AD identified by `filtered_bulk_gep_file` in its summary and
+rerun with the updated range and the same output name and postfix. SimuTME
+validates and reuses the accepted data, archives old post-filter artifacts,
+and regenerates the filtered output. See the post-GEP filtering procedure in
+`workflow_mixed.md` for details.
+
 `gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
 `gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
 The supported methods are `median_gep`, `mean_gep`, `mgep`, and `linear_mmd`.

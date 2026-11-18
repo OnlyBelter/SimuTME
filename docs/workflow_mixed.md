@@ -403,6 +403,25 @@ the filtered dataset and G2 with the matching TCGA reference. It fits this
 PCA separately from the existing pre-filter figure, so PC coordinates are
 not directly comparable between the two plots.
 
+To recompute the post-GEP gene filter without regenerating Mixed profiles:
+
+1. Change `gene_filtering_quantile_range` in the existing dataset configuration.
+2. Remove only the filtered `.h5ad` identified by `filtered_bulk_gep_file` in
+   `mixed_dataset_summary.json`. Keep the primary accepted `.h5ad`, the cell
+   fractions, and all generation caches.
+3. Rerun the same dataset configuration with the original output name and
+   filtered dataset postfix.
+
+After validating the accepted data and generation identity, SimuTME moves the
+old post-filter metadata, gene list, and PCA artifacts into a unique directory
+under `post_gep_quantile_backups/`. It then regenerates the filtered H5AD and
+post-filter PCA and updates the summary. It retains pre-filter PCA and
+generation artifacts. If the filtered H5AD still exists, incompatible quantile
+settings fail instead of overwriting it. If a rebuild is interrupted, rerun
+with the same configuration to resume; the summary indicates an in-progress
+rebuild until all requested outputs are complete. Run only one process for a
+given dataset at a time; the rebuild journal is not a concurrency lock.
+
 The fixed list G is shared by normalization, optional per-gene range checks,
 reference-only GEP-filtering PCA, and accepted-profile export. With
 `gene_filtering: false` and `gep_filtering: true`, G starts from the common

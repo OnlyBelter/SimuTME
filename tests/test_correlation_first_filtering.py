@@ -769,3 +769,248 @@ def test_workflow_without_gep_filtering_uses_method_independent_output_tag(workf
     assert summary["gep_filtering_method"] is None
     assert summary["mgep_distance_input_n_samples"] == 0
     assert summary["mgep_distance_kept_n_samples"] == 0
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_missing_post_quantile_h5ad_rebuilds_without_simulation(
+    workflow_case, monkeypatch, changed,
+):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range",
+        lambda **kwargs: ["a"] if kwargs["quantile_range"][0] == 0.05 else ["a", "b"],
+    )
+    output = Path(workflow.run_bulk_simulation("target", params, config))
+    original = read_summary(output)
+    filtered = Path(original["filtered_bulk_gep_file"])
+    old_metadata = filtered.with_suffix(".metadata.json").read_bytes()
+    old_gene_list = Path(original["gene_list_file"]).read_bytes()
+    accepted_before = output.read_bytes()
+    accepted_samples = ad.read_h5ad(output).obs_names.tolist()
+    if changed:
+        params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    filtered.unlink()
+
+    assert Path(workflow.run_bulk_simulation("target", params, config)) == output
+    assert len(batches) == 1
+    assert output.read_bytes() == accepted_before
+    rebuilt = read_summary(output)
+    assert "status" not in rebuilt
+    assert rebuilt["post_gep_gene_quantile_filter"]["quantile_range"] == (
+        params["gene_filtering_quantile_range"]
+    )
+    result = ad.read_h5ad(filtered)
+    assert result.obs_names.tolist() == accepted_samples
+    assert result.var_names.tolist() == (["a"] if changed else ["a", "b"])
+    np.testing.assert_allclose(
+        np.expm1(result.X * np.log(2)).sum(axis=1), 1e6, rtol=1e-5
+    )
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    assert not workflow._post_gep_rebuild_marker_path(result_dir).exists()
+    backups = list((result_dir / "post_gep_quantile_backups").iterdir())
+    assert len(backups) == 1
+    assert list(backups[0].rglob(filtered.with_suffix(".metadata.json").name))[0].read_bytes() == old_metadata
+    assert list(backups[0].rglob("gene_list_post_gep_quantile_range.csv"))[0].read_bytes() == old_gene_list
+    assert workflow.run_bulk_simulation("target", params, config) == str(output)
+    assert len(batches) == 1
+
+
+def test_post_quantile_rebuild_recovers_after_summary_failure(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = Path(workflow.run_bulk_simulation("target", params, config))
+    original = read_summary(output)
+    filtered = Path(original["filtered_bulk_gep_file"])
+    accepted_before = output.read_bytes()
+    filtered.unlink()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    build_summary = workflow._build_mixed_dataset_summary
+    monkeypatch.setattr(
+        workflow, "_build_mixed_dataset_summary",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("injected failure")),
+    )
+    with pytest.raises(RuntimeError, match="injected failure"):
+        workflow.run_bulk_simulation("target", params, config)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    marker = workflow._post_gep_rebuild_marker_path(result_dir)
+    assert marker.is_file()
+    assert filtered.is_file()
+    assert read_summary(output)["status"] == "post_gep_quantile_rebuild_in_progress"
+
+    saved_output = output.with_name("temporarily_saved_accepted.h5ad")
+    output.rename(saved_output)
+    with pytest.raises(ValueError, match="accepted Mixed H5AD is missing"):
+        workflow.run_bulk_simulation("target", params, config)
+    saved_output.rename(output)
+    assert len(batches) == 1
+
+    params["gene_filtering_quantile_range"] = [0.1, 0.5, 0.9]
+    with pytest.raises(ValueError, match="unfinished journal"):
+        workflow.run_bulk_simulation("target", params, config)
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    monkeypatch.setattr(workflow, "_build_mixed_dataset_summary", build_summary)
+    assert workflow.run_bulk_simulation("target", params, config) == str(output)
+    assert not marker.exists()
+    assert "status" not in read_summary(output)
+    assert len(list((result_dir / "post_gep_quantile_backups").iterdir())) == 2
+    assert len(batches) == 1
+    assert output.read_bytes() == accepted_before
+
+
+def test_post_quantile_rebuild_preserves_incompatible_existing_h5ad(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = workflow.run_bulk_simulation("target", params, config)
+    filtered = Path(read_summary(output)["filtered_bulk_gep_file"])
+    original = filtered.read_bytes()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        workflow.run_bulk_simulation("target", params, config)
+    assert filtered.read_bytes() == original
+    assert len(batches) == 1
+
+
+def test_post_quantile_rebuild_rejects_generation_identity_change(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = workflow.run_bulk_simulation("target", params, config)
+    summary = read_summary(output)
+    filtered = Path(summary["filtered_bulk_gep_file"])
+    metadata = filtered.with_suffix(".metadata.json")
+    old_metadata = metadata.read_bytes()
+    filtered.unlink()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    params["gep_norm_ord"] = 2
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        workflow.run_bulk_simulation("target", params, config)
+    assert metadata.read_bytes() == old_metadata
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    assert not workflow._post_gep_rebuild_marker_path(result_dir).exists()
+    assert len(batches) == 1
+
+
+def test_post_quantile_new_postfix_does_not_authorize_rebuild(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = workflow.run_bulk_simulation("target", params, config)
+    summary = read_summary(output)
+    filtered = Path(summary["filtered_bulk_gep_file"])
+    original = filtered.read_bytes()
+    params["gene_filtering_filtered_dataset_postfix"] = "another_postfix"
+    with pytest.raises(ValueError, match="original filtered dataset postfix"):
+        workflow.run_bulk_simulation("target", params, config)
+    assert filtered.read_bytes() == original
+    assert Path(summary["gene_list_file"]).exists()
+    assert len(batches) == 1
+
+
+def test_post_quantile_custom_postfix_reuses_and_rebuilds(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+        gene_filtering_filtered_dataset_postfix="custom_quantile",
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = workflow.run_bulk_simulation("target", params, config)
+    filtered = Path(read_summary(output)["filtered_bulk_gep_file"])
+    assert filtered.name.endswith("_custom_quantile.h5ad")
+    assert workflow.run_bulk_simulation("target", params, config) == output
+    filtered.unlink()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    assert workflow.run_bulk_simulation("target", params, config) == output
+    assert filtered.is_file()
+    assert len(batches) == 1
+
+
+def test_post_quantile_rebuild_with_no_genes_remains_incomplete(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range",
+        lambda **kwargs: ["a", "b"] if kwargs["quantile_range"][0] == 0 else [],
+    )
+    output = Path(workflow.run_bulk_simulation("target", params, config))
+    filtered = Path(read_summary(output)["filtered_bulk_gep_file"])
+    accepted_before = output.read_bytes()
+    filtered.unlink()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+
+    with pytest.raises(ValueError, match="retained no genes"):
+        workflow.run_bulk_simulation("target", params, config)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    assert workflow._post_gep_rebuild_marker_path(result_dir).is_file()
+    assert read_summary(output)["status"] == "post_gep_quantile_rebuild_in_progress"
+    assert not filtered.exists()
+    assert output.read_bytes() == accepted_before
+    assert len(batches) == 1
+
+
+def test_post_quantile_rebuild_recovers_after_partial_h5ad_write(workflow_case, monkeypatch):
+    config, params, _, batches = workflow_case
+    params.update(
+        gene_filtering_type="high_corr_gene_and_quantile_range",
+        gene_filtering_quantile_range=[0.0, 0.5, 1.0],
+    )
+    monkeypatch.setattr(
+        workflow, "get_gene_list_filtered_by_quantile_range", lambda **kwargs: ["a", "b"]
+    )
+    output = Path(workflow.run_bulk_simulation("target", params, config))
+    filtered = Path(read_summary(output)["filtered_bulk_gep_file"])
+    filtered.unlink()
+    params["gene_filtering_quantile_range"] = [0.05, 0.5, 0.95]
+    original_write = ad.AnnData.write_h5ad
+
+    def interrupted_write(adata, filename, *args, **kwargs):
+        Path(filename).write_bytes(b"incomplete")
+        raise OSError("interrupted H5AD write")
+
+    monkeypatch.setattr(ad.AnnData, "write_h5ad", interrupted_write)
+    with pytest.raises(OSError, match="interrupted H5AD write"):
+        workflow.run_bulk_simulation("target", params, config)
+    temporary = filtered.with_name(filtered.name + ".tmp")
+    assert temporary.read_bytes() == b"incomplete"
+    assert not filtered.exists()
+    assert read_summary(output)["status"] == "post_gep_quantile_rebuild_in_progress"
+
+    monkeypatch.setattr(ad.AnnData, "write_h5ad", original_write)
+    assert workflow.run_bulk_simulation("target", params, config) == str(output)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target")
+    backups = list((result_dir / "post_gep_quantile_backups").rglob(temporary.name))
+    assert len(backups) == 1 and backups[0].read_bytes() == b"incomplete"
+    assert ad.read_h5ad(filtered).var_names.tolist() == ["a", "b"]
+    assert not temporary.exists()
+    assert len(batches) == 1
