@@ -154,7 +154,49 @@ class FixedGeneFilter:
         self.reference_file = Path(reference_file)
         self.reference_linear = normalize_selected(reference_linear, self.genes, "Reference")
         self.reference_log = np.log2(self.reference_linear + 1)
+        self.reference_log_memmap = None
         self.gep = gep_params
+        self.reference_sample_count = len(self.reference_log)
+        requested_n_subgroup = getattr(self.gep, "n_subgroup", None)
+        if requested_n_subgroup is not None and (
+            isinstance(requested_n_subgroup, bool)
+            or not isinstance(requested_n_subgroup, (int, np.integer))
+            or requested_n_subgroup <= 0
+        ):
+            raise ValueError('"n_subgroup" must be a positive integer or null.')
+        self.n_subgroup = (
+            self.reference_sample_count
+            if requested_n_subgroup is None else int(requested_n_subgroup)
+        )
+        if self.n_subgroup > self.reference_sample_count:
+            raise ValueError(
+                f'"n_subgroup" ({self.n_subgroup}) exceeds the {self.reference_sample_count} '
+                "eligible GEP reference samples."
+            )
+        self.uses_subgroup_reference = self.n_subgroup < self.reference_sample_count
+        self.last_batch_pca_n_components = None
+        self.last_batch_id = None
+        if requested_n_subgroup is not None:
+            if (not self.gep.enabled or self.gep.filtering_method != "median_gep"
+                    or not self.gep.filtering_in_pca_space):
+                raise ValueError(
+                    '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
+                )
+            component_target = self.gep.pca_n_components
+            minimum_samples = (
+                max(2, int(component_target))
+                if isinstance(component_target, (int, np.integer))
+                else 2
+            )
+            maximum_components = min(self.n_subgroup, len(self.genes))
+            if self.n_subgroup < minimum_samples or (
+                isinstance(component_target, (int, np.integer))
+                and component_target > maximum_components
+            ):
+                raise ValueError(
+                    f'"n_subgroup"={self.n_subgroup} and {len(self.genes)} selected genes '
+                    "are too small for the configured GEP-filtering PCA components."
+                )
         self.result_dir = Path(result_dir)
         self.gene_list_file = self.result_dir / "fixed_filtering_gene_list.csv"
         self.correlation_file = str(correlation_file) if correlation_file else None
@@ -184,6 +226,12 @@ class FixedGeneFilter:
             "distance_method": self.gep.filtering_method,
             "distance_quantiles": list(self.gep.gep_filtering_quantile),
             "distance_norm": self.gep.norm_ord,
+            "n_subgroup": self.n_subgroup,
+            "reference_sample_count": self.reference_sample_count,
+            "reference_sampling": (
+                "per-candidate-batch" if self.uses_subgroup_reference
+                else "full-reference"
+            ),
         }
         if self.gep.filtering_by_gene_range:
             self.identity["range_space"] = "normalized-log2-tpm-plus-1-v1"
@@ -250,6 +298,8 @@ class FixedGeneFilter:
                     len(self.genes), self.shared_n_genes, self.generation_n_genes)
 
     def validate_model(self):
+        if self.uses_subgroup_reference:
+            return
         if self.model_path.exists() or self.model_metadata_path.exists():
             validate_metadata(self.model_metadata_path, self.pca_identity)
             if not self.model_path.exists():
@@ -308,6 +358,10 @@ class FixedGeneFilter:
         """Prepare the same reference distances and center used for filtering."""
         if self.reference_distances is not None:
             return self.reference_distances
+        if self.uses_subgroup_reference:
+            raise RuntimeError(
+                "Reduced n_subgroup filtering requires a candidate batch reference."
+            )
         if self.gep.filtering_method == "mgep":
             self._prepare_mgep()
             return self.reference_distances
@@ -327,6 +381,66 @@ class FixedGeneFilter:
         if self.gep.filtering_method == "linear_mmd":
             self.reference_distances = self.reference_distances ** 2
         return self.reference_distances
+
+    def _reference_log_rows(self, indices):
+        if self.reference_log is not None:
+            return self.reference_log.iloc[indices].to_numpy(dtype=np.float64, copy=False)
+        if self.reference_log_memmap is not None:
+            return np.asarray(self.reference_log_memmap[indices], dtype=np.float64)
+        raise RuntimeError("The full GEP reference is unavailable for subgroup sampling.")
+
+    def _sample_subgroup_indices(self, seed=None):
+        sampler = np.random if seed is None else np.random.default_rng(seed)
+        return sampler.choice(
+            self.reference_sample_count, size=self.n_subgroup, replace=False,
+        )
+
+    def prepare_batch_reference(self, batch_id=None, seed=None):
+        """Fit a transient PCA reference for one candidate batch."""
+        if not self.uses_subgroup_reference:
+            return self.prepare_distance_reference()
+        if self.reference_sample_count <= 0:
+            raise ValueError("GEP filtering reference has no samples for subgroup sampling.")
+
+        indices = self._sample_subgroup_indices(seed)
+        reference = self._reference_log_rows(indices)
+        if not np.isfinite(reference).all():
+            raise ValueError("Sampled GEP reference contains non-finite log expression.")
+
+        self.pca = PCA(
+            n_components=self.gep.pca_n_components,
+            svd_solver="full",
+            random_state=42,
+        )
+        self.pca.fit(reference)
+        self.reference_coordinates = safe_pca_transform(
+            self.pca, reference, label="Sampled reference log2(TPM + 1)"
+        )
+        self.distance_center = np.median(self.reference_coordinates, axis=0)
+        self.reference_distances = np.linalg.norm(
+            self.reference_coordinates - self.distance_center,
+            ord=self.gep.norm_ord,
+            axis=1,
+        )
+        self.last_batch_pca_n_components = int(self.pca.n_components_)
+        self.last_batch_id = batch_id
+        logger.info(
+            "GEP PCA subgroup for batch %s: %d/%d reference samples; %d PCs.",
+            batch_id if batch_id is not None else "unknown",
+            self.n_subgroup,
+            self.reference_sample_count,
+            self.last_batch_pca_n_components,
+        )
+        return self.reference_distances
+
+    def clear_batch_reference(self):
+        """Release transient PCA state after filtering a subgroup batch."""
+        if not self.uses_subgroup_reference:
+            return
+        self.pca = None
+        self.reference_coordinates = None
+        self.distance_center = None
+        self.reference_distances = None
 
     def distance_from_normalized(self, normalized):
         """Calculate profile distances from selected-gene linear TPM."""
@@ -352,7 +466,10 @@ class FixedGeneFilter:
             self.range_bounds = self.reference_log.quantile([lower, upper])
         return self.range_bounds
 
-    def filter(self, simulated_linear):
+    def filter(self, simulated_linear, batch_id=None, subgroup_seed=None):
+        if self.uses_subgroup_reference:
+            self.last_batch_pca_n_components = None
+            self.last_batch_id = batch_id
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
             return normalized
@@ -383,18 +500,23 @@ class FixedGeneFilter:
                 len(mask),
             )
             return normalized.loc[mask].copy()
-        ref_distance = self.prepare_distance_reference()
-        sim_distance = self.distance_from_normalized(normalized)
-        lower, upper = self.gep.gep_filtering_quantile
-        mask = sim_distance <= np.quantile(ref_distance, upper)
-        if lower is not None:
-            mask &= sim_distance >= np.quantile(ref_distance, lower)
-        self.distance_input += len(normalized)
-        self.distance_kept += int(mask.sum())
-        logger.info("%s-distance acceptance: %d/%d profiles.",
-                    "PC" if self.gep.filtering_in_pca_space else "Log-expression",
-                    mask.sum(), len(mask))
-        return normalized.loc[mask].copy()
+        if self.uses_subgroup_reference:
+            self.prepare_batch_reference(batch_id=batch_id, seed=subgroup_seed)
+        try:
+            ref_distance = self.prepare_distance_reference()
+            sim_distance = self.distance_from_normalized(normalized)
+            lower, upper = self.gep.gep_filtering_quantile
+            mask = sim_distance <= np.quantile(ref_distance, upper)
+            if lower is not None:
+                mask &= sim_distance >= np.quantile(ref_distance, lower)
+            self.distance_input += len(normalized)
+            self.distance_kept += int(mask.sum())
+            logger.info("%s-distance acceptance: %d/%d profiles.",
+                        "PC" if self.gep.filtering_in_pca_space else "Log-expression",
+                        mask.sum(), len(mask))
+            return normalized.loc[mask].copy()
+        finally:
+            self.clear_batch_reference()
 
     def stats(self):
         stats = {

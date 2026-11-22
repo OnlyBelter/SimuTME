@@ -97,6 +97,7 @@ parameters:
   gep_filtering_in_pca_space: true  # Optional PCA-space distance filtering during Mixed generation
   gep_pca_n_components: 0.9  # Optional PCA dimensionality or explained-variance target for GEP-level filtering
   gep_norm_ord: 1  # Optional norm order for GEP-level distance filtering
+  n_subgroup: null  # Optional PCA median_gep reference samples per candidate batch; null uses the full reference
   gene_filtering_enabled_default: false  # Optional global default for Mixed gene-level filtering when a dataset does not set `gene_filtering`
   gene_filtering_type: "high_corr_gene"  # Select genes before target generation; no expression-range gene selection
   calculate_gene_cell_prop_correlation: false  # Optional switch for saving a full, unfiltered Mixed gene/cell-fraction correlation matrix

@@ -34,7 +34,9 @@ def setup_parallel(tmp_path, monkeypatch):
     ).write_h5ad(source)
     reference = pd.DataFrame({"g1": [0., 5., 10.], "g2": [10., 5., 0.]})
 
-    def create(name, workers=1, seed=42, method="mgep", quantiles=(None, 1.0)):
+    def create(
+            name, workers=1, seed=42, method="mgep", quantiles=(None, 1.0),
+            n_subgroup=None):
         output = tmp_path / name
         generator = BulkGEPGenerator(
             simu_bulk_dir=output, merged_sc_dataset_file_path=None,
@@ -49,6 +51,7 @@ def setup_parallel(tmp_path, monkeypatch):
                 filtering_method=method,
                 filtering_in_pca_space=(method == "median_gep"),
                 gep_filtering_quantile=quantiles,
+                n_subgroup=n_subgroup,
             ),
             output / "test", 3, 2,
         )
@@ -57,6 +60,7 @@ def setup_parallel(tmp_path, monkeypatch):
             filtering=True, filtering_method=method, filtering_space=space,
             filtering_in_pca_space=(method == "median_gep"), norm_ord=1,
             mixed_candidate_workers=workers, mixed_candidate_seed=seed,
+            n_subgroup=n_subgroup,
         )
         return generator, config
 
@@ -94,6 +98,42 @@ def test_parallel_workers_produce_identical_ordered_outputs(setup_parallel, meth
     else:
         assert first.gep_filtering_input_n_samples == first.gep_filtering_kept_n_samples == 15
         assert checkpoint["next_batch"] == 3
+
+
+def test_parallel_subgroup_filtering_is_stable_across_worker_counts(setup_parallel):
+    first, first_config = setup_parallel(
+        "subgroup-one", workers=1, method="median_gep",
+        quantiles=(None, 1.0), n_subgroup=2,
+    )
+    second, second_config = setup_parallel(
+        "subgroup-two", workers=2, method="median_gep",
+        quantiles=(None, 1.0), n_subgroup=2,
+    )
+    first.generate_gep(first_config)
+    second.generate_gep(second_config)
+
+    for first_path, second_path in (
+        (first.generated_bulk_gep_csv_fp, second.generated_bulk_gep_csv_fp),
+        (first.generated_cell_fraction_fp, second.generated_cell_fraction_fp),
+        (first.sampled_sc_cell_id_file_path, second.sampled_sc_cell_id_file_path),
+    ):
+        pd.testing.assert_frame_equal(pd.read_csv(first_path), pd.read_csv(second_path))
+
+    metadata = json.loads((first.filtering_space.result_dir / "filtering_metadata.json").read_text())
+    checkpoint = json.loads(
+        (first.filtering_space.result_dir / "parallel_candidate_checkpoint.json").read_text()
+    )
+    assert metadata["identity"]["n_subgroup"] == 2
+    assert metadata["identity"]["reference_sample_count"] == 3
+    assert metadata["generator_stats"]["gep_filtering_n_pcs_min"] == 1
+    assert metadata["generator_stats"]["gep_filtering_n_pcs_max"] == 1
+    assert (
+        metadata["generator_stats"]["gep_filtering_subgroup_pca_batches"]
+        == checkpoint["next_batch"]
+    )
+    assert checkpoint["generator_stats"] == metadata["generator_stats"]
+    assert not (first.filtering_space.result_dir / "gep_filtering_pca.joblib").exists()
+    assert first.filtering_space.pca is None
 
 
 @pytest.mark.parametrize("method", ["mgep", "median_gep"])
@@ -151,6 +191,48 @@ def test_parallel_resume_after_committed_batch(setup_parallel, monkeypatch, meth
         pd.read_csv(resumed.generated_cell_fraction_fp),
     )
     assert baseline.filtering_space.stats() == resumed.filtering_space.stats()
+
+
+def test_parallel_subgroup_resume_reuses_batch_reference(setup_parallel, monkeypatch):
+    options = {
+        "method": "median_gep",
+        "quantiles": (None, 1.0),
+        "n_subgroup": 2,
+    }
+    baseline, baseline_config = setup_parallel("subgroup-baseline", workers=1, **options)
+    baseline.generate_gep(baseline_config)
+
+    interrupted, interrupted_config = setup_parallel(
+        "subgroup-resume", workers=2, **options,
+    )
+    save_checkpoint = interrupted._save_parallel_checkpoint
+
+    def interrupt_after_first_batch():
+        save_checkpoint()
+        if interrupted.n_round == 1:
+            raise RuntimeError("simulated subgroup interruption")
+
+    monkeypatch.setattr(interrupted, "_save_parallel_checkpoint", interrupt_after_first_batch)
+    with pytest.raises(RuntimeError, match="simulated subgroup interruption"):
+        interrupted.generate_gep(interrupted_config)
+
+    resumed, resumed_config = setup_parallel("subgroup-resume", workers=1, **options)
+    resumed.generate_gep(resumed_config)
+    pd.testing.assert_frame_equal(
+        pd.read_csv(baseline.generated_bulk_gep_csv_fp),
+        pd.read_csv(resumed.generated_bulk_gep_csv_fp),
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(baseline.generated_cell_fraction_fp),
+        pd.read_csv(resumed.generated_cell_fraction_fp),
+    )
+    assert baseline.filtering_space.stats() == resumed.filtering_space.stats()
+    assert baseline.gep_filtering_n_pcs_min == resumed.gep_filtering_n_pcs_min
+    assert baseline.gep_filtering_n_pcs_max == resumed.gep_filtering_n_pcs_max
+    assert (
+        baseline.gep_filtering_subgroup_pca_batches
+        == resumed.gep_filtering_subgroup_pca_batches
+    )
 
 
 def test_parallel_rejects_partial_output_and_changed_seed(setup_parallel):

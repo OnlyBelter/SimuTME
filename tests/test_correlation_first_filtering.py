@@ -39,6 +39,112 @@ def make_space(tmp_path, **overrides):
     )
 
 
+def test_reduced_n_subgroup_samples_per_batch_and_discards_pca(tmp_path):
+    space = make_space(
+        tmp_path,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        gep_filtering_quantile=(0.0, 1.0),
+        n_subgroup=2,
+    )
+
+    first = space._sample_subgroup_indices(seed=42)
+    assert len(first) == len(set(first.tolist())) == 2
+    np.testing.assert_array_equal(first, space._sample_subgroup_indices(seed=42))
+    draws = {
+        tuple(space._sample_subgroup_indices(seed=seed).tolist())
+        for seed in range(10)
+    }
+    assert len(draws) > 1
+
+    candidates = space.reference_linear.iloc[first].copy()
+    accepted = space.filter(candidates, batch_id=3, subgroup_seed=42)
+    assert len(accepted) == len(candidates)
+    assert space.last_batch_pca_n_components == 1
+    assert space.pca is None
+    assert space.reference_coordinates is None
+    assert space.reference_distances is None
+    assert not space.model_path.exists()
+
+    second_indices = space._sample_subgroup_indices(seed=43)
+    second_candidates = space.reference_linear.iloc[second_indices].copy()
+    assert len(space.filter(
+        second_candidates, batch_id=4, subgroup_seed=43,
+    )) == len(second_candidates)
+    assert space.last_batch_id == 4
+    assert space.last_batch_pca_n_components == 1
+    assert space.pca is None
+
+
+def test_n_subgroup_must_fit_reference_and_pca_target(tmp_path):
+    with pytest.raises(ValueError, match="exceeds the 3 eligible"):
+        make_space(
+            tmp_path / "too-large",
+            filtering_method="median_gep",
+            filtering_in_pca_space=True,
+            pca_n_components=1,
+            n_subgroup=4,
+        )
+    with pytest.raises(ValueError, match="too small for the configured"):
+        make_space(
+            tmp_path / "too-small",
+            filtering_method="median_gep",
+            filtering_in_pca_space=True,
+            pca_n_components=1,
+            n_subgroup=1,
+        )
+
+
+def test_full_reference_n_subgroup_reuses_cached_pca(tmp_path):
+    space = make_space(
+        tmp_path,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=3,
+    )
+
+    assert space.uses_subgroup_reference is False
+    first_distances = space.prepare_distance_reference()
+    first_pca = space.pca
+    second_distances = space.prepare_distance_reference()
+    assert space.pca is first_pca
+    np.testing.assert_array_equal(first_distances, second_distances)
+    assert space.model_path.exists()
+
+
+def test_subgroup_does_not_change_full_reference_gene_range_bounds(tmp_path):
+    space = make_space(
+        tmp_path,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=2,
+        filtering_by_gene_range=True,
+        gene_quantile_range=[0.0, 0.5, 1.0],
+    )
+
+    expected = space.reference_log.quantile([0.0, 1.0])
+    pd.testing.assert_frame_equal(space.prepare_range_reference(), expected)
+
+
+def test_reduced_subgroup_skips_pooled_distance_plot(tmp_path, caplog):
+    caplog.set_level("INFO")
+    space = make_space(
+        tmp_path,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=2,
+    )
+
+    assert workflow._save_gep_distance_distribution(
+        tmp_path / "not-read.h5ad", space,
+    ) == {}
+    assert "batch-specific PCA spaces" in caplog.text
+
+
 def test_selection_uses_only_target_types_and_deterministic_ties():
     correlations = pd.DataFrame(
         {"CT1": [0.8, 0.8, np.nan, 0.1], "CT2": [0.0, 0.0, np.inf, 0.7],

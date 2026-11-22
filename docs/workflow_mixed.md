@@ -350,14 +350,19 @@ mixed_candidate_seed: 42
 ```
 
 For `median_gep`, also set `gep_filtering_in_pca_space: true` and
-`gep_norm_ord: 1`. The coordinator fits or loads the reference PCA once, and
-the workers apply that PCA and the configured reference-distance quantiles.
-Each spawned worker holds its own PCA state.
+`gep_norm_ord: 1`. With `n_subgroup` unset or equal to the resolved reference
+size, the coordinator fits or loads the full-reference PCA once and workers
+reuse it. With a smaller `n_subgroup`, each candidate batch samples its own
+reference rows and fits a transient PCA, median, and distance distribution;
+all candidates in that batch use the same fitted state. Each spawned worker
+fits transient batch models as needed; these models are not saved.
 
 Start with a fresh dataset name and output location. Set
 `mixed_sct_loading_mode: "eager"` globally, or set the auto eager threshold
 high enough for the SCT reference. The temporary directory specified by
-`TMPDIR` must have space for a shared copy of the SCT expression matrix.
+`TMPDIR` must have space for a shared copy of the SCT expression matrix and,
+when reduced `n_subgroup` filtering is enabled, the read-only log-expression
+GEP reference matrix.
 Parallel workers preserve the configured filtering and sampling rules, but
 their seeded random draws differ from existing serial runs.
 
@@ -448,13 +453,42 @@ lower value to `null` or `0` to apply only the upper cutoff.
 The other centroid methods use `log2(TPM + 1)` values, either in G or in
 reference-fitted PCA space according to `filtering_in_pca_space`.
 
-Every distance-filtered Mixed dataset saves
-`gep_filtering_distance_distribution.png` and `.svg` in its result directory.
+For PCA-space `median_gep`, `parameters.n_subgroup` optionally limits the
+reference cohort used to fit the PCA and calculate the median and distance
+quantiles for each candidate batch. `null` or an omitted value uses the full
+resolved reference and fits or loads its PCA once. A smaller positive integer
+draws a fresh subgroup without replacement for each candidate batch; batches
+can overlap. The subgroup is drawn from the reference after
+`filtering_ref_types` selection. The transient batch PCA is not saved. Gene
+selection, gene-range bounds, and post-GEP gene-level filtering continue to
+use the full resolved reference. The setting can be overridden per dataset:
+
+```yaml
+parameters:
+  n_subgroup: null
+
+datasets:
+  Mixed_N100K:
+    n_subgroup: 200
+```
+
+In parallel mode, subgroup selection is deterministically derived from
+`mixed_candidate_seed` and the candidate batch ID, so worker count and resume
+do not change a batch's reference subset. In serial mode, selection uses the
+existing NumPy random stream. Values greater than the available reference
+count, nonpositive/noninteger values, or subgroups too small for the PCA target
+fail with an error.
+
+Full-reference distance-filtered Mixed datasets save
+`gep_filtering_distance_distribution.png` and `.svg` in their result directory.
 The figure compares the filtering-reference distances with distances of the
 final saved simulated profiles. Dotted lines mark the applicable reference
 quantile cutoffs. The labels identify the distance space, metric, and sample
 counts. The reference is the cohort used for filtering, including any
 `filtering_ref_types` selection. Rejected candidates are not shown.
+
+Reduced `n_subgroup` runs skip this pooled plot: raw distances from different
+batch-specific PCA spaces are not directly comparable in one histogram.
 
 The figure is regenerated for compatible cached outputs. Saved log-expression
 values are converted back to linear TPM and normalized on G before calculating
@@ -529,6 +563,10 @@ as the actual fitted count, not a second configuration setting. Both PCA
 fields are null when GEP filtering does not use PCA space. Per-count
 comparison artifact paths are listed in `pca_runs`; post-GEP gene-quantile
 PCA paths are listed in `post_gep_quantile_pca_runs`.
+When reduced `n_subgroup` filtering is active, the summary also records the
+resolved subgroup size, full reference sample count, subgroup PCA fit count,
+and minimum/maximum fitted component counts across batches. No per-batch PCA
+model artifacts are written.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with
@@ -581,6 +619,7 @@ and `gene_filtering_reference_file` override their corresponding shared paths.
 - `gep_gene_quantile_range`
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
+- `n_subgroup`
 - `gep_norm_ord`
 - `gene_filtering_enabled_default`
 - `gene_filtering_type`

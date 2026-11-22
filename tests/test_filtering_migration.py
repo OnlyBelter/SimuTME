@@ -230,6 +230,43 @@ def test_resolve_gep_filtering_params_uses_dataset_overrides_and_legacy_gene_ran
     assert resolved.high_corr_gene_list == ["G1", "G2"]
 
 
+def test_resolve_n_subgroup_global_default_dataset_override_and_validation(tmp_path: Path):
+    config = _make_filtering_config(tmp_path)
+    config.n_subgroup = 300
+    params = {
+        "gep_filtering": True,
+        "gep_filtering_method": "median_gep",
+        "gep_filtering_in_pca_space": True,
+    }
+
+    assert _resolve_gep_filtering_params("Mixed_Test", params, config).n_subgroup == 300
+    assert _resolve_gep_filtering_params(
+        "Mixed_Test", {**params, "n_subgroup": 200}, config,
+    ).n_subgroup == 200
+    assert _resolve_gep_filtering_params(
+        "Mixed_Test", {**params, "n_subgroup": None}, config,
+    ).n_subgroup is None
+
+    for invalid in (0, -1, True, 200.0):
+        with pytest.raises(ValueError, match="positive integer or null"):
+            _resolve_gep_filtering_params(
+                "Mixed_Test", {**params, "n_subgroup": invalid}, config,
+            )
+
+    with pytest.raises(ValueError, match="enabled PCA-space"):
+        _resolve_gep_filtering_params(
+            "Mixed_Test",
+            {**params, "gep_filtering_method": "mgep", "n_subgroup": 200},
+            config,
+        )
+    with pytest.raises(ValueError, match="enabled PCA-space"):
+        _resolve_gep_filtering_params(
+            "Mixed_Test",
+            {**params, "gep_filtering_in_pca_space": False, "n_subgroup": 200},
+            config,
+        )
+
+
 @pytest.mark.parametrize("method", ["knn", "knn_residual"])
 def test_removed_gep_filtering_methods_fail_before_loading_inputs(tmp_path: Path, method: str):
     config = _make_filtering_config(tmp_path)

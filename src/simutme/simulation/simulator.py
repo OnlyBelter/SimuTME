@@ -96,6 +96,7 @@ class GEPGenerationConfig:
     filtering_space: Optional[FixedGeneFilter] = None
     mixed_candidate_workers: int = 0
     mixed_candidate_seed: Optional[int] = None
+    n_subgroup: Optional[int] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -114,6 +115,26 @@ class GEPGenerationConfig:
             or self.mixed_candidate_seed < 0
         ):
             raise ValueError('"mixed_candidate_seed" must be a non-negative integer or null.')
+        if self.n_subgroup is not None and (
+            isinstance(self.n_subgroup, bool)
+            or not isinstance(self.n_subgroup, (int, np.integer))
+            or self.n_subgroup <= 0
+        ):
+            raise ValueError('"n_subgroup" must be a positive integer or null.')
+        if self.n_subgroup is not None and (
+            not self.filtering
+            or self.filtering_method != "median_gep"
+            or not self.filtering_in_pca_space
+            or self.filtering_space is None
+        ):
+            raise ValueError(
+                '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
+            )
+        if self.filtering_space is not None and hasattr(self.filtering_space, "gep"):
+            if self.n_subgroup != getattr(self.filtering_space.gep, "n_subgroup", None):
+                raise ValueError(
+                    '"n_subgroup" must match the value resolved into filtering_space.'
+                )
         if self.mixed_candidate_workers:
             if self.mixed_candidate_seed is None:
                 raise ValueError('"mixed_candidate_seed" is required for parallel candidates.')
@@ -312,6 +333,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_removed_n_samples = None
         self.gep_filtering_pca_target = None
         self.gep_filtering_n_pcs = None
+        self.gep_filtering_n_pcs_min = None
+        self.gep_filtering_n_pcs_max = None
+        self.gep_filtering_subgroup_pca_batches = 0
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
@@ -363,6 +387,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
     def _reset_gep_filtering_stats(self, enabled: bool) -> None:
         self.gep_filtering_pca_target = None
         self.gep_filtering_n_pcs = None
+        self.gep_filtering_n_pcs_min = None
+        self.gep_filtering_n_pcs_max = None
+        self.gep_filtering_subgroup_pca_batches = 0
         if enabled:
             self.gep_filtering_input_n_samples = 0
             self.gep_filtering_kept_n_samples = 0
@@ -379,6 +406,23 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_input_n_samples += int(input_n_samples)
         self.gep_filtering_kept_n_samples += int(kept_n_samples)
         self.gep_filtering_removed_n_samples += removed_n_samples
+
+    def _record_gep_filtering_pca_components(self, n_components: int) -> None:
+        n_components = int(n_components)
+        self.gep_filtering_n_pcs_min = (
+            n_components if self.gep_filtering_n_pcs_min is None
+            else min(self.gep_filtering_n_pcs_min, n_components)
+        )
+        self.gep_filtering_n_pcs_max = (
+            n_components if self.gep_filtering_n_pcs_max is None
+            else max(self.gep_filtering_n_pcs_max, n_components)
+        )
+        self.gep_filtering_subgroup_pca_batches += 1
+        self.gep_filtering_n_pcs = (
+            self.gep_filtering_n_pcs_min
+            if self.gep_filtering_n_pcs_min == self.gep_filtering_n_pcs_max
+            else None
+        )
 
     @staticmethod
     def _format_total_rna_coefficient_message(ct2rna_coefficient: Dict[str, float]) -> str:
@@ -481,6 +525,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if config.mixed_candidate_workers:
             self._validate_parallel_checkpoint()
         if self.filtering_space is not None:
+            if self.filtering_space.uses_subgroup_reference:
+                self.gep_filtering_pca_target = config.pca_n_components
             self._prepare_filtering_artifacts(config)
 
         if self.generated_bulk_gep_fp.exists():
@@ -608,10 +654,18 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 # 4. Filtering (GEP-level filtering during generation)
                 if self.filtering_space is not None:
                     pre_filter_n_samples = len(simulated_gep)
-                    simulated_gep = self.filtering_space.filter(simulated_gep)
+                    simulated_gep = self.filtering_space.filter(
+                        simulated_gep, batch_id=self.n_round,
+                    )
                     if config.filtering:
                         self._record_gep_filtering_counts(pre_filter_n_samples, len(simulated_gep))
-                    if self.filtering_space.pca is not None:
+                    if self.filtering_space.uses_subgroup_reference:
+                        self.gep_filtering_pca_target = config.pca_n_components
+                        if self.filtering_space.last_batch_pca_n_components is not None:
+                            self._record_gep_filtering_pca_components(
+                                self.filtering_space.last_batch_pca_n_components
+                            )
+                    elif self.filtering_space.pca is not None:
                         self.gep_filtering_pca_target = self.filtering_space.pca.n_components
                         self.gep_filtering_n_pcs = int(self.filtering_space.pca.n_components_)
                 elif config.filtering:
@@ -764,7 +818,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             for key in (
                 "gep_filtering_input_n_samples", "gep_filtering_kept_n_samples",
                 "gep_filtering_removed_n_samples", "gep_filtering_pca_target",
-                "gep_filtering_n_pcs",
+                "gep_filtering_n_pcs", "gep_filtering_n_pcs_min",
+                "gep_filtering_n_pcs_max", "gep_filtering_subgroup_pca_batches",
             )
         }
         extra = {}
@@ -874,17 +929,21 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 'Parallel candidates require an eager SCT reference; set '
                 '"mixed_sct_loading_mode: eager" or increase the auto threshold.'
             )
-        self.filtering_space.prepare_distance_reference()
-        if self.filtering_space.pca is not None:
-            self.gep_filtering_pca_target = self.filtering_space.pca.n_components
-            self.gep_filtering_n_pcs = int(self.filtering_space.pca.n_components_)
-            self._save_filtering_metadata()
-            self._save_parallel_checkpoint()
+        if self.filtering_space.uses_subgroup_reference:
+            self.gep_filtering_pca_target = config.pca_n_components
+        else:
+            self.filtering_space.prepare_distance_reference()
+            if self.filtering_space.pca is not None:
+                self.gep_filtering_pca_target = self.filtering_space.pca.n_components
+                self.gep_filtering_n_pcs = int(self.filtering_space.pca.n_components_)
+                self._save_filtering_metadata()
+                self._save_parallel_checkpoint()
         if self.filtering_space.gep.filtering_by_gene_range:
             self.filtering_space.prepare_range_reference()
         worker_filter = copy.copy(self.filtering_space)
         worker_filter.reference_linear = None
-        worker_filter.reference_log = None
+        if not worker_filter.uses_subgroup_reference:
+            worker_filter.reference_log = None
         worker_filter.reference_coordinates = None
         run_parallel_candidates(self, config, obs_df, worker_filter)
 

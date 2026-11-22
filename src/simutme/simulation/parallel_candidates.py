@@ -1,5 +1,6 @@
 """Deterministic, bounded parallel generation of filtered Mixed candidates."""
 
+import copy
 import logging
 import multiprocessing
 import os
@@ -23,7 +24,9 @@ _WORKER = None
 _THREAD_LIMIT = None
 
 
-def _initialize_worker(matrix_path, source_index, genes, obs, attributes, config, space):
+def _initialize_worker(
+        matrix_path, source_index, genes, obs, attributes, config, space,
+        reference_log_path=None):
     global _WORKER, _THREAD_LIMIT
     _THREAD_LIMIT = threadpool_limits(limits=1)
     matrix = np.load(matrix_path, mmap_mode="r")
@@ -33,6 +36,10 @@ def _initialize_worker(matrix_path, source_index, genes, obs, attributes, config
     generator.sct_dataset_df = pd.DataFrame(matrix, index=source_index, columns=genes, copy=False)
     generator.sct_dataset_reader = None
     generator.filtering_space = space
+    if reference_log_path is not None:
+        generator.filtering_space.reference_log_memmap = np.load(
+            reference_log_path, mmap_mode="r",
+        )
     generator._reset_runtime_log_state()
     if config.get("quiet"):
         generator._maybe_log_total_rna_coefficients = lambda coefficients: None
@@ -69,7 +76,16 @@ def _run_batch(batch_id):
         cell_frac=fractions, add_noise=config["add_noise"], noise_params=config["noise_params"],
     )
     filtered_at = perf_counter()
-    accepted = space.filter(expression)
+    subgroup_seed = None
+    if space.uses_subgroup_reference:
+        subgroup_seed = int(
+            np.random.SeedSequence([config["seed"], batch_id, 1]).generate_state(1)[0]
+        )
+    accepted = space.filter(
+        expression,
+        batch_id=batch_id,
+        subgroup_seed=subgroup_seed,
+    )
     done = perf_counter()
     indices = accepted.index
     return {
@@ -81,6 +97,7 @@ def _run_batch(batch_id):
         "kept": len(accepted),
         "stats": space.stats(),
         "fraction_stats": fraction_stats,
+        "pca_n_components": space.last_batch_pca_n_components,
         "timings": (
             sampled_at - started, aggregated_at - sampled_at,
             filtered_at - aggregated_at, done - filtered_at,
@@ -88,14 +105,14 @@ def _run_batch(batch_id):
     }
 
 
-def _store_shared_matrix(source, directory):
-    path = Path(directory) / "sct-expression.npy"
+def _store_shared_matrix(source, directory, filename="sct-expression.npy"):
+    path = Path(directory) / filename
     rows, columns = source.shape
     dtype = np.result_type(*source.dtypes)
     required = rows * columns * np.dtype(dtype).itemsize
     if shutil.disk_usage(directory).free < required + 1024 * 1024:
         raise OSError(
-            f"Temporary storage for shared SCT matrix requires at least {required} bytes; "
+            f"Temporary storage for shared matrix requires at least {required} bytes; "
             "set TMPDIR to a location with sufficient free space."
         )
     matrix = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=source.shape)
@@ -133,11 +150,29 @@ def run_parallel_candidates(generator, config, obs, space):
         matrix_path = _store_shared_matrix(source, directory)
         logger.info("Shared SCT matrix prepared in %.3g seconds at %s.",
                     perf_counter() - started, matrix_path)
+        reference_log_path = None
+        worker_space = space
+        if space.uses_subgroup_reference:
+            if space.reference_log is None:
+                raise ValueError(
+                    "Parallel subgroup filtering requires the full GEP reference in the coordinator."
+                )
+            reference_log_path = _store_shared_matrix(
+                space.reference_log, directory, filename="gep-reference-log.npy",
+            )
+            worker_space = copy.copy(space)
+            worker_space.reference_log = None
+            worker_space.reference_log_memmap = None
+            logger.info(
+                "Shared GEP reference prepared with %d samples for per-batch subgroups.",
+                space.reference_sample_count,
+            )
         context = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(
             max_workers=workers, mp_context=context, initializer=_initialize_worker,
             initargs=(str(matrix_path), source.index, source.columns, obs,
-                      attributes, worker_config, space),
+                      attributes, worker_config, worker_space,
+                      str(reference_log_path) if reference_log_path else None),
         ) as executor, tqdm(total=generator.n_samples, initial=generator.generated_bulk_gep_counter) as progress:
             futures = {}
             next_submit = generator.n_round
@@ -190,6 +225,10 @@ def run_parallel_candidates(generator, config, obs, space):
                     generator.generated_bulk_gep_counter += len(accepted)
                     progress.update(len(accepted))
                 generator.n_round += 1
+                if result["pca_n_components"] is not None:
+                    generator._record_gep_filtering_pca_components(
+                        result["pca_n_components"]
+                    )
                 generator._save_filtering_metadata()
                 generator._save_parallel_checkpoint()
                 fraction_stats = result["fraction_stats"]

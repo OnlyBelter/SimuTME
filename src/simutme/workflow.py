@@ -411,6 +411,7 @@ class SimuConfig:
     gep_filtering_in_pca_space: bool = True
     gep_pca_n_components: int | float | None = None
     gep_norm_ord: int = 1
+    n_subgroup: int | None = None
     gene_filtering_enabled_default: bool = False
     gene_filtering_reference_file: Path | None = None
     gene_filtering_type: str | None = None
@@ -497,6 +498,12 @@ class SimuConfig:
         return config
 
     def __post_init__(self):
+        if self.n_subgroup is not None and (
+            isinstance(self.n_subgroup, bool)
+            or not isinstance(self.n_subgroup, (int, np.integer))
+            or self.n_subgroup <= 0
+        ):
+            raise ValueError('"parameters.n_subgroup" must be a positive integer or null.')
         if (
             isinstance(self.n_base_seed, bool)
             or not isinstance(self.n_base_seed, int)
@@ -608,6 +615,7 @@ class ResolvedGEPFilteringParams:
     norm_ord: int
     high_corr_gene_list_file: str | None
     high_corr_gene_list: List[str] | None
+    n_subgroup: int | None = None
 
 
 @dataclass(frozen=True)
@@ -853,6 +861,25 @@ def _resolve_gep_filtering_params(
         filtering_in_pca_space = params.get(
             "filtering_in_pca_space", filtering_in_pca_space
         )
+    n_subgroup_value = _resolve_dataset_override(
+        params, config, "n_subgroup", getattr(config, "n_subgroup", None)
+    )
+    if n_subgroup_value is None:
+        n_subgroup = None
+    elif (
+        isinstance(n_subgroup_value, bool)
+        or not isinstance(n_subgroup_value, (int, np.integer))
+        or n_subgroup_value <= 0
+    ):
+        raise ValueError('"n_subgroup" must be a positive integer or null.')
+    else:
+        n_subgroup = int(n_subgroup_value)
+    if n_subgroup is not None and (
+        not enabled or filtering_method != "median_gep" or not filtering_in_pca_space
+    ):
+        raise ValueError(
+            '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
+        )
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
         reference_file=reference_file,
@@ -881,6 +908,7 @@ def _resolve_gep_filtering_params(
         norm_ord=int(norm_ord),
         high_corr_gene_list_file=high_corr_gene_list_file,
         high_corr_gene_list=high_corr_gene_list,
+        n_subgroup=n_subgroup,
     )
     if resolved.enabled:
         if not resolved.reference_file:
@@ -1756,6 +1784,7 @@ def run_bulk_simulation(dataset_name: str,
                 filtering_in_pca_space=resolved_gep_filtering.filtering_in_pca_space,
                 norm_ord=resolved_gep_filtering.norm_ord,
                 pca_n_components=resolved_gep_filtering.pca_n_components,
+                n_subgroup=resolved_gep_filtering.n_subgroup,
                 filtering_space=filtering_space,
                 mixed_candidate_workers=mixed_candidate_workers,
                 mixed_candidate_seed=mixed_candidate_seed,
@@ -1865,6 +1894,11 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
             gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
+            gep_filtering_n_pcs_min=getattr(bulk_generator, "gep_filtering_n_pcs_min", None),
+            gep_filtering_n_pcs_max=getattr(bulk_generator, "gep_filtering_n_pcs_max", None),
+            gep_filtering_subgroup_pca_batches=(
+                getattr(bulk_generator, "gep_filtering_subgroup_pca_batches", 0)
+            ),
             preserve_existing_gep_pca_metadata=generated_bulk_gep_was_cached,
             filtering_space=filtering_space,
             n_base_values=n_base_values_for_distribution,
@@ -1893,6 +1927,12 @@ def _save_gep_distance_distribution(
     batch_size: int | None = None,
 ) -> Dict[str, str]:
     """Plot reference and final saved-profile distances in the filtering space."""
+    if getattr(filtering_space, "uses_subgroup_reference", False):
+        logging.info(
+            "Skipping pooled GEP distance-distribution plots because reduced "
+            "n_subgroup filtering uses batch-specific PCA spaces."
+        )
+        return {}
     filtering_space.result_dir.mkdir(parents=True, exist_ok=True)
     output_paths = {
         suffix: filtering_space.result_dir / f"gep_filtering_distance_distribution.{suffix}"
@@ -3847,6 +3887,9 @@ def _build_mixed_dataset_summary(
     gep_filtering_removed_n_samples: int | None = None,
     gep_filtering_pca_target: int | float | None = None,
     gep_filtering_n_pcs: int | None = None,
+    gep_filtering_n_pcs_min: int | None = None,
+    gep_filtering_n_pcs_max: int | None = None,
+    gep_filtering_subgroup_pca_batches: int = 0,
     preserve_existing_gep_pca_metadata: bool = False,
     filtering_space: FixedGeneFilter | None = None,
     n_base_values: List[int] | None = None,
@@ -3925,6 +3968,9 @@ def _build_mixed_dataset_summary(
         "gep_filtering_method": gep_filtering.filtering_method if gep_filtering.enabled else None,
         "gep_pca_n_components": gep_filtering_pca_target,
         "gep_filtering_n_pcs": gep_filtering_n_pcs,
+        "gep_filtering_n_pcs_min": gep_filtering_n_pcs_min,
+        "gep_filtering_n_pcs_max": gep_filtering_n_pcs_max,
+        "gep_filtering_subgroup_pca_batches": gep_filtering_subgroup_pca_batches,
         "gep_filtering_input_n_samples": gep_filtering_input_n_samples,
         "gep_filtering_kept_n_samples": gep_filtering_kept_n_samples,
         "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
@@ -3968,6 +4014,13 @@ def _build_mixed_dataset_summary(
         )
         summary["post_gep_gene_quantile_filter"] = post_gep_gene_quantile_filter
     if filtering_space is not None:
+        summary["gep_filtering_n_subgroup"] = (
+            getattr(filtering_space, "n_subgroup", None) if gep_filtering.enabled else None
+        )
+        summary["gep_filtering_reference_n_samples"] = (
+            getattr(filtering_space, "reference_sample_count", None)
+            if gep_filtering.enabled else None
+        )
         summary.update(getattr(filtering_space, "reference_variance_metadata", {}))
         summary_filtering_identity = json.loads(
             json.dumps(filtering_space.identity, default=str)

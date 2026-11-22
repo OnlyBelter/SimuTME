@@ -176,6 +176,7 @@ Dataset-level Mixed fields can override them.
 - `gep_gene_quantile_range`
 - `gep_filtering_in_pca_space`
 - `gep_pca_n_components`
+- `n_subgroup`
 - `gep_norm_ord`
 
 #### Gene-level filtering and PCA comparison defaults
@@ -309,11 +310,25 @@ validates and reuses the accepted data, archives old post-filter artifacts,
 and regenerates the filtered output. See the post-GEP filtering procedure in
 `workflow_mixed.md` for details.
 
-`gep_pca_n_components` is the only GEP-filtering PCA configuration parameter.
-`gep_filtering_n_pcs` is read-only summary metadata obtained from the model.
+`gep_pca_n_components` configures GEP-filtering PCA dimensions or its
+explained-variance target. `gep_filtering_n_pcs` is read-only summary metadata
+obtained from the fitted model.
 The supported methods are `median_gep`, `mean_gep`, `mgep`, and `linear_mmd`.
 Removed or unknown method names fail during configuration resolution with the
 supported-method list.
+
+`n_subgroup` is an optional global GEP-filtering parameter and accepts a
+dataset-level override. It applies only to enabled PCA-space `median_gep`.
+When omitted or `null`, all eligible reference samples are used and the
+full-reference PCA is fit or loaded once for reuse. A positive integer below
+the eligible reference sample count draws a fresh, unstratified subgroup
+without replacement for each candidate batch and fits a transient PCA for
+that batch. Batches may overlap. The eligible pool is the configured GEP
+reference after `filtering_ref_types` selection. Values above the reference
+count or too small for the configured PCA component target fail validation.
+Fixed-gene selection, gene-range bounds, and post-GEP gene-level filtering
+continue to use all eligible reference samples. Per-batch PCA models are not
+saved.
 
 `mgep` computes a coordinate-wise median from all resolved reference samples
 using linear TPM values normalized over the selected genes to 1,000,000. It
@@ -425,6 +440,7 @@ For SCT datasets:
 - `gep_min_percentage_within_gene_range`
 - `gep_gene_quantile_range`
 - `gep_pca_n_components`
+- `n_subgroup`
 - `gep_norm_ord`
 - `gep_n_top`
 - `gep_show_filtering_info`
