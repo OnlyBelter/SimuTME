@@ -1903,6 +1903,16 @@ def run_bulk_simulation(dataset_name: str,
                     None,
                 )
             ),
+            gep_filtering_input_n_samples_by_cancer_type=getattr(
+                bulk_generator,
+                "gep_filtering_input_n_samples_by_cancer_type",
+                None,
+            ),
+            gep_filtering_acceptance_rate_by_cancer_type=getattr(
+                bulk_generator,
+                "gep_filtering_acceptance_rate_by_cancer_type",
+                None,
+            ),
             gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
             gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
@@ -3923,6 +3933,8 @@ def _build_mixed_dataset_summary(
     gep_filtering_input_n_samples: int | None = None,
     gep_filtering_kept_n_samples: int | None = None,
     gep_filtering_kept_n_samples_by_cancer_type: Dict[str, int] | None = None,
+    gep_filtering_input_n_samples_by_cancer_type: Dict[str, int] | None = None,
+    gep_filtering_acceptance_rate_by_cancer_type: Dict[str, float | None] | None = None,
     gep_filtering_removed_n_samples: int | None = None,
     gep_filtering_pca_target: int | float | None = None,
     gep_filtering_n_pcs: int | None = None,
@@ -4014,6 +4026,12 @@ def _build_mixed_dataset_summary(
         "gep_filtering_kept_n_samples": gep_filtering_kept_n_samples,
         "gep_filtering_kept_n_samples_by_cancer_type": (
             gep_filtering_kept_n_samples_by_cancer_type
+        ),
+        "gep_filtering_input_n_samples_by_cancer_type": (
+            gep_filtering_input_n_samples_by_cancer_type
+        ),
+        "gep_filtering_acceptance_rate_by_cancer_type": (
+            gep_filtering_acceptance_rate_by_cancer_type
         ),
         "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
         "gene_filtering_enabled": gene_filtering.enabled,

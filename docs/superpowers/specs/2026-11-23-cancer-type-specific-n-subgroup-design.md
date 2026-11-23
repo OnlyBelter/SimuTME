@@ -54,15 +54,18 @@ number of reference samples for each batch.
 
 ## Kept-profile counts
 
-Attribute each accepted candidate to the cancer type selected for its
-candidate batch. Accumulate those counts alongside the existing total kept
-count, persist them in filtering metadata and parallel checkpoints, and write
-them to `mixed_dataset_summary.json` as
-`gep_filtering_kept_n_samples_by_cancer_type`. Initialize every eligible type
-to zero. For a single cancer type that uses the full-reference PCA path,
-attribute kept candidates to that type. When `n_subgroup` is unset, report no
-per-type breakdown. Version the subgroup filtering identity so outputs created
-before these counts existed cannot be reported with an incorrect zero tally.
+Attribute every candidate batch's input and accepted candidates to the cancer
+type selected for its reference PCA. Accumulate both counts alongside the
+existing totals, persist them in filtering metadata and parallel checkpoints,
+and write them to `mixed_dataset_summary.json` as
+`gep_filtering_input_n_samples_by_cancer_type` and
+`gep_filtering_kept_n_samples_by_cancer_type`. Report
+`gep_filtering_acceptance_rate_by_cancer_type` as accepted divided by input,
+from 0 to 1, or `null` when a type has no input candidates. Initialize every
+eligible type to zero. For a single cancer type that uses the full-reference
+PCA path, attribute candidates to that type. When `n_subgroup` is unset, report
+no per-type breakdown. Version the subgroup filtering identity so outputs
+created before these metrics existed cannot be reported with incorrect zeros.
 
 ## Scope and tests
 
@@ -82,7 +85,7 @@ Tests cover:
 - PCA-ineligible cancer types fail validation before sampling.
 - A single cancer type with its full cohort selected can reuse the full
   reference PCA.
-- Accepted candidate counts are grouped by the batch reference type and
-  survive parallel checkpoint resume.
+- Per-type input counts, accepted counts, and acceptance rates use the batch
+  reference type and survive parallel checkpoint resume.
 - Existing serial, parallel, filtering, and `n_subgroup: null` behavior remains
   unchanged.

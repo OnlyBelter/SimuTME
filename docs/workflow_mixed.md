@@ -578,9 +578,10 @@ PCA paths are listed in `post_gep_quantile_pca_runs`.
 When reduced `n_subgroup` filtering is active, the summary also records the
 per-type sample cap, full reference sample count, subgroup PCA fit count, and
 minimum/maximum fitted component counts across batches. It also reports kept
-candidate counts by the cancer type selected for each batch in
-`gep_filtering_kept_n_samples_by_cancer_type`. No per-batch PCA model artifacts
-are written.
+and input candidate counts by the cancer type selected for each batch, plus
+`gep_filtering_acceptance_rate_by_cancer_type`. Each rate is kept divided by
+input candidates and ranges from 0 to 1; it is `null` when no candidates were
+assigned to that type. No per-batch PCA model artifacts are written.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with

@@ -330,7 +330,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.total_cell_number = 0
         self.gep_filtering_input_n_samples = None
         self.gep_filtering_kept_n_samples = None
+        self.gep_filtering_input_n_samples_by_cancer_type = None
         self.gep_filtering_kept_n_samples_by_cancer_type = None
+        self.gep_filtering_acceptance_rate_by_cancer_type = None
         self.gep_filtering_removed_n_samples = None
         self.gep_filtering_pca_target = None
         self.gep_filtering_n_pcs = None
@@ -396,17 +398,29 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             self.gep_filtering_kept_n_samples = 0
             self.gep_filtering_removed_n_samples = 0
             if getattr(getattr(filtering_space, "gep", None), "n_subgroup", None) is not None:
+                self.gep_filtering_input_n_samples_by_cancer_type = {
+                    cancer_type: 0
+                    for cancer_type in filtering_space.reference_cancer_type_groups
+                }
                 self.gep_filtering_kept_n_samples_by_cancer_type = {
                     cancer_type: 0
                     for cancer_type in filtering_space.reference_cancer_type_groups
                 }
+                self.gep_filtering_acceptance_rate_by_cancer_type = {
+                    cancer_type: None
+                    for cancer_type in filtering_space.reference_cancer_type_groups
+                }
             else:
+                self.gep_filtering_input_n_samples_by_cancer_type = None
                 self.gep_filtering_kept_n_samples_by_cancer_type = None
+                self.gep_filtering_acceptance_rate_by_cancer_type = None
         else:
             self.gep_filtering_input_n_samples = None
             self.gep_filtering_kept_n_samples = None
             self.gep_filtering_removed_n_samples = None
+            self.gep_filtering_input_n_samples_by_cancer_type = None
             self.gep_filtering_kept_n_samples_by_cancer_type = None
+            self.gep_filtering_acceptance_rate_by_cancer_type = None
 
     def _record_gep_filtering_counts(
         self, input_n_samples: int, kept_n_samples: int, cancer_type=None,
@@ -418,11 +432,19 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_kept_n_samples += int(kept_n_samples)
         self.gep_filtering_removed_n_samples += removed_n_samples
         if (
-            self.gep_filtering_kept_n_samples_by_cancer_type is not None
+            self.gep_filtering_input_n_samples_by_cancer_type is not None
             and cancer_type is not None
         ):
+            self.gep_filtering_input_n_samples_by_cancer_type[cancer_type] += int(
+                input_n_samples
+            )
             self.gep_filtering_kept_n_samples_by_cancer_type[cancer_type] += int(
                 kept_n_samples
+            )
+            type_input = self.gep_filtering_input_n_samples_by_cancer_type[cancer_type]
+            self.gep_filtering_acceptance_rate_by_cancer_type[cancer_type] = (
+                self.gep_filtering_kept_n_samples_by_cancer_type[cancer_type] / type_input
+                if type_input else None
             )
 
     def _record_gep_filtering_pca_components(self, n_components: int) -> None:
@@ -839,7 +861,9 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             key: getattr(self, key)
             for key in (
                 "gep_filtering_input_n_samples", "gep_filtering_kept_n_samples",
+                "gep_filtering_input_n_samples_by_cancer_type",
                 "gep_filtering_kept_n_samples_by_cancer_type",
+                "gep_filtering_acceptance_rate_by_cancer_type",
                 "gep_filtering_removed_n_samples", "gep_filtering_pca_target",
                 "gep_filtering_n_pcs", "gep_filtering_n_pcs_min",
                 "gep_filtering_n_pcs_max", "gep_filtering_subgroup_pca_batches",

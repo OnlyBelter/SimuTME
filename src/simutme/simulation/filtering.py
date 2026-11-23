@@ -222,6 +222,8 @@ class FixedGeneFilter:
         self.last_batch_id = None
         self.last_batch_cancer_type = None
         self.last_batch_reference_sample_count = None
+        self.last_sampled_cancer_type = None
+        self._batch_subgroup_sampler = None
         if requested_n_subgroup is not None:
             if (not self.gep.enabled or self.gep.filtering_method != "median_gep"
                     or not self.gep.filtering_in_pca_space):
@@ -287,7 +289,7 @@ class FixedGeneFilter:
             self.identity.update(
                 reference_cancer_type_count=len(self.reference_cancer_type_groups),
                 reference_cancer_type_hash=self.reference_cancer_type_hash,
-                cancer_type_kept_counts="accepted-candidates-v1",
+                cancer_type_kept_counts="accepted-candidates-v2",
             )
         if self.gep.filtering_by_gene_range:
             self.identity["range_space"] = "normalized-log2-tpm-plus-1-v1"
@@ -445,17 +447,31 @@ class FixedGeneFilter:
             return np.asarray(self.reference_log_memmap[indices], dtype=np.float64)
         raise RuntimeError("The full GEP reference is unavailable for subgroup sampling.")
 
-    def _sample_subgroup_indices(self, seed=None):
-        sampler = np.random if seed is None else np.random.default_rng(seed)
+    def _select_batch_cancer_type(self, seed=None):
         if not self.reference_cancer_type_groups:
+            return None
+        self._batch_subgroup_sampler = (
+            np.random if seed is None else np.random.default_rng(seed)
+        )
+        self.last_sampled_cancer_type = self._batch_subgroup_sampler.choice(
+            list(self.reference_cancer_type_groups)
+        )
+        self.last_batch_cancer_type = self.last_sampled_cancer_type
+        return self.last_sampled_cancer_type
+
+    def _sample_subgroup_indices(self, seed=None):
+        if not self.reference_cancer_type_groups:
+            sampler = np.random if seed is None else np.random.default_rng(seed)
             return sampler.choice(
                 self.reference_sample_count,
                 size=min(self.n_subgroup, self.reference_sample_count),
                 replace=False,
             )
 
-        cancer_type = sampler.choice(list(self.reference_cancer_type_groups))
-        self.last_sampled_cancer_type = cancer_type
+        if seed is not None or self._batch_subgroup_sampler is None:
+            self._select_batch_cancer_type(seed)
+        sampler = self._batch_subgroup_sampler
+        cancer_type = self.last_sampled_cancer_type
         cancer_type_indices = self.reference_cancer_type_groups[cancer_type]
         return sampler.choice(
             cancer_type_indices,
@@ -470,7 +486,8 @@ class FixedGeneFilter:
         if self.reference_sample_count <= 0:
             raise ValueError("GEP filtering reference has no samples for subgroup sampling.")
 
-        indices = self._sample_subgroup_indices(seed)
+        sampling_seed = seed if self._batch_subgroup_sampler is None else None
+        indices = self._sample_subgroup_indices(sampling_seed)
         reference = self._reference_log_rows(indices)
         if not np.isfinite(reference).all():
             raise ValueError("Sampled GEP reference contains non-finite log expression.")
@@ -507,6 +524,7 @@ class FixedGeneFilter:
 
     def clear_batch_reference(self):
         """Release transient PCA state after filtering a subgroup batch."""
+        self._batch_subgroup_sampler = None
         if not self.uses_subgroup_reference:
             return
         self.pca = None
@@ -544,10 +562,12 @@ class FixedGeneFilter:
             self.last_batch_id = batch_id
             self.last_batch_cancer_type = None
             self.last_batch_reference_sample_count = None
+            self._select_batch_cancer_type(subgroup_seed)
         elif self.gep.n_subgroup is not None and len(self.reference_cancer_type_groups) == 1:
             self.last_batch_cancer_type = next(iter(self.reference_cancer_type_groups))
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
+            self._batch_subgroup_sampler = None
             return normalized
         if self.gep.filtering_by_gene_range:
             range_values = np.log2(normalized + 1)
@@ -562,6 +582,7 @@ class FixedGeneFilter:
                         mask.sum(), len(mask), len(self.genes))
             normalized = normalized.loc[mask]
         if normalized.empty:
+            self._batch_subgroup_sampler = None
             return normalized
         if self.gep.filtering_method == "mgep":
             simulated_distances = self.distance_from_normalized(normalized)

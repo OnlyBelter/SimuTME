@@ -640,8 +640,10 @@ Dataset-local filtering artifacts include `fixed_filtering_gene_list.csv`,
 The summary separates `pre_selection_n_genes`, `shared_n_genes`, and
 `exported_n_genes`; `generated_n_genes` reports the actual artifact dimension.
 For cancer-type-specific `n_subgroup` filtering, the summary also reports
-accepted candidate counts by batch reference type in
-`gep_filtering_kept_n_samples_by_cancer_type`.
+input and accepted candidate counts by batch reference type, plus their
+acceptance rates in `gep_filtering_acceptance_rate_by_cancer_type`. Each rate
+is accepted divided by input candidates and ranges from 0 to 1; it is `null`
+when no candidates were assigned to that cancer type.
 
 Missing or incompatible filtering metadata prevents reuse of target outputs,
 models, and intermediate batches. Use a new dataset name/output location.

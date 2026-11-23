@@ -158,7 +158,7 @@ def test_subgroup_selects_one_cancer_type_then_samples_without_replacement(tmp_p
         changed_space.identity["reference_cancer_type_hash"]
         != space.identity["reference_cancer_type_hash"]
     )
-    assert space.identity["cancer_type_kept_counts"] == "accepted-candidates-v1"
+    assert space.identity["cancer_type_kept_counts"] == "accepted-candidates-v2"
 
 
 @pytest.mark.parametrize("n_subgroup", [4, 7])
@@ -191,6 +191,28 @@ def test_subgroup_larger_than_selected_type_uses_all_its_samples(
     assert set(indices) == set(
         np.flatnonzero(cancer_types.to_numpy() == space.last_sampled_cancer_type)
     )
+
+
+def test_subgroup_type_is_assigned_before_gene_range_rejection(tmp_path):
+    space = make_space(
+        tmp_path,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=2,
+        filtering_by_gene_range=True,
+        min_percentage_within_gene_range=1.0,
+    )
+
+    rejected = space.filter(
+        pd.DataFrame({"a": [100.0], "b": [0.0]}, index=["rejected"]),
+        batch_id=5,
+        subgroup_seed=42,
+    )
+
+    assert rejected.empty
+    assert space.last_batch_cancer_type == "A"
+    assert space.pca is None
 
 
 def test_too_small_cancer_type_fails_pca_validation(tmp_path):
@@ -669,7 +691,9 @@ def test_workflow_pca_summary_and_cached_totals(workflow_case):
     summary = read_summary(output)
     assert summary["gep_pca_n_components"] == summary["gep_filtering_n_pcs"] == 1
     assert summary["gep_filtering_input_n_samples"] == 90
+    assert summary["gep_filtering_input_n_samples_by_cancer_type"] == {"A": 90}
     assert summary["gep_filtering_kept_n_samples_by_cancer_type"] == {"A": 90}
+    assert summary["gep_filtering_acceptance_rate_by_cancer_type"] == {"A": 1.0}
     assert ad.read_h5ad(output).n_obs == 3
     png = Path(summary["gep_filtering_distance_plot_png"])
     svg = Path(summary["gep_filtering_distance_plot_svg"])

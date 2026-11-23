@@ -147,6 +147,12 @@ def test_parallel_subgroup_filtering_is_stable_across_worker_counts(setup_parall
     kept_by_type = metadata["generator_stats"][
         "gep_filtering_kept_n_samples_by_cancer_type"
     ]
+    input_by_type = metadata["generator_stats"][
+        "gep_filtering_input_n_samples_by_cancer_type"
+    ]
+    rate_by_type = metadata["generator_stats"][
+        "gep_filtering_acceptance_rate_by_cancer_type"
+    ]
     second_metadata = json.loads(
         (second.filtering_space.result_dir / "filtering_metadata.json").read_text()
     )
@@ -155,6 +161,14 @@ def test_parallel_subgroup_filtering_is_stable_across_worker_counts(setup_parall
     ]
     assert set(kept_by_type) == {"A", "B"}
     assert sum(kept_by_type.values()) == first.gep_filtering_kept_n_samples
+    assert sum(input_by_type.values()) == first.gep_filtering_input_n_samples
+    assert rate_by_type == {
+        cancer_type: (
+            kept_by_type[cancer_type] / input_by_type[cancer_type]
+            if input_by_type[cancer_type] else None
+        )
+        for cancer_type in input_by_type
+    }
     assert checkpoint["generator_stats"][
         "gep_filtering_kept_n_samples_by_cancer_type"
     ] == kept_by_type
@@ -268,6 +282,14 @@ def test_parallel_subgroup_resume_reuses_batch_reference(setup_parallel, monkeyp
         baseline.gep_filtering_kept_n_samples_by_cancer_type
         == resumed.gep_filtering_kept_n_samples_by_cancer_type
     )
+    assert (
+        baseline.gep_filtering_input_n_samples_by_cancer_type
+        == resumed.gep_filtering_input_n_samples_by_cancer_type
+    )
+    assert (
+        baseline.gep_filtering_acceptance_rate_by_cancer_type
+        == resumed.gep_filtering_acceptance_rate_by_cancer_type
+    )
 
 
 def test_serial_subgroup_counts_kept_samples_by_reference_type(setup_parallel):
@@ -281,8 +303,16 @@ def test_serial_subgroup_counts_kept_samples_by_reference_type(setup_parallel):
     generator.generate_gep(config)
 
     kept_by_type = generator.gep_filtering_kept_n_samples_by_cancer_type
+    input_by_type = generator.gep_filtering_input_n_samples_by_cancer_type
+    rate_by_type = generator.gep_filtering_acceptance_rate_by_cancer_type
     assert set(kept_by_type) == {"A", "B"}
     assert sum(kept_by_type.values()) == generator.gep_filtering_kept_n_samples
+    assert sum(input_by_type.values()) == generator.gep_filtering_input_n_samples
+    assert rate_by_type == {
+        cancer_type: kept_by_type[cancer_type] / input_by_type[cancer_type]
+        if input_by_type[cancer_type] else None
+        for cancer_type in input_by_type
+    }
 
 
 def test_parallel_rejects_partial_output_and_changed_seed(setup_parallel):
