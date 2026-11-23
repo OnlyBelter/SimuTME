@@ -33,11 +33,21 @@ def setup_parallel(tmp_path, monkeypatch):
         var=pd.DataFrame(index=["g1", "g2", "unused"]),
     ).write_h5ad(source)
     reference = pd.DataFrame({"g1": [0., 5., 10.], "g2": [10., 5., 0.]})
+    subgroup_reference = pd.DataFrame(
+        {"g1": [0., 5., 10., 3.], "g2": [10., 5., 0., 7.]},
+        index=["a1", "a2", "b1", "b2"],
+    )
+    reference_cancer_types = pd.Series(
+        ["A", "A", "B", "B"], index=subgroup_reference.index,
+    )
 
     def create(
             name, workers=1, seed=42, method="mgep", quantiles=(None, 1.0),
             n_subgroup=None):
         output = tmp_path / name
+        selected_reference = (
+            subgroup_reference if n_subgroup is not None else reference
+        )
         generator = BulkGEPGenerator(
             simu_bulk_dir=output, merged_sc_dataset_file_path=None,
             sct_dataset_file_path=source, cell_type2subtype={"A": ["A"], "B": ["B"]},
@@ -46,14 +56,17 @@ def setup_parallel(tmp_path, monkeypatch):
             output_types=["A", "B"], mixed_sct_loading_mode="eager",
         )
         space = FixedGeneFilter(
-            ["g1", "g2"], reference, tmp_path / "reference.csv", None,
+            ["g1", "g2"], selected_reference, tmp_path / "reference.csv", None,
             gep_params(
                 filtering_method=method,
                 filtering_in_pca_space=(method == "median_gep"),
                 gep_filtering_quantile=quantiles,
                 n_subgroup=n_subgroup,
             ),
-            output / "test", 3, 2,
+            output / "test", len(selected_reference), 2,
+            reference_cancer_types=(
+                reference_cancer_types if n_subgroup is not None else None
+            ),
         )
         config = GEPGenerationConfig(
             n_samples=12, simu_method="mul", sampling_method_prop="segment",
@@ -124,9 +137,27 @@ def test_parallel_subgroup_filtering_is_stable_across_worker_counts(setup_parall
         (first.filtering_space.result_dir / "parallel_candidate_checkpoint.json").read_text()
     )
     assert metadata["identity"]["n_subgroup"] == 2
-    assert metadata["identity"]["reference_sample_count"] == 3
+    assert metadata["identity"]["reference_sample_count"] == 4
+    assert metadata["identity"]["reference_sampling"] == (
+        "one-cancer-type-per-candidate-batch"
+    )
+    assert metadata["identity"]["reference_cancer_type_count"] == 2
     assert metadata["generator_stats"]["gep_filtering_n_pcs_min"] == 1
     assert metadata["generator_stats"]["gep_filtering_n_pcs_max"] == 1
+    kept_by_type = metadata["generator_stats"][
+        "gep_filtering_kept_n_samples_by_cancer_type"
+    ]
+    second_metadata = json.loads(
+        (second.filtering_space.result_dir / "filtering_metadata.json").read_text()
+    )
+    assert kept_by_type == second_metadata["generator_stats"][
+        "gep_filtering_kept_n_samples_by_cancer_type"
+    ]
+    assert set(kept_by_type) == {"A", "B"}
+    assert sum(kept_by_type.values()) == first.gep_filtering_kept_n_samples
+    assert checkpoint["generator_stats"][
+        "gep_filtering_kept_n_samples_by_cancer_type"
+    ] == kept_by_type
     assert (
         metadata["generator_stats"]["gep_filtering_subgroup_pca_batches"]
         == checkpoint["next_batch"]
@@ -233,6 +264,25 @@ def test_parallel_subgroup_resume_reuses_batch_reference(setup_parallel, monkeyp
         baseline.gep_filtering_subgroup_pca_batches
         == resumed.gep_filtering_subgroup_pca_batches
     )
+    assert (
+        baseline.gep_filtering_kept_n_samples_by_cancer_type
+        == resumed.gep_filtering_kept_n_samples_by_cancer_type
+    )
+
+
+def test_serial_subgroup_counts_kept_samples_by_reference_type(setup_parallel):
+    generator, config = setup_parallel(
+        "serial-subgroup-counts",
+        workers=0,
+        method="median_gep",
+        quantiles=(None, 1.0),
+        n_subgroup=2,
+    )
+    generator.generate_gep(config)
+
+    kept_by_type = generator.gep_filtering_kept_n_samples_by_cancer_type
+    assert set(kept_by_type) == {"A", "B"}
+    assert sum(kept_by_type.values()) == generator.gep_filtering_kept_n_samples
 
 
 def test_parallel_rejects_partial_output_and_changed_seed(setup_parallel):

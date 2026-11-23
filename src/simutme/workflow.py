@@ -880,6 +880,11 @@ def _resolve_gep_filtering_params(
         raise ValueError(
             '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
         )
+    if n_subgroup is not None and not config.tcga2cancer_type_file_path:
+        raise ValueError(
+            '"n_subgroup" requires "tcga2cancer_type_file_path" to select '
+            "cancer-type-specific reference samples."
+        )
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
         reference_file=reference_file,
@@ -1891,6 +1896,13 @@ def run_bulk_simulation(dataset_name: str,
             postprocess_outputs=postprocess_outputs,
             gep_filtering_input_n_samples=bulk_generator.gep_filtering_input_n_samples,
             gep_filtering_kept_n_samples=bulk_generator.gep_filtering_kept_n_samples,
+            gep_filtering_kept_n_samples_by_cancer_type=(
+                getattr(
+                    bulk_generator,
+                    "gep_filtering_kept_n_samples_by_cancer_type",
+                    None,
+                )
+            ),
             gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
             gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
@@ -3141,6 +3153,7 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
         reference = pd.DataFrame(np.expm1(values * np.log(2)), index=reference.index,
                                  columns=reference.columns)
     reference_subset = gep.filtering_ref_types if gep.enabled else None
+    mapping = None
     if reference_subset:
         mapping = pd.read_csv(config.tcga2cancer_type_file_path, index_col=0)
         sample_ids = mapping.index[mapping["cancer_type"].isin(reference_subset)]
@@ -3149,6 +3162,30 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
             raise ValueError(f'No reference samples match filtering_ref_types for "{dataset_name}".')
     if reference.empty:
         raise ValueError("Filtering reference has no samples.")
+    reference_cancer_types = None
+    if gep.n_subgroup is not None:
+        if mapping is None:
+            mapping = pd.read_csv(config.tcga2cancer_type_file_path, index_col=0)
+        if "cancer_type" not in mapping.columns:
+            raise ValueError(
+                '"tcga2cancer_type_file_path" must contain a "cancer_type" column '
+                f'for Mixed dataset "{dataset_name}".'
+            )
+        if mapping.index.has_duplicates:
+            raise ValueError(
+                '"tcga2cancer_type_file_path" contains duplicate sample IDs; '
+                "cancer-type-specific subgroup sampling requires one type per sample."
+            )
+        reference_cancer_types = mapping["cancer_type"].reindex(reference.index)
+        if reference_cancer_types.isna().any():
+            missing = reference_cancer_types.index[
+                reference_cancer_types.isna()
+            ].tolist()
+            raise ValueError(
+                "Cancer-type mapping is missing eligible GEP reference samples: "
+                f"{missing[:5]}."
+            )
+        reference_cancer_types = reference_cancer_types.astype(str)
     variance_metadata = {}
     variance_table = None
     threshold = gene.reference_variance_threshold
@@ -3200,6 +3237,7 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
     space = FixedGeneFilter(
         genes, reference, reference_file, reference_subset, gep, result_dir,
         len(sct_genes), shared_count, correlation_file=correlation_file,
+        reference_cancer_types=reference_cancer_types,
     )
     space.reference_variance_metadata = variance_metadata
     if variance_metadata:
@@ -3884,6 +3922,7 @@ def _build_mixed_dataset_summary(
     postprocess_outputs: Dict[str, Any],
     gep_filtering_input_n_samples: int | None = None,
     gep_filtering_kept_n_samples: int | None = None,
+    gep_filtering_kept_n_samples_by_cancer_type: Dict[str, int] | None = None,
     gep_filtering_removed_n_samples: int | None = None,
     gep_filtering_pca_target: int | float | None = None,
     gep_filtering_n_pcs: int | None = None,
@@ -3973,6 +4012,9 @@ def _build_mixed_dataset_summary(
         "gep_filtering_subgroup_pca_batches": gep_filtering_subgroup_pca_batches,
         "gep_filtering_input_n_samples": gep_filtering_input_n_samples,
         "gep_filtering_kept_n_samples": gep_filtering_kept_n_samples,
+        "gep_filtering_kept_n_samples_by_cancer_type": (
+            gep_filtering_kept_n_samples_by_cancer_type
+        ),
         "gep_filtering_removed_n_samples": gep_filtering_removed_n_samples,
         "gene_filtering_enabled": gene_filtering.enabled,
         "gene_filtering_type": gene_filtering.filtering_type if gene_filtering.enabled else None,

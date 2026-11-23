@@ -320,15 +320,20 @@ supported-method list.
 `n_subgroup` is an optional global GEP-filtering parameter and accepts a
 dataset-level override. It applies only to enabled PCA-space `median_gep`.
 When omitted or `null`, all eligible reference samples are used and the
-full-reference PCA is fit or loaded once for reuse. A positive integer below
-the eligible reference sample count draws a fresh, unstratified subgroup
-without replacement for each candidate batch and fits a transient PCA for
-that batch. Batches may overlap. The eligible pool is the configured GEP
-reference after `filtering_ref_types` selection. Values above the reference
-count or too small for the configured PCA component target fail validation.
-Fixed-gene selection, gene-range bounds, and post-GEP gene-level filtering
-continue to use all eligible reference samples. Per-batch PCA models are not
-saved.
+full-reference PCA is fit or loaded once for reuse. A positive integer sets a
+per-cancer-type sample cap for each candidate batch. Each batch chooses one
+cancer type uniformly from those in the eligible reference, then draws up to
+`n_subgroup` samples from that type without replacement. A type with fewer
+samples contributes its entire cohort. Values above the total reference count
+are valid. Every eligible type must have enough samples for the configured PCA
+component target. The eligible pool is the configured GEP reference after
+`filtering_ref_types` selection, with cancer types read from
+`tcga2cancer_type_file_path`. Fixed-gene selection, gene-range bounds, and
+post-GEP gene-level filtering continue to use all eligible reference samples.
+With multiple cancer types, each batch uses a type-specific PCA even if the cap
+includes every sample of its selected type. If only one type is present and
+the cap selects its full cohort, the full-reference PCA can be reused.
+Per-batch PCA models are not saved.
 
 `mgep` computes a coordinate-wise median from all resolved reference samples
 using linear TPM values normalized over the selected genes to 1,000,000. It
@@ -634,6 +639,9 @@ Dataset-local filtering artifacts include `fixed_filtering_gene_list.csv`,
 `gep_filtering_pca.joblib` with `gep_filtering_pca.metadata.json`.
 The summary separates `pre_selection_n_genes`, `shared_n_genes`, and
 `exported_n_genes`; `generated_n_genes` reports the actual artifact dimension.
+For cancer-type-specific `n_subgroup` filtering, the summary also reports
+accepted candidate counts by batch reference type in
+`gep_filtering_kept_n_samples_by_cancer_type`.
 
 Missing or incompatible filtering metadata prevents reuse of target outputs,
 models, and intermediate batches. Use a new dataset name/output location.

@@ -350,12 +350,16 @@ mixed_candidate_seed: 42
 ```
 
 For `median_gep`, also set `gep_filtering_in_pca_space: true` and
-`gep_norm_ord: 1`. With `n_subgroup` unset or equal to the resolved reference
-size, the coordinator fits or loads the full-reference PCA once and workers
-reuse it. With a smaller `n_subgroup`, each candidate batch samples its own
-reference rows and fits a transient PCA, median, and distance distribution;
-all candidates in that batch use the same fitted state. Each spawned worker
-fits transient batch models as needed; these models are not saved.
+`gep_norm_ord: 1`. With `n_subgroup` unset, the coordinator fits or loads the
+full-reference PCA once and workers reuse it. When `n_subgroup` is configured,
+each candidate batch chooses one cancer type uniformly from the eligible
+reference, samples up to `n_subgroup` rows from that type without replacement,
+and fits a transient PCA, median, and distance distribution. If the selected
+type has fewer than `n_subgroup` samples, the batch uses all of them. All
+candidates in that batch use the same fitted state. Each spawned worker fits
+transient batch models as needed; these models are not saved. If the reference
+contains only one cancer type and the cap selects its full cohort, workers can
+reuse the full-reference PCA.
 
 Start with a fresh dataset name and output location. Set
 `mixed_sct_loading_mode: "eager"` globally, or set the auto eager threshold
@@ -453,15 +457,23 @@ lower value to `null` or `0` to apply only the upper cutoff.
 The other centroid methods use `log2(TPM + 1)` values, either in G or in
 reference-fitted PCA space according to `filtering_in_pca_space`.
 
-For PCA-space `median_gep`, `parameters.n_subgroup` optionally limits the
-reference cohort used to fit the PCA and calculate the median and distance
-quantiles for each candidate batch. `null` or an omitted value uses the full
-resolved reference and fits or loads its PCA once. A smaller positive integer
-draws a fresh subgroup without replacement for each candidate batch; batches
-can overlap. The subgroup is drawn from the reference after
-`filtering_ref_types` selection. The transient batch PCA is not saved. Gene
-selection, gene-range bounds, and post-GEP gene-level filtering continue to
-use the full resolved reference. The setting can be overridden per dataset:
+For PCA-space `median_gep`, `parameters.n_subgroup` sets the maximum number of
+reference samples drawn from one cancer type for each candidate batch. The
+batch first chooses one cancer type uniformly from those represented in the
+eligible reference, then samples from that type without replacement. If the
+type has fewer than `n_subgroup` samples, the batch uses all of them. `null` or
+an omitted value uses the full resolved reference and fits or loads its PCA
+once. The eligible pool is the configured GEP reference after
+`filtering_ref_types` selection, and each sample's cancer type comes from
+`tcga2cancer_type_file_path`. Batches can select the same type and reuse
+reference samples. A configured value may exceed the total reference count.
+Every eligible type must have enough samples for the configured PCA. The
+transient batch PCA is not saved. With multiple cancer types, each batch uses
+its selected type's PCA even when the cap includes every sample of that type.
+If only one type is present and its full cohort is selected, the full-reference
+PCA can be reused. Gene selection, gene-range bounds, and post-GEP gene-level
+filtering continue to use the full resolved reference. The setting can be
+overridden per dataset:
 
 ```yaml
 parameters:
@@ -472,12 +484,12 @@ datasets:
     n_subgroup: 200
 ```
 
-In parallel mode, subgroup selection is deterministically derived from
-`mixed_candidate_seed` and the candidate batch ID, so worker count and resume
-do not change a batch's reference subset. In serial mode, selection uses the
-existing NumPy random stream. Values greater than the available reference
-count, nonpositive/noninteger values, or subgroups too small for the PCA target
-fail with an error.
+In parallel mode, both the cancer-type choice and sample draw are
+deterministically derived from `mixed_candidate_seed` and the candidate batch
+ID, so worker count and resume do not change a batch's reference subgroup. In
+serial mode, selection uses the existing NumPy random stream. Nonpositive or
+noninteger values, missing cancer-type labels, or eligible types too small for
+the PCA target fail with an error.
 
 Full-reference distance-filtered Mixed datasets save
 `gep_filtering_distance_distribution.png` and `.svg` in their result directory.
@@ -564,9 +576,11 @@ fields are null when GEP filtering does not use PCA space. Per-count
 comparison artifact paths are listed in `pca_runs`; post-GEP gene-quantile
 PCA paths are listed in `post_gep_quantile_pca_runs`.
 When reduced `n_subgroup` filtering is active, the summary also records the
-resolved subgroup size, full reference sample count, subgroup PCA fit count,
-and minimum/maximum fitted component counts across batches. No per-batch PCA
-model artifacts are written.
+per-type sample cap, full reference sample count, subgroup PCA fit count, and
+minimum/maximum fitted component counts across batches. It also reports kept
+candidate counts by the cancer type selected for each batch in
+`gep_filtering_kept_n_samples_by_cancer_type`. No per-batch PCA model artifacts
+are written.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with

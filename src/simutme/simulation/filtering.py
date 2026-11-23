@@ -149,7 +149,7 @@ class FixedGeneFilter:
 
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
-                 correlation_file=None):
+                 correlation_file=None, reference_cancer_types=None):
         self.genes = list(genes)
         self.reference_file = Path(reference_file)
         self.reference_linear = normalize_selected(reference_linear, self.genes, "Reference")
@@ -168,14 +168,60 @@ class FixedGeneFilter:
             self.reference_sample_count
             if requested_n_subgroup is None else int(requested_n_subgroup)
         )
-        if self.n_subgroup > self.reference_sample_count:
-            raise ValueError(
-                f'"n_subgroup" ({self.n_subgroup}) exceeds the {self.reference_sample_count} '
-                "eligible GEP reference samples."
+        self.reference_cancer_type_groups = {}
+        self.reference_cancer_type_hash = None
+        if requested_n_subgroup is not None:
+            if reference_cancer_types is None:
+                raise ValueError(
+                    '"n_subgroup" requires cancer-type labels for every reference sample.'
+                )
+            if isinstance(reference_cancer_types, pd.Series):
+                cancer_types = reference_cancer_types.copy()
+                if cancer_types.index.has_duplicates:
+                    raise ValueError(
+                        "Reference cancer-type labels contain duplicate sample IDs."
+                    )
+                cancer_types = cancer_types.reindex(self.reference_log.index)
+            else:
+                cancer_types = pd.Series(reference_cancer_types)
+                if len(cancer_types) != self.reference_sample_count:
+                    raise ValueError(
+                        "Reference cancer-type labels must match the number of "
+                        "eligible GEP reference samples."
+                    )
+                cancer_types.index = self.reference_log.index
+            if cancer_types.isna().any():
+                missing_count = int(cancer_types.isna().sum())
+                raise ValueError(
+                    "Cancer-type labels are missing for "
+                    f"{missing_count} eligible GEP reference samples."
+                )
+            cancer_type_values = cancer_types.astype(str).to_numpy()
+            for cancer_type in sorted(set(cancer_type_values)):
+                self.reference_cancer_type_groups[cancer_type] = np.flatnonzero(
+                    cancer_type_values == cancer_type
+                )
+            self.reference_cancer_type_hash = hashlib.sha256(
+                pd.util.hash_pandas_object(
+                    pd.Series(
+                        cancer_type_values,
+                        index=self.reference_log.index,
+                        name="cancer_type",
+                    ),
+                    index=True,
+                ).values.tobytes()
+            ).hexdigest()
+        self.uses_subgroup_reference = (
+            requested_n_subgroup is not None
+            and (
+                len(self.reference_cancer_type_groups) > 1
+                or self.n_subgroup < self.reference_sample_count
             )
-        self.uses_subgroup_reference = self.n_subgroup < self.reference_sample_count
+        )
         self.last_batch_pca_n_components = None
         self.last_batch_id = None
+        self.last_batch_cancer_type = None
+        self.last_batch_reference_sample_count = None
         if requested_n_subgroup is not None:
             if (not self.gep.enabled or self.gep.filtering_method != "median_gep"
                     or not self.gep.filtering_in_pca_space):
@@ -188,15 +234,19 @@ class FixedGeneFilter:
                 if isinstance(component_target, (int, np.integer))
                 else 2
             )
-            maximum_components = min(self.n_subgroup, len(self.genes))
-            if self.n_subgroup < minimum_samples or (
-                isinstance(component_target, (int, np.integer))
-                and component_target > maximum_components
-            ):
-                raise ValueError(
-                    f'"n_subgroup"={self.n_subgroup} and {len(self.genes)} selected genes '
-                    "are too small for the configured GEP-filtering PCA components."
-                )
+            for cancer_type, indices in self.reference_cancer_type_groups.items():
+                sample_count = min(self.n_subgroup, len(indices))
+                maximum_components = min(sample_count, len(self.genes))
+                if sample_count < minimum_samples or (
+                    isinstance(component_target, (int, np.integer))
+                    and component_target > maximum_components
+                ):
+                    raise ValueError(
+                        f'Cancer type "{cancer_type}" has {len(indices)} eligible GEP '
+                        f"reference samples; n_subgroup={self.n_subgroup} yields "
+                        f"{sample_count} samples, too few for the configured "
+                        "GEP-filtering PCA components."
+                    )
         self.result_dir = Path(result_dir)
         self.gene_list_file = self.result_dir / "fixed_filtering_gene_list.csv"
         self.correlation_file = str(correlation_file) if correlation_file else None
@@ -229,10 +279,16 @@ class FixedGeneFilter:
             "n_subgroup": self.n_subgroup,
             "reference_sample_count": self.reference_sample_count,
             "reference_sampling": (
-                "per-candidate-batch" if self.uses_subgroup_reference
+                "one-cancer-type-per-candidate-batch" if self.uses_subgroup_reference
                 else "full-reference"
             ),
         }
+        if self.reference_cancer_type_hash is not None:
+            self.identity.update(
+                reference_cancer_type_count=len(self.reference_cancer_type_groups),
+                reference_cancer_type_hash=self.reference_cancer_type_hash,
+                cancer_type_kept_counts="accepted-candidates-v1",
+            )
         if self.gep.filtering_by_gene_range:
             self.identity["range_space"] = "normalized-log2-tpm-plus-1-v1"
         if self.gep.filtering_method == "mgep":
@@ -391,8 +447,20 @@ class FixedGeneFilter:
 
     def _sample_subgroup_indices(self, seed=None):
         sampler = np.random if seed is None else np.random.default_rng(seed)
+        if not self.reference_cancer_type_groups:
+            return sampler.choice(
+                self.reference_sample_count,
+                size=min(self.n_subgroup, self.reference_sample_count),
+                replace=False,
+            )
+
+        cancer_type = sampler.choice(list(self.reference_cancer_type_groups))
+        self.last_sampled_cancer_type = cancer_type
+        cancer_type_indices = self.reference_cancer_type_groups[cancer_type]
         return sampler.choice(
-            self.reference_sample_count, size=self.n_subgroup, replace=False,
+            cancer_type_indices,
+            size=min(self.n_subgroup, len(cancer_type_indices)),
+            replace=False,
         )
 
     def prepare_batch_reference(self, batch_id=None, seed=None):
@@ -424,11 +492,15 @@ class FixedGeneFilter:
         )
         self.last_batch_pca_n_components = int(self.pca.n_components_)
         self.last_batch_id = batch_id
+        self.last_batch_cancer_type = self.last_sampled_cancer_type
+        self.last_batch_reference_sample_count = len(indices)
         logger.info(
-            "GEP PCA subgroup for batch %s: %d/%d reference samples; %d PCs.",
+            "GEP PCA subgroup for batch %s: cancer type %s, %d/%d reference "
+            "samples; %d PCs.",
             batch_id if batch_id is not None else "unknown",
-            self.n_subgroup,
-            self.reference_sample_count,
+            self.last_batch_cancer_type,
+            len(indices),
+            len(self.reference_cancer_type_groups[self.last_batch_cancer_type]),
             self.last_batch_pca_n_components,
         )
         return self.reference_distances
@@ -470,6 +542,10 @@ class FixedGeneFilter:
         if self.uses_subgroup_reference:
             self.last_batch_pca_n_components = None
             self.last_batch_id = batch_id
+            self.last_batch_cancer_type = None
+            self.last_batch_reference_sample_count = None
+        elif self.gep.n_subgroup is not None and len(self.reference_cancer_type_groups) == 1:
+            self.last_batch_cancer_type = next(iter(self.reference_cancer_type_groups))
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
             return normalized

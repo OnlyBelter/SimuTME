@@ -28,18 +28,25 @@ def gep_params(**overrides):
     return ResolvedGEPFilteringParams(**values)
 
 
-def make_space(tmp_path, **overrides):
+def make_space(tmp_path, cancer_types=None, **overrides):
     reference = pd.DataFrame(
         {"b": [8.0, 6.0, 4.0], "a": [2.0, 4.0, 6.0], "unused": [100.0] * 3},
         index=["r1", "r2", "r3"],
     )
+    if cancer_types is None and overrides.get("n_subgroup") is not None:
+        cancer_types = ["A"] * len(reference)
     return FixedGeneFilter(
         ["a", "b"], reference, tmp_path / "reference.csv", None,
         gep_params(**overrides), tmp_path / "target", 3, 3,
+        reference_cancer_types=(
+            None if cancer_types is None
+            else pd.Series(cancer_types, index=reference.index)
+        ),
     )
 
 
-def test_reduced_n_subgroup_samples_per_batch_and_discards_pca(tmp_path):
+def test_reduced_n_subgroup_samples_per_batch_and_discards_pca(tmp_path, caplog):
+    caplog.set_level("INFO")
     space = make_space(
         tmp_path,
         filtering_method="median_gep",
@@ -62,6 +69,9 @@ def test_reduced_n_subgroup_samples_per_batch_and_discards_pca(tmp_path):
     accepted = space.filter(candidates, batch_id=3, subgroup_seed=42)
     assert len(accepted) == len(candidates)
     assert space.last_batch_pca_n_components == 1
+    assert space.last_batch_cancer_type == "A"
+    assert space.last_batch_reference_sample_count == 2
+    assert "cancer type A, 2/3 reference samples" in caplog.text
     assert space.pca is None
     assert space.reference_coordinates is None
     assert space.reference_distances is None
@@ -77,22 +87,131 @@ def test_reduced_n_subgroup_samples_per_batch_and_discards_pca(tmp_path):
     assert space.pca is None
 
 
-def test_n_subgroup_must_fit_reference_and_pca_target(tmp_path):
-    with pytest.raises(ValueError, match="exceeds the 3 eligible"):
-        make_space(
-            tmp_path / "too-large",
-            filtering_method="median_gep",
-            filtering_in_pca_space=True,
-            pca_n_components=1,
-            n_subgroup=4,
-        )
-    with pytest.raises(ValueError, match="too small for the configured"):
+def test_n_subgroup_is_a_per_type_cap_and_must_fit_each_pca(tmp_path):
+    full_reference = make_space(
+        tmp_path / "larger-than-reference",
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=4,
+    )
+    assert full_reference.uses_subgroup_reference is False
+    np.testing.assert_array_equal(
+        np.sort(full_reference._sample_subgroup_indices(seed=42)), [0, 1, 2],
+    )
+
+    with pytest.raises(ValueError, match="too few for the configured"):
         make_space(
             tmp_path / "too-small",
             filtering_method="median_gep",
             filtering_in_pca_space=True,
             pca_n_components=1,
             n_subgroup=1,
+        )
+
+
+def test_subgroup_selects_one_cancer_type_then_samples_without_replacement(tmp_path):
+    reference = pd.DataFrame(
+        {"a": [1, 2, 3, 4, 5, 6], "b": [6, 5, 4, 3, 2, 1]},
+        index=["a1", "a2", "a3", "b1", "b2", "b3"],
+        dtype=float,
+    )
+    cancer_types = pd.Series(
+        ["A", "A", "A", "B", "B", "B"], index=reference.index,
+    )
+    space = FixedGeneFilter(
+        ["a", "b"], reference, tmp_path / "reference.csv", None,
+        gep_params(
+            filtering_method="median_gep",
+            filtering_in_pca_space=True,
+            pca_n_components=1,
+            n_subgroup=2,
+        ),
+        tmp_path / "target", 2, 2, reference_cancer_types=cancer_types,
+    )
+
+    indices = space._sample_subgroup_indices(seed=17)
+    assert len(indices) == len(set(indices.tolist())) == 2
+    assert cancer_types.iloc[indices].nunique() == 1
+    assert np.array_equal(indices, space._sample_subgroup_indices(seed=17))
+
+    rng = np.random.default_rng(17)
+    expected_type = rng.choice(["A", "B"])
+    expected_group = np.flatnonzero(cancer_types.to_numpy() == expected_type)
+    expected_indices = rng.choice(expected_group, size=2, replace=False)
+    assert space.last_sampled_cancer_type == expected_type
+    np.testing.assert_array_equal(indices, expected_indices)
+
+    changed_types = cancer_types.copy()
+    changed_types.iloc[0], changed_types.iloc[3] = "B", "A"
+    changed_space = FixedGeneFilter(
+        ["a", "b"], reference, tmp_path / "reference.csv", None,
+        gep_params(
+            filtering_method="median_gep",
+            filtering_in_pca_space=True,
+            pca_n_components=1,
+            n_subgroup=2,
+        ),
+        tmp_path / "changed", 2, 2, reference_cancer_types=changed_types,
+    )
+    assert (
+        changed_space.identity["reference_cancer_type_hash"]
+        != space.identity["reference_cancer_type_hash"]
+    )
+    assert space.identity["cancer_type_kept_counts"] == "accepted-candidates-v1"
+
+
+@pytest.mark.parametrize("n_subgroup", [4, 7])
+def test_subgroup_larger_than_selected_type_uses_all_its_samples(
+    tmp_path, n_subgroup,
+):
+    reference = pd.DataFrame(
+        {"a": [1, 2, 3, 4, 5, 6], "b": [6, 5, 4, 3, 2, 1]},
+        index=["a1", "a2", "a3", "b1", "b2", "b3"],
+        dtype=float,
+    )
+    cancer_types = pd.Series(
+        ["A", "A", "A", "B", "B", "B"], index=reference.index,
+    )
+    space = FixedGeneFilter(
+        ["a", "b"], reference, tmp_path / "reference.csv", None,
+        gep_params(
+            filtering_method="median_gep",
+            filtering_in_pca_space=True,
+            pca_n_components=1,
+            n_subgroup=n_subgroup,
+        ),
+        tmp_path / "target", 2, 2, reference_cancer_types=cancer_types,
+    )
+
+    assert space.uses_subgroup_reference is True
+    indices = space._sample_subgroup_indices(seed=17)
+    assert len(indices) == 3
+    assert cancer_types.iloc[indices].nunique() == 1
+    assert set(indices) == set(
+        np.flatnonzero(cancer_types.to_numpy() == space.last_sampled_cancer_type)
+    )
+
+
+def test_too_small_cancer_type_fails_pca_validation(tmp_path):
+    reference = pd.DataFrame(
+        {"a": [1, 2, 3], "b": [3, 2, 1]},
+        index=["a1", "a2", "b1"],
+        dtype=float,
+    )
+    with pytest.raises(ValueError, match='Cancer type "B".*too few'):
+        FixedGeneFilter(
+            ["a", "b"], reference, tmp_path / "reference.csv", None,
+            gep_params(
+                filtering_method="median_gep",
+                filtering_in_pca_space=True,
+                pca_n_components=1,
+                n_subgroup=2,
+            ),
+            tmp_path / "target", 2, 2,
+            reference_cancer_types=pd.Series(
+                ["A", "A", "B"], index=reference.index,
+            ),
         )
 
 
@@ -514,6 +633,24 @@ def test_reference_subset_and_empty_subset(workflow_case):
     space = workflow._prepare_fixed_gene_filter(*args, gep, gene, config, config.simu_bulk_dir / "target")
     assert space.reference_log.index.tolist() == ["r1", "r2"]
     assert len(space.prepare_distance_reference()) == 2
+
+    subgroup_gep = replace(
+        gep,
+        enabled=True,
+        filtering_method="median_gep",
+        filtering_in_pca_space=True,
+        pca_n_components=1,
+        n_subgroup=2,
+    )
+    subgroup_space = workflow._prepare_fixed_gene_filter(
+        *args, subgroup_gep, gene, config, config.simu_bulk_dir / "target-subgroup",
+    )
+    assert list(subgroup_space.reference_cancer_type_groups) == ["A"]
+    np.testing.assert_array_equal(
+        subgroup_space.reference_cancer_type_groups["A"], [0, 1],
+    )
+    assert subgroup_space.identity["reference_cancer_type_count"] == 1
+
     with pytest.raises(ValueError, match="No reference samples"):
         workflow._prepare_fixed_gene_filter(
             *args, replace(gep, filtering_ref_types=["missing"]), gene, config,
@@ -523,11 +660,16 @@ def test_reference_subset_and_empty_subset(workflow_case):
 
 def test_workflow_pca_summary_and_cached_totals(workflow_case):
     config, params, _, batches = workflow_case
-    params["gep_filtering"] = True
+    params.update(
+        gep_filtering=True,
+        n_subgroup=2,
+        filtering_ref_types=["A"],
+    )
     output = workflow.run_bulk_simulation("target", params, config)
     summary = read_summary(output)
     assert summary["gep_pca_n_components"] == summary["gep_filtering_n_pcs"] == 1
     assert summary["gep_filtering_input_n_samples"] == 90
+    assert summary["gep_filtering_kept_n_samples_by_cancer_type"] == {"A": 90}
     assert ad.read_h5ad(output).n_obs == 3
     png = Path(summary["gep_filtering_distance_plot_png"])
     svg = Path(summary["gep_filtering_distance_plot_svg"])

@@ -821,6 +821,7 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
         },
         gep_filtering_input_n_samples=14,
         gep_filtering_kept_n_samples=10,
+        gep_filtering_kept_n_samples_by_cancer_type={"A": 6, "B": 4},
         gep_filtering_removed_n_samples=4,
         gep_filtering_pca_target=0.9,
         gep_filtering_n_pcs=576,
@@ -831,6 +832,9 @@ def test_build_mixed_dataset_summary_writes_expected_fields(tmp_path: Path, monk
     assert summary["generated_n_genes"] == 5
     assert summary["gep_filtering_input_n_samples"] == 14
     assert summary["gep_filtering_kept_n_samples"] == 10
+    assert summary["gep_filtering_kept_n_samples_by_cancer_type"] == {
+        "A": 6, "B": 4,
+    }
     assert summary["gep_filtering_removed_n_samples"] == 4
     assert summary["gep_pca_n_components"] == 0.9
     assert summary["gep_filtering_n_pcs"] == 576
@@ -910,6 +914,7 @@ def test_build_mixed_dataset_summary_writes_null_gep_filtering_totals_when_disab
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["gep_filtering_input_n_samples"] is None
     assert summary["gep_filtering_kept_n_samples"] is None
+    assert summary["gep_filtering_kept_n_samples_by_cancer_type"] is None
     assert summary["gep_filtering_removed_n_samples"] is None
     assert summary["gene_list_file"] == str(all_gene_list)
     assert summary["filtered_gene_count"] is None

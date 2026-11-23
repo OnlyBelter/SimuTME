@@ -91,6 +91,7 @@ def _run_batch(batch_id):
     return {
         "batch_id": batch_id,
         "expression": accepted,
+        "cancer_type": space.last_batch_cancer_type,
         "fractions": fractions.loc[indices].copy(),
         "selected": selected.loc[indices].copy(),
         "input": len(expression),
@@ -199,7 +200,11 @@ def run_parallel_candidates(generator, config, obs, space):
                     for future in futures.values():
                         future.cancel()
                     raise RuntimeError(f"Parallel candidate batch {batch_id} failed.") from exc
-                generator._record_gep_filtering_counts(result["input"], result["kept"])
+                generator._record_gep_filtering_counts(
+                    result["input"],
+                    result["kept"],
+                    cancer_type=result["cancer_type"],
+                )
                 for name, value in result["stats"].items():
                     attribute = {
                         "gene_range_input_n_samples": "range_input",
