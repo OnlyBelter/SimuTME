@@ -1305,11 +1305,12 @@ def _resolve_parallel_candidate_settings(dataset_name, params, config):
         method = _resolve_dataset_override(
             params, config, "gep_filtering_method", getattr(config, "gep_filtering_method", "median_gep")
         )
-        if (params.get("sampling_method_prop", "segment") != "segment"
+        sampling_method = params.get("sampling_method_prop", "segment")
+        if (sampling_method not in ("segment", "dirichlet")
                 or not enabled or method not in ("mgep", "median_gep")):
             raise ValueError(
-                f'Mixed dataset "{dataset_name}" requires segment sampling and mgep or '
-                "PCA-space L1 median_gep filtering for parallel candidates."
+                f'Mixed dataset "{dataset_name}" requires segment or Dirichlet sampling '
+                "and mgep or PCA-space L1 median_gep filtering for parallel candidates."
             )
         if method == "median_gep":
             in_pca = _resolve_dataset_override(

@@ -4,6 +4,15 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## November 24, 2026
+
+### Parallel Dirichlet candidate generation
+
+Mixed datasets can use Dirichlet cell-proportion sampling with the parallel
+candidate engine and supported GEP filters. Fraction draws use a deterministic
+per-batch stream from `dirichlet_sampling_seed`, falling back to
+`mixed_candidate_seed`; SCT-profile sampling retains the candidate seed stream.
+
 ## November 7, 2026
 
 ### Parallel PCA-space median-GEP filtering

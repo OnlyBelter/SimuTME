@@ -55,14 +55,27 @@ def _run_batch(batch_id):
     space.distance_input = space.distance_kept = 0
     space.mgep_distance_input = space.mgep_distance_kept = 0
     started = perf_counter()
+    sampling_method = config.get("sampling_method_prop", "segment")
+    fraction_rng = None
+    if sampling_method == "dirichlet":
+        fraction_seed = config.get("dirichlet_sampling_seed")
+        if fraction_seed is None:
+            fraction_seed = config["seed"]
+        # Keep the fraction stream distinct from candidate and subgroup streams.
+        fraction_rng = np.random.default_rng(
+            np.random.SeedSequence([fraction_seed, batch_id, 2])
+        )
     fractions = generate_cell_fraction(
-        sampling_method="segment",
+        sampling_method=sampling_method,
         n_cell_frac=config["batch_size"],
-        sample_prefix=f"s_segment_{batch_id}",
-        cell_prop_prior=config["prior"],
+        sample_prefix=f"s_{sampling_method}_{batch_id}",
+        cell_prop_prior=config["prior"] if sampling_method == "segment" else None,
         cell_type2subtype=generator.cell_fraction_type2subtype,
+        dirichlet_alpha=config.get("dirichlet_alpha"),
+        rng=fraction_rng,
         max_segment_sampling_attempts=(
-            max(10000, config["batch_size"] * 500) if config["prior"] else None
+            max(10000, config["batch_size"] * 500)
+            if sampling_method == "segment" and config["prior"] else None
         ),
     )
     fraction_stats = fractions.attrs.get("segment_sampling_stats")
@@ -139,13 +152,20 @@ def run_parallel_candidates(generator, config, obs, space):
     worker_config = {
         "seed": config.mixed_candidate_seed,
         "batch_size": _candidate_batch_size(config.n_samples, config.filtering),
+        "sampling_method_prop": config.sampling_method_prop,
         "prior": config.cell_prop_prior,
+        "dirichlet_alpha": config.dirichlet_alpha,
+        "dirichlet_sampling_seed": config.dirichlet_sampling_seed,
         "add_noise": config.add_noise,
         "noise_params": config.noise_params,
     }
     workers = config.mixed_candidate_workers
-    logger.info("Parallel candidates: workers=%d, batch_size=%d, seed=%d.",
-                workers, worker_config["batch_size"], config.mixed_candidate_seed)
+    logger.info(
+        "Parallel candidates: workers=%d, batch_size=%d, seed=%d, sampling=%s, "
+        "dirichlet_seed=%s.",
+        workers, worker_config["batch_size"], config.mixed_candidate_seed,
+        config.sampling_method_prop, config.dirichlet_sampling_seed,
+    )
     with tempfile.TemporaryDirectory(prefix="simutme-candidates-") as directory:
         started = perf_counter()
         matrix_path = _store_shared_matrix(source, directory)

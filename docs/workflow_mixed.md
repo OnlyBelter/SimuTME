@@ -338,11 +338,14 @@ Gene filtering or PCA visualization alone does not enable all-cell-type plots.
 ## Parallel candidate generation
 
 The optional CPU engine processes independent Mixed candidate batches in
-parallel. It supports segment sampling with `mgep` or PCA-space L1
-`median_gep` GEP filtering and an eager SCT reference. The default
-`mixed_candidate_workers: 0` retains the existing serial workflow, including
-its loading mode. To enable parallel generation for one dataset, add a worker
-count and seed to that dataset:
+parallel. It supports segment or Dirichlet cell-proportion sampling with
+`mgep` or PCA-space L1 `median_gep` GEP filtering and an eager SCT reference.
+Fraction sampling is a distinct batch stage; generated fractions determine the
+per-cell-type SCT sampling counts, after which all methods share the same
+aggregation and filtering path. The default `mixed_candidate_workers: 0`
+retains the existing serial workflow, including its loading mode. To enable
+parallel generation for one dataset, add a worker count and seed to that
+dataset:
 
 ```yaml
 mixed_candidate_workers: 8
@@ -367,6 +370,11 @@ high enough for the SCT reference. The temporary directory specified by
 `TMPDIR` must have space for a shared copy of the SCT expression matrix and,
 when reduced `n_subgroup` filtering is enabled, the read-only log-expression
 GEP reference matrix.
+For parallel Dirichlet batches, `dirichlet_sampling_seed` controls fraction
+draws when set; otherwise the fraction stream is derived from
+`mixed_candidate_seed`. The candidate seed controls SCT-profile sampling and
+other worker randomness. Results are independent of worker count and
+completion order, but parallel draws need not match historical serial draws.
 Parallel workers preserve the configured filtering and sampling rules, but
 their seeded random draws differ from existing serial runs.
 

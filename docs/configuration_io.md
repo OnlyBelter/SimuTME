@@ -136,12 +136,19 @@ override the global `parameters` values with fields of the same names.
 - `mixed_candidate_seed` defaults to `null`. A nonnegative integer is
   required when the parallel engine is enabled.
 
-Parallel generation supports segment sampling with either `mgep` or
-PCA-space L1 `median_gep` GEP filtering and an eager SCT reference. For
-`median_gep`, set `gep_filtering_in_pca_space: true` and `gep_norm_ord: 1`.
-Set `mixed_sct_loading_mode: "eager"`, or ensure `auto` resolves to eager
-loading. Other combinations fail before generation. A dataset-level override
-can enable the engine for one target while the global default remains serial.
+Parallel generation supports segment or Dirichlet cell-proportion sampling
+with either `mgep` or PCA-space L1 `median_gep` GEP filtering and an eager SCT
+reference. For `median_gep`, set `gep_filtering_in_pca_space: true` and
+`gep_norm_ord: 1`. Set `mixed_sct_loading_mode: "eager"`, or ensure `auto`
+resolves to eager loading. Other combinations fail before generation. A
+dataset-level override can enable the engine for one target while the global
+default remains serial.
+
+Dirichlet candidate batches use `dirichlet_sampling_seed` for cell fractions
+when set; otherwise they derive the fraction stream from `mixed_candidate_seed`.
+The candidate seed controls SCT-profile sampling and other worker randomness.
+Both streams are deterministic across worker counts, but parallel draws need
+not match historical serial draws.
 
 The parallel engine uses deterministic batch seeds. For unchanged inputs,
 seed, and batch size, its output is independent of worker count, but does not

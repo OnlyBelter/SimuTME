@@ -138,12 +138,13 @@ class GEPGenerationConfig:
         if self.mixed_candidate_workers:
             if self.mixed_candidate_seed is None:
                 raise ValueError('"mixed_candidate_seed" is required for parallel candidates.')
-            if (self.simu_method != "mul" or self.sampling_method_prop != "segment"
+            if (self.simu_method != "mul"
+                    or self.sampling_method_prop not in ("segment", "dirichlet")
                     or not self.filtering or self.filtering_method not in ("mgep", "median_gep")
                     or self.filtering_space is None):
                 raise ValueError(
-                    "Parallel candidates require Mixed segment sampling with mgep or "
-                    "PCA-space L1 median_gep filtering."
+                    "Parallel candidates require Mixed segment or Dirichlet sampling with "
+                    "mgep or PCA-space L1 median_gep filtering."
                 )
             if self.filtering_method == "median_gep" and (
                     not self.filtering_in_pca_space or self.norm_ord != 1
@@ -796,7 +797,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         }
         if config.mixed_candidate_workers:
             generation["parallel_candidates"] = {
-                "version": "parallel-candidates-v1",
+                "version": "parallel-candidates-v2",
                 "seed": config.mixed_candidate_seed,
                 "batch_size": _candidate_batch_size(config.n_samples, config.filtering),
             }

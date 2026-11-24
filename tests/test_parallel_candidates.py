@@ -43,7 +43,8 @@ def setup_parallel(tmp_path, monkeypatch):
 
     def create(
             name, workers=1, seed=42, method="mgep", quantiles=(None, 1.0),
-            n_subgroup=None):
+            n_subgroup=None, fraction_method="segment", dirichlet_seed=None,
+            dirichlet_alpha=None):
         output = tmp_path / name
         selected_reference = (
             subgroup_reference if n_subgroup is not None else reference
@@ -69,11 +70,12 @@ def setup_parallel(tmp_path, monkeypatch):
             ),
         )
         config = GEPGenerationConfig(
-            n_samples=12, simu_method="mul", sampling_method_prop="segment",
+            n_samples=12, simu_method="mul", sampling_method_prop=fraction_method,
             filtering=True, filtering_method=method, filtering_space=space,
             filtering_in_pca_space=(method == "median_gep"), norm_ord=1,
             mixed_candidate_workers=workers, mixed_candidate_seed=seed,
-            n_subgroup=n_subgroup,
+            n_subgroup=n_subgroup, dirichlet_sampling_seed=dirichlet_seed,
+            dirichlet_alpha=dirichlet_alpha,
         )
         return generator, config
 
@@ -113,14 +115,83 @@ def test_parallel_workers_produce_identical_ordered_outputs(setup_parallel, meth
         assert checkpoint["next_batch"] == 3
 
 
-def test_parallel_subgroup_filtering_is_stable_across_worker_counts(setup_parallel):
+def test_parallel_dirichlet_is_stable_across_worker_counts(setup_parallel):
+    alpha = {"A": 0.7, "B": 2.0}
+    first, first_config = setup_parallel(
+        "dirichlet-one", workers=1, fraction_method="dirichlet",
+        dirichlet_seed=73, dirichlet_alpha=alpha,
+    )
+    second, second_config = setup_parallel(
+        "dirichlet-two", workers=2, fraction_method="dirichlet",
+        dirichlet_seed=73, dirichlet_alpha=alpha,
+    )
+    first.generate_gep(first_config)
+    second.generate_gep(second_config)
+
+    for first_path, second_path in (
+        (first.generated_bulk_gep_csv_fp, second.generated_bulk_gep_csv_fp),
+        (first.generated_cell_fraction_fp, second.generated_cell_fraction_fp),
+        (first.sampled_sc_cell_id_file_path, second.sampled_sc_cell_id_file_path),
+    ):
+        pd.testing.assert_frame_equal(pd.read_csv(first_path), pd.read_csv(second_path))
+
+    fractions = pd.read_csv(first.generated_cell_fraction_fp, index_col=0)
+    np.testing.assert_allclose(fractions.sum(axis=1), 1.0, atol=1e-4)
+    assert first.generated_bulk_gep_counter == second.generated_bulk_gep_counter == 12
+
+    changed_seed, changed_seed_config = setup_parallel(
+        "dirichlet-changed-seed", workers=1, seed=42,
+        fraction_method="dirichlet", dirichlet_seed=74, dirichlet_alpha=alpha,
+    )
+    changed_seed.generate_gep(changed_seed_config)
+    changed_fractions = pd.read_csv(changed_seed.generated_cell_fraction_fp, index_col=0)
+    assert not fractions.equals(changed_fractions)
+
+    changed_candidate_seed, candidate_seed_config = setup_parallel(
+        "dirichlet-changed-candidate-seed", workers=1, seed=99,
+        fraction_method="dirichlet", dirichlet_seed=73, dirichlet_alpha=alpha,
+    )
+    changed_candidate_seed.generate_gep(candidate_seed_config)
+    candidate_fractions = pd.read_csv(
+        changed_candidate_seed.generated_cell_fraction_fp, index_col=0,
+    )
+    pd.testing.assert_frame_equal(fractions, candidate_fractions)
+
+
+def test_parallel_dirichlet_seed_falls_back_to_candidate_seed(setup_parallel):
+    first, first_config = setup_parallel(
+        "dirichlet-fallback-one", workers=1, seed=91, fraction_method="dirichlet",
+    )
+    second, second_config = setup_parallel(
+        "dirichlet-fallback-two", workers=2, seed=91, fraction_method="dirichlet",
+    )
+    changed_seed, changed_seed_config = setup_parallel(
+        "dirichlet-fallback-changed", workers=1, seed=92,
+        fraction_method="dirichlet",
+    )
+    first.generate_gep(first_config)
+    second.generate_gep(second_config)
+    changed_seed.generate_gep(changed_seed_config)
+
+    fractions = pd.read_csv(first.generated_cell_fraction_fp, index_col=0)
+    second_fractions = pd.read_csv(second.generated_cell_fraction_fp, index_col=0)
+    changed_fractions = pd.read_csv(changed_seed.generated_cell_fraction_fp, index_col=0)
+    pd.testing.assert_frame_equal(fractions, second_fractions)
+    assert not fractions.equals(changed_fractions)
+
+
+@pytest.mark.parametrize("fraction_method", ["segment", "dirichlet"])
+def test_parallel_subgroup_filtering_is_stable_across_worker_counts(
+        setup_parallel, fraction_method):
     first, first_config = setup_parallel(
         "subgroup-one", workers=1, method="median_gep",
         quantiles=(None, 1.0), n_subgroup=2,
+        fraction_method=fraction_method, dirichlet_seed=73,
     )
     second, second_config = setup_parallel(
         "subgroup-two", workers=2, method="median_gep",
         quantiles=(None, 1.0), n_subgroup=2,
+        fraction_method=fraction_method, dirichlet_seed=73,
     )
     first.generate_gep(first_config)
     second.generate_gep(second_config)
@@ -395,9 +466,12 @@ def test_parallel_dataset_override_and_restrictions():
     params = {"dataset_type": "Mixed", "mixed_candidate_workers": 4,
               "mixed_candidate_seed": 42}
     assert _resolve_parallel_candidate_settings("target", params, config) == (4, 42)
-    with pytest.raises(ValueError, match="segment sampling"):
+    assert _resolve_parallel_candidate_settings(
+        "target", {**params, "sampling_method_prop": "dirichlet"}, config
+    ) == (4, 42)
+    with pytest.raises(ValueError, match="parallel candidates"):
         _resolve_parallel_candidate_settings(
-            "target", {**params, "sampling_method_prop": "dirichlet"}, config
+            "target", {**params, "sampling_method_prop": "random"}, config
         )
     config.mixed_sct_loading_mode = "lazy"
     with pytest.raises(ValueError, match="eager"):
@@ -421,8 +495,11 @@ def test_parallel_median_requires_pca_l1_and_respects_overrides(setup_parallel):
         with pytest.raises(ValueError, match="PCA-space L1"):
             _resolve_parallel_candidate_settings("target", {**params, **override}, config)
     for override in ({"gep_filtering_method": "mean_gep"}, {"gep_filtering": False}):
-        with pytest.raises(ValueError, match="segment sampling"):
+        with pytest.raises(ValueError, match="parallel candidates"):
             _resolve_parallel_candidate_settings("target", {**params, **override}, config)
+    assert _resolve_parallel_candidate_settings(
+        "target", {**params, "sampling_method_prop": "dirichlet"}, config,
+    ) == (2, 42)
     assert _resolve_parallel_candidate_settings(
         "target", {**params, "mixed_candidate_workers": 0, "gep_norm_ord": 2}, config,
     ) == (0, 42)
@@ -596,7 +673,9 @@ def test_benchmark_prepares_median_pca_worker_state(setup_parallel, tmp_path, mo
 
 
 @pytest.mark.parametrize("method", ["mgep", "median_gep"])
-def test_workflow_resolves_and_runs_parallel_dataset(setup_parallel, tmp_path, monkeypatch, method):
+@pytest.mark.parametrize("fraction_method", ["segment", "dirichlet"])
+def test_workflow_resolves_and_runs_parallel_dataset(
+        setup_parallel, tmp_path, monkeypatch, method, fraction_method):
     generator, _ = setup_parallel("unused")
     reference = tmp_path / "reference.csv"
     pd.DataFrame({"g1": [0., 5., 10.], "g2": [10., 5., 0.],
@@ -611,13 +690,18 @@ def test_workflow_resolves_and_runs_parallel_dataset(setup_parallel, tmp_path, m
         plot_pca_for_comparison=False, mixed_sct_loading_mode="eager",
     )
     params = {
-        "dataset_type": "Mixed", "sampling_method_prop": "segment", "n_samples": 3,
+        "dataset_type": "Mixed", "sampling_method_prop": fraction_method, "n_samples": 3,
         "sct_reference": {"source_type": "path", "file_path": str(generator.sct_dataset_file_path)},
         "gep_filtering": True, "gep_filtering_method": method,
         "gep_filtering_in_pca_space": method == "median_gep",
         "gep_pca_n_components": 1, "gep_norm_ord": 1, "gene_filtering": False,
         "mixed_candidate_workers": 1, "mixed_candidate_seed": 42,
     }
+    if fraction_method == "dirichlet":
+        params.update({
+            "dirichlet_sampling_seed": 73,
+            "dirichlet_alpha": {"A": 0.7, "B": 2.0},
+        })
     monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda **kwargs: None)
     workflow.preflight_segment_cell_prop_priors(config, {"target": params})
     output = workflow.run_bulk_simulation("target", params, config)
@@ -626,6 +710,12 @@ def test_workflow_resolves_and_runs_parallel_dataset(setup_parallel, tmp_path, m
     metadata = json.loads(metadata_path.read_text())
     assert metadata["parallel_execution"]["workers"] == 1
     assert metadata["identity"]["generation"]["parallel_candidates"]["seed"] == 42
+    assert (
+        metadata["identity"]["generation"]["parallel_candidates"]["version"]
+        == "parallel-candidates-v2"
+    )
+    if fraction_method == "dirichlet":
+        assert metadata["identity"]["generation"]["dirichlet_sampling_seed"] == 73
     if method == "median_gep":
         assert metadata["stats"]["pc_distance_input_n_samples"] >= 3
         assert metadata["generator_stats"]["gep_filtering_n_pcs"] == 1
