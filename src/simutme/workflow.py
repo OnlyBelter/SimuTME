@@ -26,6 +26,7 @@ from .simulation.sampling import (
     format_segment_fraction_caps,
     get_default_dirichlet_alpha,
     merge_cell_prop_prior_with_maxima,
+    normalize_dirichlet_alpha,
     resolve_segment_cell_prop_prior,
     restrict_cell_type2subtype_to_output_types,
 )
@@ -1617,7 +1618,9 @@ def run_bulk_simulation(dataset_name: str,
                     f'for Mixed dataset "{dataset_name}".'
                 )
             resolved_dirichlet_alpha = None
+            dirichlet_alpha_source = None
             dirichlet_sampling_seed = None
+            effective_dirichlet_sampling_seed = None
             if sampling_method_prop == "segment":
                 if (dataset_pred_cell_prop_file_path not in (None, "")
                         and not resolved_gep_filtering.enabled):
@@ -1671,15 +1674,31 @@ def run_bulk_simulation(dataset_name: str,
                 resolved_cell_type2subtypes,
                 config.output_types,
             )
-            resolved_dirichlet_alpha = params.get(
-                'dirichlet_alpha',
-                get_default_dirichlet_alpha(output_cell_type2subtypes),
-            )
+            dirichlet_cell_types = flatten_cell_type2subtype(output_cell_type2subtypes)
+            configured_dirichlet_alpha = params.get("dirichlet_alpha")
+            if configured_dirichlet_alpha is None:
+                resolved_dirichlet_alpha = get_default_dirichlet_alpha(output_cell_type2subtypes)
+            else:
+                resolved_dirichlet_alpha = normalize_dirichlet_alpha(
+                    configured_dirichlet_alpha,
+                    dirichlet_cell_types,
+                )
+            if pred_cell_prop_file_path not in (None, ""):
+                dirichlet_alpha_source = "pred_cell_prop_file"
+            elif configured_dirichlet_alpha is not None:
+                dirichlet_alpha_source = "configured"
+            else:
+                dirichlet_alpha_source = "default_symmetric"
             dirichlet_sampling_seed = _resolve_dataset_override(
                 params,
                 config,
                 "dirichlet_sampling_seed",
                 config.dirichlet_sampling_seed,
+            )
+            effective_dirichlet_sampling_seed = (
+                dirichlet_sampling_seed
+                if dirichlet_sampling_seed is not None
+                else (mixed_candidate_seed if mixed_candidate_workers else None)
             )
         if 'sampling_method_gep' in params:
             logging.info(
@@ -1870,11 +1889,43 @@ def run_bulk_simulation(dataset_name: str,
                 sampling_method_prop == "dirichlet" or resolved_gep_filtering.enabled
             ),
         )
+        estimated_alpha_path = None
         if sampling_method_prop == "dirichlet" and pred_cell_prop_file_path not in (None, ""):
-            _save_estimated_dirichlet_alpha_from_pred_cell_props(
+            estimated_alpha_path = _save_estimated_dirichlet_alpha_from_pred_cell_props(
                 pred_cell_prop_file_path=pred_cell_prop_file_path,
                 cell_types=list(config.output_types),
                 output_dir=Path(simu_bulk_dir) / dataset_name,
+                cancer_types=(
+                    resolved_gep_filtering.filtering_ref_types
+                    if resolved_gep_filtering.enabled
+                    else None
+                ),
+            )
+
+        summary_dirichlet_alpha = None
+        if sampling_method_prop == "dirichlet":
+            if pred_cell_prop_file_path not in (None, ""):
+                summary_dirichlet_alpha = getattr(bulk_generator, "resolved_dirichlet_alpha", None)
+                if (
+                    summary_dirichlet_alpha is None
+                    and isinstance(estimated_alpha_path, (str, Path))
+                    and Path(estimated_alpha_path).is_file()
+                ):
+                    alpha_df = pd.read_csv(estimated_alpha_path)
+                    summary_dirichlet_alpha = {
+                        str(row["cell_type"]): float(row["alpha"])
+                        for _, row in alpha_df.iterrows()
+                    }
+            else:
+                summary_dirichlet_alpha = resolved_dirichlet_alpha
+            logging.info(
+                "   > Dirichlet sampling settings for %s: source=%s, seed=%s, alpha=%s",
+                dataset_name,
+                dirichlet_alpha_source,
+                effective_dirichlet_sampling_seed,
+                {name: f"{value:.6g}" for name, value in summary_dirichlet_alpha.items()}
+                if isinstance(summary_dirichlet_alpha, dict)
+                else summary_dirichlet_alpha,
             )
 
         postprocess_outputs = _run_gene_filtering_postprocess(
@@ -1895,6 +1946,10 @@ def run_bulk_simulation(dataset_name: str,
             gep_filtering=resolved_gep_filtering,
             gene_filtering=resolved_gene_filtering,
             postprocess_outputs=postprocess_outputs,
+            sampling_method_prop=sampling_method_prop,
+            dirichlet_alpha_source=dirichlet_alpha_source,
+            dirichlet_alpha=summary_dirichlet_alpha,
+            dirichlet_sampling_seed=effective_dirichlet_sampling_seed,
             gep_filtering_input_n_samples=bulk_generator.gep_filtering_input_n_samples,
             gep_filtering_kept_n_samples=bulk_generator.gep_filtering_kept_n_samples,
             gep_filtering_kept_n_samples_by_cancer_type=(
@@ -2069,6 +2124,7 @@ def _save_estimated_dirichlet_alpha_from_pred_cell_props(
     pred_cell_prop_file_path: str | Path,
     cell_types: List[str],
     output_dir: str | Path,
+    cancer_types: List[str] | None = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2076,6 +2132,7 @@ def _save_estimated_dirichlet_alpha_from_pred_cell_props(
     alpha_hat = estimate_dirichlet_alpha_from_pred_cell_props(
         pred_cell_prop_file_path=pred_cell_prop_file_path,
         cell_types=cell_types,
+        cancer_types=cancer_types,
     )
     alpha_df = pd.DataFrame(
         [{"cell_type": cell_type, "alpha": float(alpha_value)} for cell_type, alpha_value in alpha_hat.items()]
@@ -3931,6 +3988,10 @@ def _build_mixed_dataset_summary(
     gep_filtering: ResolvedGEPFilteringParams,
     gene_filtering: ResolvedGeneFilteringParams,
     postprocess_outputs: Dict[str, Any],
+    sampling_method_prop: str | None = None,
+    dirichlet_alpha_source: str | None = None,
+    dirichlet_alpha: Dict[str, float] | None = None,
+    dirichlet_sampling_seed: int | None = None,
     gep_filtering_input_n_samples: int | None = None,
     gep_filtering_kept_n_samples: int | None = None,
     gep_filtering_kept_n_samples_by_cancer_type: Dict[str, int] | None = None,
@@ -4012,6 +4073,10 @@ def _build_mixed_dataset_summary(
     summary = {
         "dataset_name": dataset_name,
         "dataset_type": "Mixed",
+        "sampling_method_prop": sampling_method_prop,
+        "dirichlet_alpha_source": dirichlet_alpha_source,
+        "dirichlet_alpha": dirichlet_alpha,
+        "dirichlet_sampling_seed": dirichlet_sampling_seed,
         "generated_bulk_gep_file": str(generated_bulk_gep_fp),
         "generated_cell_fraction_file": str(generated_cell_fraction_fp),
         "generated_n_samples": generated_shape[0] if generated_shape else None,

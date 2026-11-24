@@ -364,10 +364,25 @@ These parameters control the optional SCT sample-diversity analysis step.
 
 ### Dirichlet sampling
 
+When `sampling_method_prop: "dirichlet"` is selected without
+`pred_cell_prop_file_path` or a dataset-level `dirichlet_alpha`, SimuTME falls
+back to a symmetric prior (`alpha = 1.0` for every output cell type, uniform
+over the simplex) and does not write
+`dirichlet_alpha_estimated_from_pred_cell_props.csv`. GEP filtering can still
+shift the accepted cell-fraction distribution away from this pre-filtering
+prior.
+
+When GEP filtering sets `filtering_ref_types` and Dirichlet alpha is estimated
+from `pred_cell_prop_file_path`, SimuTME uses only prediction rows whose
+`cancer_type` matches the selected labels. The prediction CSV must contain a
+`cancer_type` column and at least one matching row. This does not change
+segment sampling or its prediction-file caps.
+
 - `dirichlet_sampling_seed`
   Optional seed for Dirichlet cell-fraction draws. A Mixed dataset can override
   the global value with its own `dirichlet_sampling_seed`. If neither value is
-  set, SimuTME keeps using the global NumPy random state.
+  set, serial mode uses the global NumPy random state and parallel mode falls
+  back to `mixed_candidate_seed`.
 
 ### Optional sorted-bulk-guided SCT imputation parameters
 
@@ -646,6 +661,11 @@ Dataset-local filtering artifacts include `fixed_filtering_gene_list.csv`,
 `gep_filtering_pca.joblib` with `gep_filtering_pca.metadata.json`.
 The summary separates `pre_selection_n_genes`, `shared_n_genes`, and
 `exported_n_genes`; `generated_n_genes` reports the actual artifact dimension.
+It also records `sampling_method_prop`, and for Dirichlet runs reports
+`dirichlet_alpha_source` (`"default_symmetric"`, `"configured"`, or
+`"pred_cell_prop_file"`), the resolved per-cell-type `dirichlet_alpha` vector,
+and the effective `dirichlet_sampling_seed` (all three are `null` for other
+sampling methods).
 For cancer-type-specific `n_subgroup` filtering, the summary also reports
 input and accepted candidate counts by batch reference type, plus their
 acceptance rates in `gep_filtering_acceptance_rate_by_cancer_type`. Each rate

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import warnings
@@ -27,6 +28,7 @@ from .sampling import (
     flatten_cell_type2subtype,
     format_segment_fraction_caps,
     generate_cell_fraction,
+    normalize_dirichlet_alpha,
     restrict_cell_type2subtype_to_output_types,
 )
 from .simu_helper import (sample_random, get_sample_id_random, sample_with_neighbors,
@@ -340,6 +342,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_n_pcs_min = None
         self.gep_filtering_n_pcs_max = None
         self.gep_filtering_subgroup_pca_batches = 0
+        self.resolved_dirichlet_alpha = None
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
@@ -547,9 +550,37 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 return self._generate_gep(config)
         return self._generate_gep(config)
 
+    def _resolve_dirichlet_alpha(self, config: GEPGenerationConfig) -> Optional[Dict[str, float]]:
+        if config.sampling_method_prop != "dirichlet":
+            self.resolved_dirichlet_alpha = None
+            return None
+        cell_type_with_subtype = flatten_cell_type2subtype(self.cell_fraction_type2subtype)
+        if config.pred_cell_prop_file_path is not None:
+            logger.info(
+                'Estimating Dirichlet alpha from predicted cell proportions: %s',
+                config.pred_cell_prop_file_path,
+            )
+            dirichlet_alpha = estimate_dirichlet_alpha_from_pred_cell_props(
+                pred_cell_prop_file_path=config.pred_cell_prop_file_path,
+                cell_types=cell_type_with_subtype,
+                cancer_types=(
+                    config.filtering_ref_types
+                    if config.filtering and config.filtering_ref_types
+                    else None
+                ),
+            )
+            logger.info('Estimated Dirichlet alpha for %d cell types.', len(dirichlet_alpha))
+        else:
+            dirichlet_alpha = normalize_dirichlet_alpha(
+                config.dirichlet_alpha, cell_type_with_subtype
+            )
+        self.resolved_dirichlet_alpha = dirichlet_alpha
+        return dirichlet_alpha
+
     def _generate_gep(self, config: GEPGenerationConfig) -> None:
         self._reset_runtime_log_state()
         self._reset_gep_filtering_stats(config.filtering, config.filtering_space)
+        self.resolved_dirichlet_alpha = None
         self.n_samples = config.n_samples
         self.total_cell_number = config.total_cell_number
         self.filtering_quantile_lower, self.filtering_quantile_upper = config.gep_filtering_quantile
@@ -605,18 +636,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 )
 
         # Main Generation Loop
-        dirichlet_alpha = config.dirichlet_alpha
-        if config.sampling_method_prop == 'dirichlet' and config.pred_cell_prop_file_path is not None:
-            cell_type_with_subtype = flatten_cell_type2subtype(self.cell_fraction_type2subtype)
-            logger.info(
-                'Estimating Dirichlet alpha from predicted cell proportions: %s',
-                config.pred_cell_prop_file_path,
-            )
-            dirichlet_alpha = estimate_dirichlet_alpha_from_pred_cell_props(
-                pred_cell_prop_file_path=config.pred_cell_prop_file_path,
-                cell_types=cell_type_with_subtype,
-            )
-            logger.info('Estimated Dirichlet alpha for %d cell types.', len(dirichlet_alpha))
+        dirichlet_alpha = self._resolve_dirichlet_alpha(config)
         if config.segment_fraction_max_caps:
             logger.info(
                 "Segment empirical maximum caps from %s: %s",
@@ -795,6 +815,19 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 "mixed_candidate_workers", "mixed_candidate_seed",
             )
         }
+        if config.sampling_method_prop == "dirichlet":
+            generation["dirichlet_alpha_filtering_ref_types"] = (
+                list(config.filtering_ref_types)
+                if config.filtering and config.filtering_ref_types else None
+            )
+            if config.pred_cell_prop_file_path is not None:
+                prediction_hash = hashlib.sha256()
+                with Path(config.pred_cell_prop_file_path).open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        prediction_hash.update(chunk)
+                generation["dirichlet_prediction_file_sha256"] = (
+                    prediction_hash.hexdigest()
+                )
         if config.mixed_candidate_workers:
             generation["parallel_candidates"] = {
                 "version": "parallel-candidates-v2",
@@ -993,6 +1026,7 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         if not worker_filter.uses_subgroup_reference:
             worker_filter.reference_log = None
         worker_filter.reference_coordinates = None
+        self._resolve_dirichlet_alpha(config)
         run_parallel_candidates(self, config, obs_df, worker_filter)
 
     def _load_sc_data_for_generation(

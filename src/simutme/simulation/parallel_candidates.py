@@ -149,12 +149,17 @@ def run_parallel_candidates(generator, config, obs, space):
             "total_cell_number",
         )
     }
+    resolved_dirichlet_alpha = getattr(generator, "resolved_dirichlet_alpha", None)
     worker_config = {
         "seed": config.mixed_candidate_seed,
         "batch_size": _candidate_batch_size(config.n_samples, config.filtering),
         "sampling_method_prop": config.sampling_method_prop,
         "prior": config.cell_prop_prior,
-        "dirichlet_alpha": config.dirichlet_alpha,
+        "dirichlet_alpha": (
+            config.dirichlet_alpha
+            if resolved_dirichlet_alpha is None
+            else resolved_dirichlet_alpha
+        ),
         "dirichlet_sampling_seed": config.dirichlet_sampling_seed,
         "add_noise": config.add_noise,
         "noise_params": config.noise_params,

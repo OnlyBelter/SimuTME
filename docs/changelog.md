@@ -6,6 +6,24 @@ that changed on a given date.
 
 ## November 24, 2026
 
+### Cancer-type-filtered Dirichlet alpha estimation
+
+When GEP filtering uses `filtering_ref_types`, Dirichlet alpha estimation from
+`pred_cell_prop_file_path` uses only prediction rows matching those cancer
+types. This applies only to Dirichlet sampling; segment priors and prediction
+caps are unchanged.
+
+### Dirichlet summary reporting and default symmetric alpha docs
+
+Mixed dataset summaries (`mixed_dataset_summary.json`) now record
+`sampling_method_prop` along with `dirichlet_alpha_source`
+(`"default_symmetric"`, `"configured"`, or `"pred_cell_prop_file"`), the
+resolved per-cell-type `dirichlet_alpha` vector, and the effective
+`dirichlet_sampling_seed` for Dirichlet runs. Parallel Dirichlet generation now
+also applies alpha estimates from `pred_cell_prop_file_path` when configured.
+Documentation now explicitly describes the symmetric `alpha = 1.0` fallback when
+neither `pred_cell_prop_file_path` nor `dirichlet_alpha` is provided.
+
 ### Parallel Dirichlet candidate generation
 
 Mixed datasets can use Dirichlet cell-proportion sampling with the parallel

@@ -133,9 +133,15 @@ selection explicit. Use `null` to leave the reference unrestricted. Use
 `["all"]` to select every nonmissing cancer type in the mapping file. In the
 provided TCGA files, `null` and `["all"]` select the same samples because
 every expression sample has a cancer-type annotation. With other files,
-`null` keeps all reference samples, while `["all"]` keeps only samples listed
+`null` keeps all reference samples, while `["all"]` selects only samples listed
 in the mapping. If no reference samples match an explicit selection, SimuTME
 stops with an error.
+
+For Dirichlet sampling, the same selection also restricts rows used to estimate
+`dirichlet_alpha` when `pred_cell_prop_file_path` is configured. The prediction
+CSV must include a `cancer_type` column and at least one row matching the
+selection. This row filtering applies only to Dirichlet alpha estimation;
+segment sampling continues to use its existing priors and prediction-file caps.
 
 ## Reference Source Used By Mixed Simulation
 
@@ -255,17 +261,35 @@ shared path is not used.
 For `sampling_method_prop: "dirichlet"`, the workflow also supports:
 
 - `dirichlet_alpha`
-  A dictionary of concentration parameters keyed by output cell type. Missing
-  keys default to `1.0` at the sampling layer.
+  A dictionary of concentration parameters keyed by output cell type (or a
+  scalar concentration applied to every output cell type). Missing keys default
+  to `1.0` at the sampling layer.
 - `pred_cell_prop_file_path`
   An optional dataset-level override of `paths.pred_cell_prop_file_path`.
   When a file is configured, SimuTME estimates `dirichlet_alpha` from the
   matched cell-type columns and uses the estimated values instead of the
-  manual dictionary.
+  manual dictionary (in both serial and parallel modes), and writes
+  `dirichlet_alpha_estimated_from_pred_cell_props.csv`.
+  When GEP filtering also sets `filtering_ref_types`, SimuTME estimates alpha
+  using only rows whose `cancer_type` matches the selected labels. A missing
+  `cancer_type` column or a selection with no matching prediction rows raises
+  an error.
 - `dirichlet_sampling_seed`
   An optional seed for reproducible Dirichlet cell-fraction draws. A dataset
   value overrides `parameters.dirichlet_sampling_seed`; the seed does not
   control other stochastic steps in Mixed generation.
+
+If neither `pred_cell_prop_file_path` nor `dirichlet_alpha` is provided for a
+Dirichlet dataset, SimuTME runs with the default symmetric prior (`alpha = 1.0`
+for every output cell type, uniform over the simplex) and does not write
+`dirichlet_alpha_estimated_from_pred_cell_props.csv`. Before GEP filtering, each
+of the `K` output cell types has an expected fraction of `1 / K`, while
+individual draws vary and sum to 1. When `gep_filtering: true` is enabled,
+candidate rejection can shift the accepted cell-fraction distribution away from
+the pre-filtering Dirichlet prior. `cell_prop_prior` presets (such as
+`"DeSide_predicted_TCGA_range"`) and `enlarge_cell_prop_prior` are supported
+only for GEP-filtered segment sampling and raise a validation error with
+Dirichlet sampling.
 
 For GEP-filtered segment sampling, set `cell_prop_prior` to a mapping from
 output cell types to `[minimum, maximum]` ranges, or to the
@@ -279,6 +303,10 @@ When a prior is supplied, it takes precedence and prediction-file maximum
 caps are not applied. Missing labels in an explicit mapping remain
 unconstrained; the preset must cover every output label. The workflow checks
 invalid or infeasible bounds before candidate expression generation.
+
+`filtering_ref_types` does not change segment sampling. The static DeSide
+prior, explicit `cell_prop_prior` bounds, and prediction-file caps retain their
+existing behavior; prediction-file caps continue to use all rows.
 
 Without a prior, `paths.pred_cell_prop_file_path` or its dataset-level override
 provides caps. SimuTME requires a numeric, nonnegative column for every
@@ -576,8 +604,14 @@ Typical files include:
 - `full_gene_corr_with_cell_fraction.csv` for reusable, unfiltered correlations
 - `mixed_dataset_summary.json`
 
-The summary records the workflow version, cache identity, pre-selection,
-shared, and exported gene counts, and acceptance totals. It records
+The summary records `sampling_method_prop`, the workflow version, cache
+identity, pre-selection, shared, and exported gene counts, and acceptance
+totals. For Dirichlet datasets, it also reports `dirichlet_alpha_source`
+(`"default_symmetric"`, `"configured"`, or `"pred_cell_prop_file"`), the
+resolved per-cell-type `dirichlet_alpha` vector actually used for sampling, and
+the effective `dirichlet_sampling_seed` (falling back to `mixed_candidate_seed`
+in parallel mode when unset, or `null` in serial mode when unset); these three
+Dirichlet fields are `null` for other sampling methods. It records
 `gep_pca_n_components` as the configured target and `gep_filtering_n_pcs`
 as the actual fitted count, not a second configuration setting. Both PCA
 fields are null when GEP filtering does not use PCA space. Per-count

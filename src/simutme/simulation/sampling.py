@@ -46,10 +46,49 @@ def get_default_dirichlet_alpha(cell_type2subtype: Dict[str, List[str]]) -> Dict
     return {cell_type: 1.0 for cell_type in flatten_cell_type2subtype(cell_type2subtype)}
 
 
+def normalize_dirichlet_alpha(
+    alpha: Optional[Union[float, int, Dict[str, float]]],
+    cell_types: List[str],
+) -> Dict[str, float]:
+    """Expand a scalar, dict, or unset Dirichlet alpha to every output cell type."""
+    if alpha is None:
+        return {cell_type: 1.0 for cell_type in cell_types}
+    if isinstance(alpha, (int, float)) and not isinstance(alpha, bool):
+        value = float(alpha)
+        return {cell_type: value for cell_type in cell_types}
+    if isinstance(alpha, dict):
+        return {cell_type: float(alpha.get(cell_type, 1.0)) for cell_type in cell_types}
+    raise TypeError(f"Alpha must be a float or a dictionary, got {type(alpha)}")
+
+
+def _select_prediction_rows_by_cancer_type(
+    predictions: pd.DataFrame,
+    cancer_types: Optional[List[str]],
+    prediction_path: Path,
+) -> pd.DataFrame:
+    """Restrict prediction rows to requested cancer types when configured."""
+    if not cancer_types:
+        return predictions
+    if "cancer_type" not in predictions.columns:
+        raise ValueError(
+            f'"pred_cell_prop_file_path" must contain a "cancer_type" column '
+            f'when "filtering_ref_types" is set: {prediction_path}'
+        )
+    labels = predictions["cancer_type"].fillna("").astype(str).str.strip()
+    selected = predictions.loc[labels.isin(cancer_types)]
+    if selected.empty:
+        raise ValueError(
+            f'"pred_cell_prop_file_path" contains no rows for filtering_ref_types '
+            f"{cancer_types}: {prediction_path}"
+        )
+    return selected
+
+
 def estimate_dirichlet_alpha_from_pred_cell_props(
     pred_cell_prop_file_path: str | Path,
     cell_types: List[str],
     eps: float = 1e-6,
+    cancer_types: Optional[List[str]] = None,
 ) -> Dict[str, float]:
     """
     Estimate Dirichlet concentration parameters from predicted cell proportions.
@@ -73,6 +112,11 @@ def estimate_dirichlet_alpha_from_pred_cell_props(
         )
 
     pred_cell_prop = pd.read_csv(pred_cell_prop_file_path)
+    pred_cell_prop = _select_prediction_rows_by_cancer_type(
+        pred_cell_prop,
+        cancer_types,
+        pred_cell_prop_file_path,
+    )
     missing_cell_types = [cell_type for cell_type in cell_types if cell_type not in pred_cell_prop.columns]
     if missing_cell_types:
         raise ValueError(

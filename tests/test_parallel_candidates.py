@@ -719,3 +719,63 @@ def test_workflow_resolves_and_runs_parallel_dataset(
     if method == "median_gep":
         assert metadata["stats"]["pc_distance_input_n_samples"] >= 3
         assert metadata["generator_stats"]["gep_filtering_n_pcs"] == 1
+    summary_path = workflow._resolve_mixed_dataset_result_dir(output, "target") / "mixed_dataset_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["sampling_method_prop"] == fraction_method
+    if fraction_method == "dirichlet":
+        assert summary["dirichlet_alpha_source"] == "configured"
+        assert summary["dirichlet_alpha"] == {"A": 0.7, "B": 2.0}
+        assert summary["dirichlet_sampling_seed"] == 73
+    else:
+        assert summary["dirichlet_alpha_source"] is None
+        assert summary["dirichlet_alpha"] is None
+        assert summary["dirichlet_sampling_seed"] is None
+
+
+def test_parallel_dirichlet_reports_seed_fallback_and_estimated_alpha(
+    setup_parallel, tmp_path, monkeypatch
+):
+    import sys
+    import types
+    import simutme.workflow as workflow
+
+    generator, _ = setup_parallel("parallel-dirichlet-meta", method="median_gep")
+    reference = tmp_path / "reference.csv"
+    pd.DataFrame({"g1": [0., 5., 10.], "g2": [10., 5., 0.],
+                  "unused": [5., 5., 5.]}, index=["r1", "r2", "r3"]).to_csv(reference)
+    pred_path = tmp_path / "pred_cell_props.csv"
+    pd.DataFrame({"A": [0.9, 0.85], "B": [0.1, 0.15]}).to_csv(pred_path, index=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "dirichlet",
+        types.SimpleNamespace(mle=lambda x, method="meanversion": np.array([10.0, 1.0])),
+    )
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda **kwargs: None)
+
+    config = SimuConfig(
+        simu_bulk_dir=tmp_path / "workflow", tcga2cancer_type_file_path=tmp_path / "mapping.csv",
+        tcga_merged_tpm_file_path=reference, high_corr_gene_file_path=None,
+        merged_sc_dataset_file_path=tmp_path / "unused.h5ad", sc_dataset_ids=[],
+        cell_type2subtypes={"A": ["A"], "B": ["B"]},
+        total_rna_coefficient={"A": 1., "B": 1.}, n_base=1,
+        output_types=["A", "B"], gep_filtering_quantile=(None, 1.0),
+        plot_pca_for_comparison=False, mixed_sct_loading_mode="eager",
+        pred_cell_prop_file_path=pred_path,
+        dirichlet_sampling_seed=None,
+    )
+    params = {
+        "dataset_type": "Mixed", "sampling_method_prop": "dirichlet", "n_samples": 4,
+        "sct_reference": {"source_type": "path", "file_path": str(generator.sct_dataset_file_path)},
+        "gep_filtering": True, "gep_filtering_method": "median_gep",
+        "gep_filtering_in_pca_space": True, "gep_pca_n_components": 1, "gep_norm_ord": 1,
+        "gene_filtering": False, "mixed_candidate_workers": 1, "mixed_candidate_seed": 42,
+    }
+    output = workflow.run_bulk_simulation("target_pred", params, config)
+    result_dir = workflow._resolve_mixed_dataset_result_dir(output, "target_pred")
+    summary = json.loads((result_dir / "mixed_dataset_summary.json").read_text())
+    assert summary["sampling_method_prop"] == "dirichlet"
+    assert summary["dirichlet_alpha_source"] == "pred_cell_prop_file"
+    assert summary["dirichlet_alpha"] == {"A": 10.0, "B": 1.0}
+    assert summary["dirichlet_sampling_seed"] == 42
+    fractions = pd.read_csv(summary["generated_cell_fraction_file"], index_col=0)
+    assert fractions["A"].mean() > fractions["B"].mean()
