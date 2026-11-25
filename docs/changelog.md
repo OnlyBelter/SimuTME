@@ -4,6 +4,14 @@ This page records notable documentation, workflow, and implementation changes in
 `SimuTME`. Use it to track recent updates and to find the files and behaviors
 that changed on a given date.
 
+## November 25, 2026
+
+### Statistics-only Mixed simulation
+
+Mixed datasets can set `simu_mode: "simulation_for_stat"` to evaluate
+per-cancer-type GEP-filter acceptance without exporting simulated profiles.
+The optional dataset-level `max_batches` bounds the run.
+
 ## November 24, 2026
 
 ### Cancer-type-filtered Dirichlet alpha estimation

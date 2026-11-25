@@ -125,6 +125,17 @@ These parameters affect shared simulation behavior across workflows.
   Legacy global gene-filtering mode. It maps to `gene_filtering_type`
   and defaults to `high_corr_gene`.
 
+### Statistics-only Mixed simulations
+
+`simu_mode` defaults to `full_simulation` and can be overridden per Mixed
+dataset with `simulation_for_stat`. The statistics mode requires enabled
+PCA-space `median_gep` filtering with `n_subgroup` and existing SCT and
+gene-selection inputs. Its dataset-level `max_batches` defaults to `null`
+(unlimited); otherwise it must be a positive integer. The run stops at
+`n_samples` accepted candidates or the batch limit, whichever occurs first.
+See [statistics-only simulation](workflow_mixed.md#statistics-only-simulation)
+for output and stopping details.
+
 ### Parallel Mixed candidates
 
 These optional parameters control candidate generation. A Mixed dataset can

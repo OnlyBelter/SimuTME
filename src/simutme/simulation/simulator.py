@@ -550,6 +550,87 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 return self._generate_gep(config)
         return self._generate_gep(config)
 
+    def generate_statistics(self, config: GEPGenerationConfig, max_batches=None) -> None:
+        """Evaluate candidate batches without writing simulated profiles."""
+        self._reset_runtime_log_state()
+        self.filtering_space = config.filtering_space
+        self.filtering_space.persist_pca = False
+        self._reset_gep_filtering_stats(True, self.filtering_space)
+        self.n_samples = config.n_samples
+        self.statistics_batch_size = _candidate_batch_size(
+            config.n_samples, config.filtering
+        )
+        self.total_cell_number = config.total_cell_number
+        self.n_round = 0
+        self.generated_bulk_gep_counter = 0
+        self.resolved_dirichlet_alpha = self._resolve_dirichlet_alpha(config)
+        obs, _, sc_dataset = self._load_sc_data_for_generation(config.simu_method)
+        try:
+            if config.mixed_candidate_workers:
+                if sc_dataset != DatasetType.SCT or self.sct_dataset_df is None:
+                    raise ValueError("Parallel candidates require an eager SCT reference.")
+                if not self.filtering_space.uses_subgroup_reference:
+                    self.filtering_space.prepare_distance_reference()
+                    self.gep_filtering_n_pcs_min = int(self.filtering_space.pca.n_components_)
+                    self.gep_filtering_n_pcs_max = self.gep_filtering_n_pcs_min
+                if self.filtering_space.gep.filtering_by_gene_range:
+                    self.filtering_space.prepare_range_reference()
+                from .parallel_candidates import run_parallel_candidates
+                run_parallel_candidates(self, config, obs, self.filtering_space,
+                                        statistics_only=True, max_batches=max_batches)
+                return
+
+            batch_size = self.statistics_batch_size
+            rng = (
+                np.random.default_rng(config.dirichlet_sampling_seed)
+                if config.sampling_method_prop == "dirichlet"
+                and config.dirichlet_sampling_seed is not None else None
+            )
+            while self.generated_bulk_gep_counter < config.n_samples and (
+                max_batches is None or self.n_round < max_batches
+            ):
+                fractions = generate_cell_fraction(
+                    sampling_method=config.sampling_method_prop,
+                    n_cell_frac=batch_size,
+                    sample_prefix=f"s_{config.sampling_method_prop}_{self.n_round}",
+                    cell_prop_prior=config.cell_prop_prior,
+                    cell_type2subtype=self.cell_fraction_type2subtype,
+                    dirichlet_alpha=self.resolved_dirichlet_alpha,
+                    rng=rng,
+                    max_segment_sampling_attempts=(
+                        max(10000, batch_size * 500)
+                        if config.sampling_method_prop == "segment"
+                        and config.cell_prop_prior else None
+                    ),
+                )
+                selected = self._sc_sampling(
+                    cell_frac=fractions,
+                    n_threads=min(multiprocessing.cpu_count() - 1, config.n_threads),
+                    obs_df=obs,
+                    sc_dataset=sc_dataset,
+                )
+                expression = self._map_cell_id2exp(
+                    selected_cell_id=selected, simu_method=config.simu_method,
+                    sc_dataset=sc_dataset, cell_frac=fractions,
+                    add_noise=config.add_noise, noise_params=config.noise_params,
+                )
+                accepted = self.filtering_space.filter(expression, batch_id=self.n_round)
+                if not self.filtering_space.uses_subgroup_reference and self.filtering_space.pca is not None:
+                    self.gep_filtering_n_pcs_min = int(self.filtering_space.pca.n_components_)
+                    self.gep_filtering_n_pcs_max = self.gep_filtering_n_pcs_min
+                self._record_gep_filtering_counts(
+                    len(expression), len(accepted), self.filtering_space.last_batch_cancer_type,
+                )
+                if self.filtering_space.last_batch_pca_n_components is not None:
+                    self._record_gep_filtering_pca_components(
+                        self.filtering_space.last_batch_pca_n_components
+                    )
+                self.generated_bulk_gep_counter += len(accepted)
+                self.n_round += 1
+        finally:
+            if self.sct_dataset_reader is not None:
+                self._close_backed_reader(self.sct_dataset_reader)
+
     def _resolve_dirichlet_alpha(self, config: GEPGenerationConfig) -> Optional[Dict[str, float]]:
         if config.sampling_method_prop != "dirichlet":
             self.resolved_dirichlet_alpha = None

@@ -298,6 +298,7 @@ class FixedGeneFilter:
             self.identity["distance_norm"] = 1
         self.model_path = self.result_dir / "gep_filtering_pca.joblib"
         self.model_metadata_path = self.model_path.with_suffix(".metadata.json")
+        self.persist_pca = True
         self.additional_artifacts = []
         self.pca = None
         self.reference_coordinates = None
@@ -370,15 +371,16 @@ class FixedGeneFilter:
     def _prepare_pca(self):
         if self.reference_coordinates is not None:
             return
-        if self.pca is None:
+        if self.pca is None and self.persist_pca:
             self.validate_model()
         if self.pca is None:
             self.pca = PCA(n_components=self.gep.pca_n_components, svd_solver="full", random_state=42)
             self.pca.fit(self.reference_log.to_numpy(dtype=np.float64))
             self.pca.filtering_genes_ = self.genes
-            self.result_dir.mkdir(parents=True, exist_ok=True)
-            dump(self.pca, self.model_path)
-            write_metadata(self.model_metadata_path, self.pca_identity)
+            if self.persist_pca:
+                self.result_dir.mkdir(parents=True, exist_ok=True)
+                dump(self.pca, self.model_path)
+                write_metadata(self.model_metadata_path, self.pca_identity)
         self.reference_coordinates = safe_pca_transform(
             self.pca, self.reference_log, label="Reference log2(TPM + 1)"
         )

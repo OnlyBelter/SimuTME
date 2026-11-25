@@ -79,6 +79,48 @@ def _resolve_mixed_sct_reference_version(version_value: Any, context: str) -> st
     return version
 
 
+def _register_statistics_inputs(dataset_name, params, config):
+    """Register existing upstream outputs without regenerating them."""
+    reference = params.get("sct_reference", {})
+    if isinstance(reference, dict) and reference.get("source_type") == "generated_dataset":
+        name = str(reference.get("dataset_name", "")).strip()
+        source = config._dataset_definitions.get(name)
+        if source is not None and name not in config._generated_sct_outputs:
+            count, n_base = _resolve_output_dir_naming_metadata(
+                source, config, "sct", dataset_name=name,
+            )
+            directory = Path(config.simu_bulk_dir) / (
+                f"generated_sct_dataset_{count}ds_{_n_base_output_tag(n_base)}_all_subtypes"
+            )
+            method = source.get("sampling_method_gep", "random")
+            original = directory / f"simu_gep_{name}_gepsamp-{method}_log2cpm1p.h5ad"
+            imputed = _build_sorted_bulk_imputed_sct_path(
+                original, source.get("sorted_bulk_imputation_output_suffix",
+                                     config.sorted_bulk_imputation_output_suffix),
+            )
+            config._generated_sct_outputs[name] = {
+                "original": original,
+                "sorted_bulk_imputed": imputed if source.get("apply_sorted_bulk_imputation") else None,
+            }
+    source_name = params.get(
+        "gene_filtering_correlation_reference_dataset",
+        getattr(config, "gene_filtering_correlation_reference_dataset", None),
+    )
+    if source_name and source_name not in config._generated_mixed_outputs:
+        source = config._dataset_definitions.get(source_name)
+        if source is not None:
+            count, n_base = _resolve_output_dir_naming_metadata(
+                source, config, "mixed", dataset_name=source_name,
+            )
+            method = source.get("sampling_method_prop", "segment")
+            correlation = Path(config.simu_bulk_dir) / (
+                f"{method}_{count}ds_{_n_base_output_tag(n_base)}_no_filtering"
+            ) / source_name / "full_gene_corr_with_cell_fraction.csv"
+            config._generated_mixed_outputs[source_name] = {
+                "full_gene_corr_with_cell_fraction_file": correlation,
+            }
+
+
 def _resolve_mixed_sct_dataset_path(
     dataset_name: str,
     params: Dict[str, Any],
@@ -456,6 +498,7 @@ class SimuConfig:
     mixed_sct_auto_eager_max_gb: float = 4.0
     mixed_candidate_workers: int = 0
     mixed_candidate_seed: int | None = None
+    simu_mode: Literal["full_simulation", "simulation_for_stat"] = "full_simulation"
 
     # Cached attributes
     _high_corr_gene_list: List[str] = field(init=False, default=None)
@@ -499,6 +542,8 @@ class SimuConfig:
         return config
 
     def __post_init__(self):
+        if self.simu_mode not in ("full_simulation", "simulation_for_stat"):
+            raise ValueError('simu_mode must be "full_simulation" or "simulation_for_stat".')
         if self.n_subgroup is not None and (
             isinstance(self.n_subgroup, bool)
             or not isinstance(self.n_subgroup, (int, np.integer))
@@ -1350,6 +1395,18 @@ def run_bulk_simulation(dataset_name: str,
     """
     logging.info(f"\n=== Starting Simulation for {dataset_name} ===")
     dataset_type = params.get('dataset_type', 'mixed').lower()
+    simu_mode = params.get("simu_mode", getattr(config, "simu_mode", "full_simulation"))
+    if simu_mode not in ("full_simulation", "simulation_for_stat"):
+        raise ValueError('simu_mode must be "full_simulation" or "simulation_for_stat".')
+    if dataset_type == "sct" and simu_mode == "simulation_for_stat":
+        raise ValueError('simulation_for_stat is supported only for Mixed datasets.')
+    max_batches = params.get("max_batches")
+    if simu_mode == "simulation_for_stat" and max_batches is not None and (
+        isinstance(max_batches, bool)
+        or not isinstance(max_batches, (int, np.integer))
+        or max_batches <= 0
+    ):
+        raise ValueError('"max_batches" must be a positive integer or null.')
     configured_cell_prop_prior = _resolve_configured_segment_prior(dataset_name, params, config)
     mixed_candidate_workers, mixed_candidate_seed = _resolve_parallel_candidate_settings(
         dataset_name, params, config
@@ -1519,6 +1576,8 @@ def run_bulk_simulation(dataset_name: str,
         return str(current_sct_output_path)
     else:  # mixed bulk GEPs
         logging.info(f"   > Using Bulk GEP (with Mixed Cell Type) Generation for Dataset {dataset_name}")
+        if simu_mode == "simulation_for_stat":
+            _register_statistics_inputs(dataset_name, params, config)
         resolved_sct_dataset_file_path = _resolve_mixed_sct_dataset_path(
             dataset_name=dataset_name,
             params=params,
@@ -1526,7 +1585,8 @@ def run_bulk_simulation(dataset_name: str,
         )
         n_base_values_for_distribution = None
         n_base_assignment_file = None
-        if isinstance(n_base, ResolvedNBaseValues) and len(n_base.values) >= 2:
+        if (simu_mode != "simulation_for_stat"
+                and isinstance(n_base, ResolvedNBaseValues) and len(n_base.values) >= 2):
             referenced_dataset_name = str(
                 params["sct_reference"]["dataset_name"]
             ).strip()
@@ -1557,6 +1617,16 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
         )
+        if simu_mode == "simulation_for_stat" and (
+            not resolved_gep_filtering.enabled
+            or resolved_gep_filtering.filtering_method != "median_gep"
+            or not resolved_gep_filtering.filtering_in_pca_space
+            or resolved_gep_filtering.n_subgroup is None
+        ):
+            raise ValueError(
+                'simulation_for_stat requires enabled PCA-space median_gep filtering '
+                'with n_subgroup.'
+            )
         resolved_gene_filtering = _resolve_gene_filtering_params(
             dataset_name=dataset_name,
             params=params,
@@ -1749,12 +1819,22 @@ def run_bulk_simulation(dataset_name: str,
                 bulk_generator._close_backed_reader(probe)
 
         generated_bulk_gep_fp = bulk_generator.generated_bulk_gep_fp
+        stat_summary_path = (
+            _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
+            / "simulation_for_stat" / "mixed_dataset_summary.json"
+        )
+        if simu_mode == "simulation_for_stat" and stat_summary_path.exists():
+            raise FileExistsError(
+                f"Statistics summary already exists: {stat_summary_path}. "
+                "Use a new dataset name or output location."
+            )
         filtering_space = None
         if resolved_gene_filtering.enabled or resolved_gep_filtering.enabled:
             filtering_space = _prepare_fixed_gene_filter(
                 dataset_name, resolved_sct_dataset_file_path, config.output_types,
                 resolved_gep_filtering, resolved_gene_filtering, config,
-                _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name),
+                (stat_summary_path.parent if simu_mode == "simulation_for_stat"
+                 else _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)),
             )
             if (
                 resolved_gene_filtering.enabled
@@ -1771,7 +1851,8 @@ def run_bulk_simulation(dataset_name: str,
         # 2. Generate GEP (if it doesn't exist)
         generated_bulk_gep_was_cached = os.path.exists(generated_bulk_gep_fp)
         if (
-            filtering_space is not None
+            simu_mode != "simulation_for_stat"
+            and filtering_space is not None
             and not generated_bulk_gep_was_cached
             and _post_gep_rebuild_marker_path(
                 _resolve_mixed_dataset_result_dir(generated_bulk_gep_fp, dataset_name)
@@ -1814,6 +1895,12 @@ def run_bulk_simulation(dataset_name: str,
                 mixed_candidate_workers=mixed_candidate_workers,
                 mixed_candidate_seed=mixed_candidate_seed,
             )
+            if simu_mode == "simulation_for_stat":
+                bulk_generator.generate_statistics(gep_gen_config, max_batches=max_batches)
+                return str(_write_statistics_summary(
+                    stat_summary_path, dataset_name, gep_gen_config, bulk_generator,
+                    max_batches, resolved_gene_filtering,
+                ))
             bulk_generator.generate_gep(config=gep_gen_config)
         else:
             logging.info(f"   > GEP file exists: {generated_bulk_gep_fp}")
@@ -1992,6 +2079,66 @@ def run_bulk_simulation(dataset_name: str,
 
 
 # --- 3. Internal Helper Functions ---
+def _write_statistics_summary(path, dataset_name, generation, generator,
+                              max_batches, gene_filtering):
+    """Publish a completed statistics report without overwriting a previous run."""
+    space = generator.filtering_space
+    total = generator.gep_filtering_input_n_samples
+    kept = generator.gep_filtering_kept_n_samples
+    generation_settings = {
+        key: value for key, value in vars(generation).items()
+        if key not in ("filtering_space", "log_file_path")
+    }
+    generation_settings["dirichlet_alpha_resolved"] = generator.resolved_dirichlet_alpha
+    summary = {
+        "dataset_name": dataset_name,
+        "dataset_type": "Mixed",
+        "simu_mode": "simulation_for_stat",
+        "sampling_method_prop": generation.sampling_method_prop,
+        "gep_filtering_enabled": generation.filtering,
+        "gep_filtering_method": generation.filtering_method,
+        "gep_filtering_n_subgroup": generation.n_subgroup,
+        "gep_pca_n_components": generation.pca_n_components,
+        "n_samples_target": generation.n_samples,
+        "max_batches": max_batches,
+        "processed_batches": generator.n_round,
+        "candidate_batch_size": generator.statistics_batch_size,
+        "stop_reason": (
+            "n_samples_reached" if kept >= generation.n_samples else "max_batches_reached"
+        ),
+        "gep_filtering_input_n_samples": total,
+        "gep_filtering_kept_n_samples": kept,
+        "gep_filtering_removed_n_samples": total - kept,
+        "gep_filtering_acceptance_rate": kept / total if total else None,
+        "gep_filtering_input_n_samples_by_cancer_type":
+            generator.gep_filtering_input_n_samples_by_cancer_type,
+        "gep_filtering_kept_n_samples_by_cancer_type":
+            generator.gep_filtering_kept_n_samples_by_cancer_type,
+        "gep_filtering_acceptance_rate_by_cancer_type":
+            generator.gep_filtering_acceptance_rate_by_cancer_type,
+        "gep_filtering_n_pcs_min": generator.gep_filtering_n_pcs_min,
+        "gep_filtering_n_pcs_max": generator.gep_filtering_n_pcs_max,
+        "gep_filtering_subgroup_pca_batches": generator.gep_filtering_subgroup_pca_batches,
+        "gep_filtering_reference_n_samples": space.reference_sample_count,
+        "selected_n_genes": len(space.genes),
+        "filtering_identity": space.identity,
+        "generation": generation_settings,
+        "gene_filtering": vars(gene_filtering),
+        **getattr(space, "reference_variance_metadata", {}),
+        **space.stats(),
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, default=str, allow_nan=False)
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
 def _safe_filename(text: str) -> str:
     sanitized = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(text))
     while "__" in sanitized:

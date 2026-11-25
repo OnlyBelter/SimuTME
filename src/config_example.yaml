@@ -135,6 +135,7 @@ parameters:
   mixed_sct_auto_eager_max_gb: 4.0  # Optional threshold used only when mixed_sct_loading_mode is "auto"; eager loading is selected when the estimated dense float32 SCT matrix size is <= this value in GiB.
   mixed_candidate_workers: 0  # 0 keeps serial generation; positive values enable segment/Dirichlet batches with mgep or PCA-space L1 median_gep
   mixed_candidate_seed: null  # Required nonnegative seed when parallel candidate workers are enabled
+  simu_mode: "full_simulation"  # Mixed datasets can override with "simulation_for_stat"
 
 # --- Datasets to Generate ---
 # Define specific parameters for each dataset here.
@@ -161,6 +162,8 @@ datasets:
     max_cells_per_cell_type: "all"  # All eligible cells remain anchors/neighbors; exact queries run only for sampled anchors. Positive integers retain capped precomputation. "all" requires single_anchor without patient constraints.
   Mixed_N100_segment:  # Dataset name
     dataset_type: "Mixed"  # Type of dataset: "SCT" or "Mixed"
+    # simu_mode: "simulation_for_stat"  # Requires PCA-space median_gep and n_subgroup.
+    # max_batches: null  # Optional statistics-mode batch limit; null means unlimited.
     sct_reference:
       source_type: "path"  # Mixed only: use an external SCT `.h5ad` directly
       file_path: "path/to/sct_dataset_gepsamp-random.h5ad"

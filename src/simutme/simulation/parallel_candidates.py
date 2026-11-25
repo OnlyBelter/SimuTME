@@ -100,6 +100,20 @@ def _run_batch(batch_id):
         subgroup_seed=subgroup_seed,
     )
     done = perf_counter()
+    if config.get("statistics_only"):
+        return {
+            "batch_id": batch_id,
+            "cancer_type": space.last_batch_cancer_type,
+            "input": len(expression),
+            "kept": len(accepted),
+            "stats": space.stats(),
+            "fraction_stats": fraction_stats,
+            "pca_n_components": space.last_batch_pca_n_components,
+            "timings": (
+                sampled_at - started, aggregated_at - sampled_at,
+                filtered_at - aggregated_at, done - filtered_at,
+            ),
+        }
     indices = accepted.index
     return {
         "batch_id": batch_id,
@@ -137,7 +151,8 @@ def _store_shared_matrix(source, directory, filename="sct-expression.npy"):
     return path
 
 
-def run_parallel_candidates(generator, config, obs, space):
+def run_parallel_candidates(generator, config, obs, space, statistics_only=False,
+                            max_batches=None):
     """Run workers with ordered commits and a single parent-side writer."""
     source = generator.sct_dataset_df
     if not source.index.is_unique:
@@ -163,6 +178,7 @@ def run_parallel_candidates(generator, config, obs, space):
         "dirichlet_sampling_seed": config.dirichlet_sampling_seed,
         "add_noise": config.add_noise,
         "noise_params": config.noise_params,
+        "statistics_only": statistics_only,
     }
     workers = config.mixed_candidate_workers
     logger.info(
@@ -209,6 +225,8 @@ def run_parallel_candidates(generator, config, obs, space):
                 for key in thread_vars:
                     os.environ[key] = "1"
                 for _ in range(workers * 2):
+                    if statistics_only and max_batches is not None and next_submit >= max_batches:
+                        break
                     futures[next_submit] = executor.submit(_run_batch, next_submit)
                     next_submit += 1
             finally:
@@ -217,7 +235,9 @@ def run_parallel_candidates(generator, config, obs, space):
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = value
-            while generator.generated_bulk_gep_counter < generator.n_samples:
+            while generator.generated_bulk_gep_counter < generator.n_samples and (
+                not statistics_only or max_batches is None or generator.n_round < max_batches
+            ):
                 batch_id = generator.n_round
                 try:
                     result = futures.pop(batch_id).result()
@@ -242,25 +262,30 @@ def run_parallel_candidates(generator, config, obs, space):
                     if attribute:
                         setattr(generator.filtering_space, attribute,
                                 getattr(generator.filtering_space, attribute) + value)
-                accepted = result["expression"]
-                remaining = generator.n_samples - generator.generated_bulk_gep_counter
-                accepted = accepted.iloc[:remaining]
-                if not accepted.empty:
-                    indices = accepted.index
-                    generator._save_simulated_bulk_gep(
-                        gep=np.log2(accepted + 1),
-                        cell_id=result["selected"].loc[indices],
-                        cell_fraction=result["fractions"].loc[indices],
-                    )
-                    generator.generated_bulk_gep_counter += len(accepted)
-                    progress.update(len(accepted))
+                if statistics_only:
+                    generator.generated_bulk_gep_counter += result["kept"]
+                    progress.update(result["kept"])
+                else:
+                    accepted = result["expression"]
+                    remaining = generator.n_samples - generator.generated_bulk_gep_counter
+                    accepted = accepted.iloc[:remaining]
+                    if not accepted.empty:
+                        indices = accepted.index
+                        generator._save_simulated_bulk_gep(
+                            gep=np.log2(accepted + 1),
+                            cell_id=result["selected"].loc[indices],
+                            cell_fraction=result["fractions"].loc[indices],
+                        )
+                        generator.generated_bulk_gep_counter += len(accepted)
+                        progress.update(len(accepted))
                 generator.n_round += 1
                 if result["pca_n_components"] is not None:
                     generator._record_gep_filtering_pca_components(
                         result["pca_n_components"]
                     )
-                generator._save_filtering_metadata()
-                generator._save_parallel_checkpoint()
+                if not statistics_only:
+                    generator._save_filtering_metadata()
+                    generator._save_parallel_checkpoint()
                 fraction_stats = result["fraction_stats"]
                 if fraction_stats:
                     logger.info(
@@ -272,7 +297,9 @@ def run_parallel_candidates(generator, config, obs, space):
                     "fractions=%.3gs, sampling=%.3gs, aggregation=%.3gs, filtering=%.3gs.",
                     batch_id, result["kept"], result["input"], *result["timings"],
                 )
-                if generator.generated_bulk_gep_counter < generator.n_samples:
+                if generator.generated_bulk_gep_counter < generator.n_samples and (
+                    not statistics_only or max_batches is None or next_submit < max_batches
+                ):
                     futures[next_submit] = executor.submit(_run_batch, next_submit)
                     next_submit += 1
             for future in futures.values():

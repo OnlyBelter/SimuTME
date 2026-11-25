@@ -30,6 +30,42 @@ ground-truth cell fractions.
 The independent unfiltered correlation source retains its full gene universe
 and existing generation behavior.
 
+## Statistics-only simulation
+
+Set `simu_mode: "simulation_for_stat"` on a Mixed dataset to evaluate GEP
+filtering without saving simulated profiles. It requires existing SCT and gene
+selection inputs, enabled PCA-space `median_gep` filtering, and `n_subgroup`.
+Existing referenced SCT and correlation-source artifacts are read without
+regenerating them.
+
+```yaml
+datasets:
+  Mixed_Filter_Pilot:
+    dataset_type: "Mixed"
+    simu_mode: "simulation_for_stat"
+    n_samples: 100000
+    max_batches: 100
+    gep_filtering: true
+    gep_filtering_method: "median_gep"
+    gep_filtering_in_pca_space: true
+    n_subgroup: 100
+```
+
+The existing `sct_reference` and other sampling settings remain required.
+`max_batches` defaults to `null`, meaning no batch limit. A run stops after
+the first complete batch that reaches either the accepted `n_samples` target
+or the configured batch limit. The final batch is counted in full. If both
+limits are reached together, the stop reason is `n_samples_reached`.
+
+The run writes only `<dataset-result-directory>/simulation_for_stat/`
+`mixed_dataset_summary.json`. It records input, kept, and acceptance-rate
+totals by the cancer type selected for each batch, plus configuration and
+stopping metadata. An unselected cancer type has a `null` acceptance rate.
+The mode does not write simulated expression or fractions, PCA model files,
+plots, or checkpoints; the PCA needed by the filter is still fitted in memory.
+Use a new dataset name or output location if the summary already exists.
+Statistics-only runs cannot resume from a checkpoint.
+
 ## CPU candidate generation
 
 Random sampling without patient constraints builds eligible ID pools once per
