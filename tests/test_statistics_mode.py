@@ -313,3 +313,113 @@ def test_statistics_full_single_type_does_not_save_pca(stat_case):
     assert summary["gep_filtering_input_n_samples_by_cancer_type"] == {"X": 5}
     assert summary["gep_filtering_n_pcs_min"] == 1
     assert [p for p in Path(config.simu_bulk_dir).rglob("*") if p.is_file()] == [path]
+
+
+@pytest.mark.parametrize("workers", [0, 1, 2])
+def test_statistics_reports_cancer_specific_pca_settings(stat_case, workers):
+    config, params = stat_case
+    params["gep_filtering_by_cancer_type"] = {
+        "X": {"n_subgroup": 3, "gep_pca_n_components": 0.9},
+        "Y": {"gep_pca_n_components": 1},
+    }
+    if workers:
+        params.update(mixed_candidate_workers=workers, mixed_candidate_seed=42)
+    path = Path(workflow.run_bulk_simulation(f"overrides_{workers}", params, config))
+    summary = json.loads(path.read_text())
+    expected = {
+        "X": {"n_subgroup": 3, "gep_pca_n_components": 0.9},
+        "Y": {"n_subgroup": 2, "gep_pca_n_components": 1},
+    }
+    assert summary["gep_filtering_parameters_by_cancer_type"] == expected
+    assert summary["filtering_identity"]["gep_filtering_parameters_by_cancer_type"] == expected
+    assert summary["gep_filtering_n_subgroup"] == 2
+    assert summary["gep_pca_n_components"] == 1
+    assert sum(summary["gep_filtering_input_n_samples_by_cancer_type"].values()) == 20
+
+
+def test_statistics_overrides_are_stable_across_worker_counts(stat_case):
+    config, params = stat_case
+    params.update(
+        mixed_candidate_workers=1, mixed_candidate_seed=42,
+        gep_filtering_by_cancer_type={
+            "X": {"gep_pca_n_components": 0.9},
+            "Y": {"n_subgroup": 3},
+        },
+    )
+    one = json.loads(Path(workflow.run_bulk_simulation("overrides_one", params, config)).read_text())
+    params["mixed_candidate_workers"] = 2
+    two = json.loads(Path(workflow.run_bulk_simulation("overrides_two", params, config)).read_text())
+    for key in (
+        "gep_filtering_parameters_by_cancer_type",
+        "gep_filtering_input_n_samples_by_cancer_type",
+        "gep_filtering_kept_n_samples_by_cancer_type",
+        "gep_filtering_acceptance_rate_by_cancer_type",
+    ):
+        assert one[key] == two[key]
+
+
+def test_statistics_rejects_override_for_excluded_type(stat_case):
+    config, params = stat_case
+    params["filtering_ref_types"] = ["X"]
+    params["gep_filtering_by_cancer_type"] = {"Y": {"n_subgroup": 3}}
+    with pytest.raises(ValueError, match="unknown or excluded"):
+        workflow.run_bulk_simulation("excluded", params, config)
+    assert not [p for p in Path(config.simu_bulk_dir).rglob("*") if p.is_file()]
+
+
+def test_full_simulation_summary_keeps_defaults_with_single_type_override(stat_case, monkeypatch):
+    config, params = stat_case
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda *args, **kwargs: None)
+    params.update(
+        simu_mode="full_simulation", n_samples=3, filtering_ref_types=["X"],
+        gep_filtering_by_cancer_type={
+            "X": {"n_subgroup": 3, "gep_pca_n_components": 0.9}
+        },
+    )
+    generated = Path(workflow.run_bulk_simulation("full_override", params, config))
+    assert generated.is_file()
+    summaries = list(Path(config.simu_bulk_dir).rglob("mixed_dataset_summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text())
+    assert summary["gep_filtering_n_subgroup"] == 2
+    assert summary["gep_pca_n_components"] == 1
+    assert summary["gep_filtering_parameters_by_cancer_type"] == {
+        "X": {"n_subgroup": 3, "gep_pca_n_components": 0.9}
+    }
+    assert summary["filtering_identity"]["pca_target"] == 0.9
+
+
+def test_statistics_ignores_full_mode_cancer_type_limit(stat_case):
+    config, params = stat_case
+    params["max_samples_per_cancer_type"] = "ignored"
+    summary = json.loads(Path(workflow.run_bulk_simulation("stat_cap_ignored", params, config)).read_text())
+    assert summary["processed_batches"] == 4
+    assert "max_samples_per_cancer_type" not in summary
+
+
+def test_full_simulation_summary_reports_retained_counts(stat_case, monkeypatch):
+    config, params = stat_case
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda *args, **kwargs: None)
+    params.update(simu_mode="full_simulation", n_samples=4,
+                  max_samples_per_cancer_type=2)
+    generated = Path(workflow.run_bulk_simulation("full_cap", params, config))
+    summary_path = workflow._resolve_mixed_dataset_result_dir(generated, "full_cap") / "mixed_dataset_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["max_samples_per_cancer_type"] == 2
+    assert summary["gep_retained_n_samples_by_cancer_type"] == {"X": 2, "Y": 2}
+    assert summary["gep_filtering_kept_n_samples"] == (
+        4 + summary["gep_discarded_by_cancer_type_limit"]
+        + summary["gep_discarded_by_total_target"]
+    )
+    assert summary["filtering_identity"]["generation"]["max_samples_per_cancer_type"] == 2
+
+
+def test_full_simulation_limit_supports_single_reference_type(stat_case, monkeypatch):
+    config, params = stat_case
+    monkeypatch.setattr(workflow, "_save_cancer_cell_fraction_distribution", lambda *args, **kwargs: None)
+    params.update(simu_mode="full_simulation", n_samples=3,
+                  filtering_ref_types=["X"], max_samples_per_cancer_type=3)
+    generated = Path(workflow.run_bulk_simulation("single_cap", params, config))
+    summary_path = workflow._resolve_mixed_dataset_result_dir(generated, "single_cap") / "mixed_dataset_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["gep_retained_n_samples_by_cancer_type"] == {"X": 3}

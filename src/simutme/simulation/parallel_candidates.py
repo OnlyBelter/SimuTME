@@ -22,6 +22,7 @@ from .simulator import BulkGEPGenerator, _candidate_batch_size
 logger = logging.getLogger(__name__)
 _WORKER = None
 _THREAD_LIMIT = None
+_CAPPED_WAVE_SIZE = 8
 
 
 def _initialize_worker(
@@ -46,7 +47,7 @@ def _initialize_worker(
     _WORKER = (generator, obs, config)
 
 
-def _run_batch(batch_id):
+def _run_batch(batch_id, cancer_type=None):
     generator, obs, config = _WORKER
     seed = np.random.SeedSequence([config["seed"], batch_id]).generate_state(4)
     np.random.seed(seed)
@@ -94,10 +95,9 @@ def _run_batch(batch_id):
         subgroup_seed = int(
             np.random.SeedSequence([config["seed"], batch_id, 1]).generate_state(1)[0]
         )
+    filter_options = {} if cancer_type is None else {"cancer_type": cancer_type}
     accepted = space.filter(
-        expression,
-        batch_id=batch_id,
-        subgroup_seed=subgroup_seed,
+        expression, batch_id=batch_id, subgroup_seed=subgroup_seed, **filter_options,
     )
     done = perf_counter()
     if config.get("statistics_only"):
@@ -218,17 +218,42 @@ def run_parallel_candidates(generator, config, obs, space, statistics_only=False
         ) as executor, tqdm(total=generator.n_samples, initial=generator.generated_bulk_gep_counter) as progress:
             futures = {}
             next_submit = generator.n_round
+            capped = not statistics_only and config.max_samples_per_cancer_type is not None
+
+            def submit_capped_wave():
+                wave = generator.capped_parallel_wave
+                if wave is None or generator.n_round >= wave["end"]:
+                    wave = {
+                        "start": generator.n_round,
+                        "end": generator.n_round + _CAPPED_WAVE_SIZE,
+                        "types": generator._eligible_uncapped_types(),
+                    }
+                    if not wave["types"]:
+                        raise ValueError("No reference cancer type has remaining capacity.")
+                    generator.capped_parallel_wave = wave
+                    generator._save_filtering_metadata()
+                    generator._save_parallel_checkpoint()
+                for batch in range(generator.n_round, wave["end"]):
+                    rng = np.random.default_rng(
+                        np.random.SeedSequence([config.mixed_candidate_seed, batch, 3])
+                    )
+                    selected_type = str(rng.choice(wave["types"]))
+                    futures[batch] = executor.submit(_run_batch, batch, selected_type)
+
             thread_vars = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
                            "NUMEXPR_NUM_THREADS")
             previous = {key: os.environ.get(key) for key in thread_vars}
             try:
                 for key in thread_vars:
                     os.environ[key] = "1"
-                for _ in range(workers * 2):
-                    if statistics_only and max_batches is not None and next_submit >= max_batches:
-                        break
-                    futures[next_submit] = executor.submit(_run_batch, next_submit)
-                    next_submit += 1
+                if capped:
+                    submit_capped_wave()
+                else:
+                    for _ in range(workers * 2):
+                        if statistics_only and max_batches is not None and next_submit >= max_batches:
+                            break
+                        futures[next_submit] = executor.submit(_run_batch, next_submit)
+                        next_submit += 1
             finally:
                 for key, value in previous.items():
                     if value is None:
@@ -267,8 +292,11 @@ def run_parallel_candidates(generator, config, obs, space, statistics_only=False
                     progress.update(result["kept"])
                 else:
                     accepted = result["expression"]
-                    remaining = generator.n_samples - generator.generated_bulk_gep_counter
-                    accepted = accepted.iloc[:remaining]
+                    if capped:
+                        accepted = generator._retain_capped_batch(accepted, result["cancer_type"])
+                    else:
+                        remaining = generator.n_samples - generator.generated_bulk_gep_counter
+                        accepted = accepted.iloc[:remaining]
                     if not accepted.empty:
                         indices = accepted.index
                         generator._save_simulated_bulk_gep(
@@ -297,10 +325,13 @@ def run_parallel_candidates(generator, config, obs, space, statistics_only=False
                     "fractions=%.3gs, sampling=%.3gs, aggregation=%.3gs, filtering=%.3gs.",
                     batch_id, result["kept"], result["input"], *result["timings"],
                 )
-                if generator.generated_bulk_gep_counter < generator.n_samples and (
-                    not statistics_only or max_batches is None or next_submit < max_batches
-                ):
-                    futures[next_submit] = executor.submit(_run_batch, next_submit)
-                    next_submit += 1
+                if generator.generated_bulk_gep_counter < generator.n_samples:
+                    if capped and not futures:
+                        submit_capped_wave()
+                    elif not capped and (
+                        not statistics_only or max_batches is None or next_submit < max_batches
+                    ):
+                        futures[next_submit] = executor.submit(_run_batch, next_submit)
+                        next_submit += 1
             for future in futures.values():
                 future.cancel()

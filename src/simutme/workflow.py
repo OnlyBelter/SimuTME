@@ -36,6 +36,7 @@ from .simulation.simu_helper import normalize_n_base_values
 from .simulation.filtering import (
     FixedGeneFilter, NORMALIZATION_VERSION, identity_hash,
     normalize_selected, select_fixed_genes, reference_variance_mask, validate_metadata,
+    normalize_cancer_type_overrides, validate_cancer_type_pca_target,
     validate_gep_filtering_method, write_metadata,
 )
 
@@ -662,6 +663,7 @@ class ResolvedGEPFilteringParams:
     high_corr_gene_list_file: str | None
     high_corr_gene_list: List[str] | None
     n_subgroup: int | None = None
+    gep_filtering_by_cancer_type: Dict[str, Dict[str, int | float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -920,6 +922,14 @@ def _resolve_gep_filtering_params(
         raise ValueError('"n_subgroup" must be a positive integer or null.')
     else:
         n_subgroup = int(n_subgroup_value)
+    cancer_type_overrides = normalize_cancer_type_overrides(
+        params.get("gep_filtering_by_cancer_type"), f'Mixed dataset "{dataset_name}"'
+    )
+    if cancer_type_overrides and n_subgroup is None:
+        raise ValueError(
+            f'Mixed dataset "{dataset_name}": "gep_filtering_by_cancer_type" '
+            'requires a positive default "n_subgroup".'
+        )
     if n_subgroup is not None and (
         not enabled or filtering_method != "median_gep" or not filtering_in_pca_space
     ):
@@ -930,6 +940,19 @@ def _resolve_gep_filtering_params(
         raise ValueError(
             '"n_subgroup" requires "tcga2cancer_type_file_path" to select '
             "cancer-type-specific reference samples."
+        )
+    raw_pca_target = _resolve_dataset_override(
+        params, config, "gep_pca_n_components", config.gep_pca_n_components
+    )
+    try:
+        pca_target = _parse_pca_component_value(raw_pca_target)
+    except (TypeError, ValueError) as exc:
+        if cancer_type_overrides:
+            raise ValueError(f'Mixed dataset "{dataset_name}": invalid default GEP PCA target.') from exc
+        raise
+    if cancer_type_overrides:
+        pca_target = validate_cancer_type_pca_target(
+            pca_target, f'Mixed dataset "{dataset_name}", default GEP PCA'
         )
     resolved = ResolvedGEPFilteringParams(
         enabled=enabled,
@@ -953,13 +976,12 @@ def _resolve_gep_filtering_params(
         ),
         gene_quantile_range=gene_quantile_range,
         filtering_in_pca_space=bool(filtering_in_pca_space),
-        pca_n_components=_parse_pca_component_value(
-            _resolve_dataset_override(params, config, "gep_pca_n_components", config.gep_pca_n_components)
-        ),
+        pca_n_components=pca_target,
         norm_ord=int(norm_ord),
         high_corr_gene_list_file=high_corr_gene_list_file,
         high_corr_gene_list=high_corr_gene_list,
         n_subgroup=n_subgroup,
+        gep_filtering_by_cancer_type=cancer_type_overrides or None,
     )
     if resolved.enabled:
         if not resolved.reference_file:
@@ -1401,6 +1423,16 @@ def run_bulk_simulation(dataset_name: str,
     if dataset_type == "sct" and simu_mode == "simulation_for_stat":
         raise ValueError('simulation_for_stat is supported only for Mixed datasets.')
     max_batches = params.get("max_batches")
+    max_samples_per_cancer_type = (
+        params.get("max_samples_per_cancer_type")
+        if simu_mode == "full_simulation" else None
+    )
+    if max_samples_per_cancer_type is not None and (
+        isinstance(max_samples_per_cancer_type, (bool, np.bool_))
+        or not isinstance(max_samples_per_cancer_type, (int, np.integer))
+        or max_samples_per_cancer_type <= 0
+    ):
+        raise ValueError('"max_samples_per_cancer_type" must be a positive integer or null.')
     if simu_mode == "simulation_for_stat" and max_batches is not None and (
         isinstance(max_batches, bool)
         or not isinstance(max_batches, (int, np.integer))
@@ -1617,6 +1649,16 @@ def run_bulk_simulation(dataset_name: str,
             params=params,
             config=config,
         )
+        if max_samples_per_cancer_type is not None and (
+            not resolved_gep_filtering.enabled
+            or resolved_gep_filtering.filtering_method != "median_gep"
+            or not resolved_gep_filtering.filtering_in_pca_space
+            or resolved_gep_filtering.n_subgroup is None
+        ):
+            raise ValueError(
+                '"max_samples_per_cancer_type" requires enabled PCA-space median_gep '
+                'filtering with n_subgroup.'
+            )
         if simu_mode == "simulation_for_stat" and (
             not resolved_gep_filtering.enabled
             or resolved_gep_filtering.filtering_method != "median_gep"
@@ -1891,6 +1933,7 @@ def run_bulk_simulation(dataset_name: str,
                 norm_ord=resolved_gep_filtering.norm_ord,
                 pca_n_components=resolved_gep_filtering.pca_n_components,
                 n_subgroup=resolved_gep_filtering.n_subgroup,
+                max_samples_per_cancer_type=max_samples_per_cancer_type,
                 filtering_space=filtering_space,
                 mixed_candidate_workers=mixed_candidate_workers,
                 mixed_candidate_seed=mixed_candidate_seed,
@@ -2057,6 +2100,18 @@ def run_bulk_simulation(dataset_name: str,
                 None,
             ),
             gep_filtering_removed_n_samples=bulk_generator.gep_filtering_removed_n_samples,
+            retention_summary=(
+                {
+                    "max_samples_per_cancer_type": int(max_samples_per_cancer_type),
+                    "gep_retained_n_samples_by_cancer_type":
+                        bulk_generator.gep_retained_n_samples_by_cancer_type,
+                    "gep_discarded_by_cancer_type_limit":
+                        bulk_generator.gep_discarded_by_cancer_type_limit,
+                    "gep_discarded_by_total_target":
+                        bulk_generator.gep_discarded_by_total_target,
+                }
+                if max_samples_per_cancer_type is not None else None
+            ),
             gep_filtering_pca_target=bulk_generator.gep_filtering_pca_target,
             gep_filtering_n_pcs=bulk_generator.gep_filtering_n_pcs,
             gep_filtering_n_pcs_min=getattr(bulk_generator, "gep_filtering_n_pcs_min", None),
@@ -2127,6 +2182,10 @@ def _write_statistics_summary(path, dataset_name, generation, generator,
         **getattr(space, "reference_variance_metadata", {}),
         **space.stats(),
     }
+    if space.gep_filtering_parameters_by_cancer_type is not None:
+        summary["gep_filtering_parameters_by_cancer_type"] = (
+            space.gep_filtering_parameters_by_cancer_type
+        )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -3453,6 +3512,7 @@ def _prepare_fixed_gene_filter(dataset_name, sct_file, cell_types, gep, gene, co
         genes, reference, reference_file, reference_subset, gep, result_dir,
         len(sct_genes), shared_count, correlation_file=correlation_file,
         reference_cancer_types=reference_cancer_types,
+        dataset_name=dataset_name,
     )
     space.reference_variance_metadata = variance_metadata
     if variance_metadata:
@@ -4145,6 +4205,7 @@ def _build_mixed_dataset_summary(
     gep_filtering_input_n_samples_by_cancer_type: Dict[str, int] | None = None,
     gep_filtering_acceptance_rate_by_cancer_type: Dict[str, float | None] | None = None,
     gep_filtering_removed_n_samples: int | None = None,
+    retention_summary: Dict[str, Any] | None = None,
     gep_filtering_pca_target: int | float | None = None,
     gep_filtering_n_pcs: int | None = None,
     gep_filtering_n_pcs_min: int | None = None,
@@ -4187,6 +4248,11 @@ def _build_mixed_dataset_summary(
             gep_filtering_pca_target = cached_target
         if gep_filtering_n_pcs is None:
             gep_filtering_n_pcs = cached_n_pcs
+    if (
+        filtering_space is not None
+        and getattr(filtering_space, "gep_filtering_parameters_by_cancer_type", None) is not None
+    ):
+        gep_filtering_pca_target = gep_filtering.pca_n_components
     generated_shape = _get_h5ad_shape(generated_bulk_gep_fp)
     filtered_shape = _get_h5ad_shape(postprocess_outputs.get("filtered_bulk_gep_file"))
     gene_list_file = postprocess_outputs.get("gene_list_file")
@@ -4271,6 +4337,8 @@ def _build_mixed_dataset_summary(
         "gep_filtering_distance_plot_svg": postprocess_outputs.get("gep_filtering_distance_plot_svg"),
     }
     summary.update(n_base_distribution_metadata)
+    if retention_summary is not None:
+        summary.update(retention_summary)
     for key in (
         "post_gep_quantile_pca_model_file",
         "post_gep_quantile_pca_data_file",
@@ -4287,6 +4355,10 @@ def _build_mixed_dataset_summary(
         )
         summary["post_gep_gene_quantile_filter"] = post_gep_gene_quantile_filter
     if filtering_space is not None:
+        if getattr(filtering_space, "gep_filtering_parameters_by_cancer_type", None) is not None:
+            summary["gep_filtering_parameters_by_cancer_type"] = (
+                filtering_space.gep_filtering_parameters_by_cancer_type
+            )
         summary["gep_filtering_n_subgroup"] = (
             getattr(filtering_space, "n_subgroup", None) if gep_filtering.enabled else None
         )

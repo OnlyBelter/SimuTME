@@ -353,6 +353,34 @@ includes every sample of its selected type. If only one type is present and
 the cap selects its full cohort, the full-reference PCA can be reused.
 Per-batch PCA models are not saved.
 
+For dataset-level cancer-type overrides, set `gep_filtering_by_cancer_type`
+to a mapping from exact eligible labels to `n_subgroup` and/or
+`gep_pca_n_components`. A missing type or field uses the resolved scalar
+dataset setting, falling back to the global setting. A nonempty mapping
+requires a positive scalar `n_subgroup` and enabled PCA-space `median_gep`.
+Unknown or excluded type names and unsupported settings raise an error.
+PCA targets must be positive integer component counts or variance fractions
+strictly between zero and one. Each eligible type must have enough reference
+samples and selected genes for its effective PCA target.
+
+The summary and filtering identity record the effective settings in
+`gep_filtering_parameters_by_cancer_type`. Changing an effective setting
+invalidates prior filtering artifacts and resumable checkpoints; use a fresh
+dataset name or output location. Scalar-only configurations keep their
+existing identity and behavior.
+
+For full Mixed simulations, the dataset-level
+`max_samples_per_cancer_type` limits GEP-accepted samples retained for each
+selected reference cancer type. It defaults to `null`, meaning no limit, and
+requires enabled PCA-space `median_gep` filtering with `n_subgroup`. The
+positive integer limit must provide enough total capacity for `n_samples`.
+When the total equals the limit times the number of eligible types, retained
+counts are equal at the GEP stage. Lower totals need not be equal. The setting
+is ignored in `simulation_for_stat` and doesn't change later gene filtering.
+The summary reports retained counts and samples discarded by each limit
+separately from raw GEP-filtering acceptance rates. A type with very low
+acceptance can make a full run take a long time or run indefinitely.
+
 `mgep` computes a coordinate-wise median from all resolved reference samples
 using linear TPM values normalized over the selected genes to 1,000,000. It
 keeps simulated profiles whose L1 distance from this mGEP is at or below the
@@ -479,6 +507,8 @@ For SCT datasets:
 - `gep_gene_quantile_range`
 - `gep_pca_n_components`
 - `n_subgroup`
+- `gep_filtering_by_cancer_type`
+- `max_samples_per_cancer_type`
 - `gep_norm_ord`
 - `gep_n_top`
 - `gep_show_filtering_info`

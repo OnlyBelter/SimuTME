@@ -99,6 +99,7 @@ class GEPGenerationConfig:
     mixed_candidate_workers: int = 0
     mixed_candidate_seed: Optional[int] = None
     n_subgroup: Optional[int] = None
+    max_samples_per_cancer_type: Optional[int] = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -132,6 +133,23 @@ class GEPGenerationConfig:
             raise ValueError(
                 '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
             )
+        if self.max_samples_per_cancer_type is not None:
+            limit = self.max_samples_per_cancer_type
+            if (isinstance(limit, (bool, np.bool_))
+                    or not isinstance(limit, (int, np.integer)) or limit <= 0):
+                raise ValueError('"max_samples_per_cancer_type" must be a positive integer or null.')
+            self.max_samples_per_cancer_type = int(limit)
+            if self.n_subgroup is None or self.filtering_space is None:
+                raise ValueError(
+                    '"max_samples_per_cancer_type" requires enabled PCA-space '
+                    '"median_gep" filtering with n_subgroup.'
+                )
+            types = self.filtering_space.reference_cancer_type_groups
+            if not types or self.n_samples > int(limit) * len(types):
+                raise ValueError(
+                    '"n_samples" exceeds the total max_samples_per_cancer_type '
+                    'capacity of eligible reference cancer types.'
+                )
         if self.filtering_space is not None and hasattr(self.filtering_space, "gep"):
             if self.n_subgroup != getattr(self.filtering_space.gep, "n_subgroup", None):
                 raise ValueError(
@@ -343,6 +361,12 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
         self.gep_filtering_n_pcs_max = None
         self.gep_filtering_subgroup_pca_batches = 0
         self.resolved_dirichlet_alpha = None
+        self.max_samples_per_cancer_type = None
+        self.gep_retained_n_samples_by_cancer_type = None
+        self.gep_discarded_by_cancer_type_limit = 0
+        self.gep_discarded_by_total_target = 0
+        self.capped_parallel_wave = None
+        self.capped_serial_next_batch = 0
 
         # Process cell types
         self.cell_type_used, self.cell_subtype_used = get_cell_type_used(cell_type2subtype, output_types=output_types)
@@ -466,6 +490,25 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             self.gep_filtering_n_pcs_min
             if self.gep_filtering_n_pcs_min == self.gep_filtering_n_pcs_max
             else None
+        )
+
+    def _retain_capped_batch(self, accepted, cancer_type):
+        """Apply the type limit before the total target to accepted rows."""
+        if cancer_type not in self.gep_retained_n_samples_by_cancer_type:
+            raise ValueError(f"Missing eligible reference cancer type: {cancer_type}")
+        capacity = self.max_samples_per_cancer_type - self.gep_retained_n_samples_by_cancer_type[cancer_type]
+        within_type = min(len(accepted), capacity)
+        remaining = self.n_samples - self.generated_bulk_gep_counter
+        retained = min(within_type, remaining)
+        self.gep_discarded_by_cancer_type_limit += len(accepted) - within_type
+        self.gep_discarded_by_total_target += within_type - retained
+        self.gep_retained_n_samples_by_cancer_type[cancer_type] += retained
+        return accepted.iloc[:retained]
+
+    def _eligible_uncapped_types(self):
+        return sorted(
+            name for name, count in self.gep_retained_n_samples_by_cancer_type.items()
+            if count < self.max_samples_per_cancer_type
         )
 
     @staticmethod
@@ -661,6 +704,15 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
     def _generate_gep(self, config: GEPGenerationConfig) -> None:
         self._reset_runtime_log_state()
         self._reset_gep_filtering_stats(config.filtering, config.filtering_space)
+        self.max_samples_per_cancer_type = config.max_samples_per_cancer_type
+        self.gep_retained_n_samples_by_cancer_type = (
+            {name: 0 for name in config.filtering_space.reference_cancer_type_groups}
+            if self.max_samples_per_cancer_type is not None else None
+        )
+        self.gep_discarded_by_cancer_type_limit = 0
+        self.gep_discarded_by_total_target = 0
+        self.capped_parallel_wave = None
+        self.capped_serial_next_batch = 0
         self.resolved_dirichlet_alpha = None
         self.n_samples = config.n_samples
         self.total_cell_number = config.total_cell_number
@@ -695,6 +747,23 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
         # Resume check
         self._check_intermediate_generated_gep()
+        if self.max_samples_per_cancer_type is not None:
+            counts = self.gep_retained_n_samples_by_cancer_type
+            if (
+                not isinstance(counts, dict)
+                or set(counts) != set(self.filtering_space.reference_cancer_type_groups)
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    or value < 0 or value > self.max_samples_per_cancer_type
+                    for value in counts.values()
+                )
+                or sum(counts.values()) != self.generated_bulk_gep_counter
+            ):
+                raise ValueError(
+                    "Retained cancer-type counts differ from intermediate samples. "
+                    "Use a new dataset name/output location."
+                )
+            self.n_round = self.capped_serial_next_batch
 
         # Load Data
         obs_df, gene_list_in_sc_ds, sc_dataset_key = self._load_sc_data_for_generation(config.simu_method)
@@ -796,8 +865,11 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 # 4. Filtering (GEP-level filtering during generation)
                 if self.filtering_space is not None:
                     pre_filter_n_samples = len(simulated_gep)
+                    filter_options = {}
+                    if self.max_samples_per_cancer_type is not None:
+                        filter_options["cancer_type"] = np.random.choice(self._eligible_uncapped_types())
                     simulated_gep = self.filtering_space.filter(
-                        simulated_gep, batch_id=self.n_round,
+                        simulated_gep, batch_id=self.n_round, **filter_options,
                     )
                     if config.filtering:
                         self._record_gep_filtering_counts(
@@ -842,6 +914,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
 
                 # 5. Save Results
                 filtering_finished = perf_counter()
+                if simulated_gep is not None and self.max_samples_per_cancer_type is not None:
+                    simulated_gep = self._retain_capped_batch(
+                        simulated_gep, self.filtering_space.last_batch_cancer_type
+                    )
                 if simulated_gep is not None and not simulated_gep.empty:
                     # Ensure we don't exceed requested n_samples
                     remaining_needed = self.n_samples - self.generated_bulk_gep_counter
@@ -868,6 +944,8 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                                                   cell_fraction=generated_cell_frac)
 
                 self.n_round += 1
+                if self.max_samples_per_cancer_type is not None:
+                    self.capped_serial_next_batch = self.n_round
                 if self.filtering_space is not None:
                     self._save_filtering_metadata()
                 logger.info(
@@ -896,6 +974,10 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 "mixed_candidate_workers", "mixed_candidate_seed",
             )
         }
+        if config.max_samples_per_cancer_type is None:
+            generation.pop("max_samples_per_cancer_type")
+        else:
+            generation["capped_scheduling"] = "cancer-type-waves-v1"
         if config.sampling_method_prop == "dirichlet":
             generation["dirichlet_alpha_filtering_ref_types"] = (
                 list(config.filtering_ref_types)
@@ -984,6 +1066,14 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                 "gep_filtering_n_pcs_max", "gep_filtering_subgroup_pca_batches",
             )
         }
+        if self.max_samples_per_cancer_type is not None:
+            generator_stats.update(
+                gep_retained_n_samples_by_cancer_type=self.gep_retained_n_samples_by_cancer_type,
+                gep_discarded_by_cancer_type_limit=self.gep_discarded_by_cancer_type_limit,
+                gep_discarded_by_total_target=self.gep_discarded_by_total_target,
+                capped_parallel_wave=self.capped_parallel_wave,
+                capped_serial_next_batch=self.capped_serial_next_batch,
+            )
         extra = {}
         if getattr(self, "parallel_worker_count", 0):
             extra["parallel_execution"] = {"workers": self.parallel_worker_count}
@@ -1023,6 +1113,33 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
                     or not isinstance(checkpoint["accepted"], int)
                     or checkpoint["accepted"] < 0):
                 raise ValueError("invalid checkpoint counters")
+            if self.max_samples_per_cancer_type is not None:
+                stats = checkpoint["generator_stats"]
+                counts = stats["gep_retained_n_samples_by_cancer_type"]
+                if (
+                    not isinstance(counts, dict)
+                    or set(counts) != set(self.filtering_space.reference_cancer_type_groups)
+                    or any(
+                        isinstance(value, bool) or not isinstance(value, int)
+                        or value < 0 or value > self.max_samples_per_cancer_type
+                        for value in counts.values()
+                    )
+                    or sum(counts.values()) != checkpoint["accepted"]
+                ):
+                    raise ValueError("invalid retained cancer-type counts")
+                wave = stats["capped_parallel_wave"]
+                if wave is None and checkpoint["next_batch"]:
+                    raise ValueError("missing capped scheduling wave")
+                if wave is not None and (
+                    not isinstance(wave, dict)
+                    or not isinstance(wave.get("start"), int)
+                    or not isinstance(wave.get("end"), int)
+                    or not wave["start"] <= checkpoint["next_batch"] <= wave["end"]
+                    or not isinstance(wave.get("types"), list)
+                    or not wave["types"]
+                    or not set(wave["types"]).issubset(counts)
+                ):
+                    raise ValueError("invalid capped scheduling wave")
             if checkpoint["accepted"]:
                 expression_ids = pd.read_csv(
                     self.generated_bulk_gep_csv_fp, usecols=[0], index_col=0,

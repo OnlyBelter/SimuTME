@@ -33,6 +33,49 @@ def validate_gep_filtering_method(method):
         )
 
 
+def validate_cancer_type_pca_target(value, context):
+    """Validate and normalize one PCA target for a cancer-specific override."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context}: PCA target must be a positive integer or a fraction in (0, 1).")
+    if isinstance(value, (int, np.integer)) and value > 0:
+        return int(value)
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and 0 < value < 1:
+        return float(value)
+    raise ValueError(f"{context}: PCA target must be a positive integer or a fraction in (0, 1).")
+
+
+def normalize_cancer_type_overrides(value, context):
+    """Validate the optional dataset-level cancer-type override mapping."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f'{context}: "gep_filtering_by_cancer_type" must be a mapping.')
+    resolved = {}
+    allowed = {"n_subgroup", "gep_pca_n_components"}
+    for cancer_type, settings in value.items():
+        if not isinstance(cancer_type, str) or not cancer_type.strip() or cancer_type != cancer_type.strip():
+            raise ValueError(f"{context}: cancer-type override labels must be nonempty exact strings.")
+        label = f'{context}, cancer type "{cancer_type}"'
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError(f"{label}: override must be a nonempty mapping.")
+        unknown = set(settings) - allowed
+        if unknown:
+            raise ValueError(f"{label}: unknown override fields: {sorted(map(str, unknown))}.")
+        entry = {}
+        if "n_subgroup" in settings:
+            subgroup = settings["n_subgroup"]
+            if (isinstance(subgroup, (bool, np.bool_))
+                    or not isinstance(subgroup, (int, np.integer)) or subgroup <= 0):
+                raise ValueError(f'{label}: "n_subgroup" must be a positive integer.')
+            entry["n_subgroup"] = int(subgroup)
+        if "gep_pca_n_components" in settings:
+            entry["gep_pca_n_components"] = validate_cancer_type_pca_target(
+                settings["gep_pca_n_components"], label
+            )
+        resolved[cancer_type] = entry
+    return {name: resolved[name] for name in sorted(resolved)}
+
+
 def identity_hash(identity):
     return hashlib.sha256(
         json.dumps(identity, sort_keys=True, allow_nan=False).encode("utf-8")
@@ -149,7 +192,7 @@ class FixedGeneFilter:
 
     def __init__(self, genes, reference_linear, reference_file, reference_subset,
                  gep_params, result_dir, generation_n_genes, shared_n_genes,
-                 correlation_file=None, reference_cancer_types=None):
+                 correlation_file=None, reference_cancer_types=None, dataset_name=None):
         self.genes = list(genes)
         self.reference_file = Path(reference_file)
         self.reference_linear = normalize_selected(reference_linear, self.genes, "Reference")
@@ -158,6 +201,15 @@ class FixedGeneFilter:
         self.gep = gep_params
         self.reference_sample_count = len(self.reference_log)
         requested_n_subgroup = getattr(self.gep, "n_subgroup", None)
+        context = f'Mixed dataset "{dataset_name or Path(result_dir).name}"'
+        overrides = normalize_cancer_type_overrides(
+            getattr(self.gep, "gep_filtering_by_cancer_type", None), context
+        )
+        if overrides and requested_n_subgroup is None:
+            raise ValueError(
+                f'{context}: "gep_filtering_by_cancer_type" requires '
+                'a positive default "n_subgroup".'
+            )
         if requested_n_subgroup is not None and (
             isinstance(requested_n_subgroup, bool)
             or not isinstance(requested_n_subgroup, (int, np.integer))
@@ -211,13 +263,47 @@ class FixedGeneFilter:
                     index=True,
                 ).values.tobytes()
             ).hexdigest()
+        self.gep_filtering_parameters_by_cancer_type = None
+        if overrides:
+            validate_cancer_type_pca_target(self.gep.pca_n_components, f"{context}, default GEP PCA")
+            unknown = sorted(set(overrides) - set(self.reference_cancer_type_groups))
+            if unknown:
+                raise ValueError(
+                    f"{context}: cancer-type overrides are unknown or excluded "
+                    f"from the eligible reference: {unknown}."
+                )
+            self.gep_filtering_parameters_by_cancer_type = {}
+            for cancer_type in sorted(self.reference_cancer_type_groups):
+                selected = overrides.get(cancer_type, {})
+                target = validate_cancer_type_pca_target(
+                    selected.get("gep_pca_n_components", self.gep.pca_n_components),
+                    f'{context}, cancer type "{cancer_type}"',
+                )
+                self.gep_filtering_parameters_by_cancer_type[cancer_type] = {
+                    "n_subgroup": selected.get("n_subgroup", self.n_subgroup),
+                    "gep_pca_n_components": target,
+                }
+        single_type = (
+            next(iter(self.reference_cancer_type_groups))
+            if len(self.reference_cancer_type_groups) == 1 else None
+        )
+        single_type_cap = (
+            self.gep_filtering_parameters_by_cancer_type[single_type]["n_subgroup"]
+            if single_type is not None and self.gep_filtering_parameters_by_cancer_type is not None
+            else self.n_subgroup
+        )
         self.uses_subgroup_reference = (
             requested_n_subgroup is not None
             and (
                 len(self.reference_cancer_type_groups) > 1
-                or self.n_subgroup < self.reference_sample_count
+                or single_type_cap < self.reference_sample_count
             )
         )
+        self.full_reference_pca_target = self.gep.pca_n_components
+        if self.gep_filtering_parameters_by_cancer_type is not None and not self.uses_subgroup_reference:
+            self.full_reference_pca_target = self.gep_filtering_parameters_by_cancer_type[
+                single_type
+            ]["gep_pca_n_components"]
         self.last_batch_pca_n_components = None
         self.last_batch_id = None
         self.last_batch_cancer_type = None
@@ -230,22 +316,27 @@ class FixedGeneFilter:
                 raise ValueError(
                     '"n_subgroup" requires enabled PCA-space "median_gep" filtering.'
                 )
-            component_target = self.gep.pca_n_components
-            minimum_samples = (
-                max(2, int(component_target))
-                if isinstance(component_target, (int, np.integer))
-                else 2
-            )
             for cancer_type, indices in self.reference_cancer_type_groups.items():
-                sample_count = min(self.n_subgroup, len(indices))
+                type_settings = (
+                    self.gep_filtering_parameters_by_cancer_type[cancer_type]
+                    if self.gep_filtering_parameters_by_cancer_type is not None else {}
+                )
+                component_target = type_settings.get("gep_pca_n_components", self.gep.pca_n_components)
+                subgroup_cap = type_settings.get("n_subgroup", self.n_subgroup)
+                minimum_samples = (
+                    max(2, int(component_target))
+                    if isinstance(component_target, (int, np.integer))
+                    else 2
+                )
+                sample_count = min(subgroup_cap, len(indices))
                 maximum_components = min(sample_count, len(self.genes))
                 if sample_count < minimum_samples or (
                     isinstance(component_target, (int, np.integer))
                     and component_target > maximum_components
                 ):
                     raise ValueError(
-                        f'Cancer type "{cancer_type}" has {len(indices)} eligible GEP '
-                        f"reference samples; n_subgroup={self.n_subgroup} yields "
+                        f'{context}: Cancer type "{cancer_type}" has {len(indices)} eligible GEP '
+                        f"reference samples; n_subgroup={subgroup_cap} yields "
                         f"{sample_count} samples, too few for the configured "
                         "GEP-filtering PCA components."
                     )
@@ -265,8 +356,12 @@ class FixedGeneFilter:
             "reference_file": str(Path(reference_file).resolve()),
             "reference_hash": reference_hash,
             "reference_subset": reference_subset,
-            "pca_target": self.gep.pca_n_components,
+            "pca_target": self.full_reference_pca_target,
         }
+        if self.gep_filtering_parameters_by_cancer_type is not None:
+            self.pca_identity["gep_filtering_parameters_by_cancer_type"] = (
+                self.gep_filtering_parameters_by_cancer_type
+            )
         self.identity = {
             **self.pca_identity,
             "output_definition": "fixed-G-log2-TPM-plus-1",
@@ -374,7 +469,7 @@ class FixedGeneFilter:
         if self.pca is None and self.persist_pca:
             self.validate_model()
         if self.pca is None:
-            self.pca = PCA(n_components=self.gep.pca_n_components, svd_solver="full", random_state=42)
+            self.pca = PCA(n_components=self.full_reference_pca_target, svd_solver="full", random_state=42)
             self.pca.fit(self.reference_log.to_numpy(dtype=np.float64))
             self.pca.filtering_genes_ = self.genes
             if self.persist_pca:
@@ -385,7 +480,7 @@ class FixedGeneFilter:
             self.pca, self.reference_log, label="Reference log2(TPM + 1)"
         )
         logger.info("GEP-filtering PCA: target=%s, fitted=%d PCs.",
-                    self.gep.pca_n_components, self.pca.n_components_)
+                    self.full_reference_pca_target, self.pca.n_components_)
 
     def _prepare_mgep(self):
         if self.mgep_center is not None:
@@ -449,14 +544,17 @@ class FixedGeneFilter:
             return np.asarray(self.reference_log_memmap[indices], dtype=np.float64)
         raise RuntimeError("The full GEP reference is unavailable for subgroup sampling.")
 
-    def _select_batch_cancer_type(self, seed=None):
+    def _select_batch_cancer_type(self, seed=None, cancer_type=None):
         if not self.reference_cancer_type_groups:
             return None
         self._batch_subgroup_sampler = (
             np.random if seed is None else np.random.default_rng(seed)
         )
-        self.last_sampled_cancer_type = self._batch_subgroup_sampler.choice(
-            list(self.reference_cancer_type_groups)
+        if cancer_type is not None and cancer_type not in self.reference_cancer_type_groups:
+            raise ValueError(f"Unknown GEP reference cancer type: {cancer_type}")
+        self.last_sampled_cancer_type = (
+            self._batch_subgroup_sampler.choice(list(self.reference_cancer_type_groups))
+            if cancer_type is None else cancer_type
         )
         self.last_batch_cancer_type = self.last_sampled_cancer_type
         return self.last_sampled_cancer_type
@@ -475,9 +573,14 @@ class FixedGeneFilter:
         sampler = self._batch_subgroup_sampler
         cancer_type = self.last_sampled_cancer_type
         cancer_type_indices = self.reference_cancer_type_groups[cancer_type]
+        subgroup_cap = (
+            self.gep_filtering_parameters_by_cancer_type[cancer_type]["n_subgroup"]
+            if self.gep_filtering_parameters_by_cancer_type is not None
+            else self.n_subgroup
+        )
         return sampler.choice(
             cancer_type_indices,
-            size=min(self.n_subgroup, len(cancer_type_indices)),
+            size=min(subgroup_cap, len(cancer_type_indices)),
             replace=False,
         )
 
@@ -494,8 +597,13 @@ class FixedGeneFilter:
         if not np.isfinite(reference).all():
             raise ValueError("Sampled GEP reference contains non-finite log expression.")
 
+        type_settings = (
+            self.gep_filtering_parameters_by_cancer_type[self.last_sampled_cancer_type]
+            if self.gep_filtering_parameters_by_cancer_type is not None
+            else {"n_subgroup": self.n_subgroup, "gep_pca_n_components": self.gep.pca_n_components}
+        )
         self.pca = PCA(
-            n_components=self.gep.pca_n_components,
+            n_components=type_settings["gep_pca_n_components"],
             svd_solver="full",
             random_state=42,
         )
@@ -515,11 +623,13 @@ class FixedGeneFilter:
         self.last_batch_reference_sample_count = len(indices)
         logger.info(
             "GEP PCA subgroup for batch %s: cancer type %s, %d/%d reference "
-            "samples; %d PCs.",
+            "samples; n_subgroup=%s, PCA target=%s; %d PCs.",
             batch_id if batch_id is not None else "unknown",
             self.last_batch_cancer_type,
             len(indices),
             len(self.reference_cancer_type_groups[self.last_batch_cancer_type]),
+            type_settings["n_subgroup"],
+            type_settings["gep_pca_n_components"],
             self.last_batch_pca_n_components,
         )
         return self.reference_distances
@@ -558,15 +668,24 @@ class FixedGeneFilter:
             self.range_bounds = self.reference_log.quantile([lower, upper])
         return self.range_bounds
 
-    def filter(self, simulated_linear, batch_id=None, subgroup_seed=None):
+    def filter(self, simulated_linear, batch_id=None, subgroup_seed=None, cancer_type=None):
         if self.uses_subgroup_reference:
             self.last_batch_pca_n_components = None
             self.last_batch_id = batch_id
             self.last_batch_cancer_type = None
             self.last_batch_reference_sample_count = None
-            self._select_batch_cancer_type(subgroup_seed)
+            self._select_batch_cancer_type(subgroup_seed, cancer_type)
         elif self.gep.n_subgroup is not None and len(self.reference_cancer_type_groups) == 1:
             self.last_batch_cancer_type = next(iter(self.reference_cancer_type_groups))
+            if self.gep_filtering_parameters_by_cancer_type is not None:
+                settings = self.gep_filtering_parameters_by_cancer_type[self.last_batch_cancer_type]
+                logger.info(
+                    "GEP PCA batch %s: cancer type %s, n_subgroup=%s, PCA target=%s; "
+                    "using the full reference.",
+                    batch_id if batch_id is not None else "unknown",
+                    self.last_batch_cancer_type, settings["n_subgroup"],
+                    settings["gep_pca_n_components"],
+                )
         normalized = normalize_selected(simulated_linear, self.genes, "Simulated profiles")
         if normalized.empty or not self.gep.enabled:
             self._batch_subgroup_sampler = None

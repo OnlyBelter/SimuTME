@@ -6,6 +6,18 @@ that changed on a given date.
 
 ## November 25, 2026
 
+### Per-cancer-type retained sample limit
+
+Full Mixed simulations can limit the number of GEP-accepted samples retained
+per reference cancer type. Summaries distinguish retained counts from raw
+filtering acceptance.
+
+### Cancer-specific GEP PCA settings
+
+Mixed datasets can override subgroup size and PCA target for each eligible
+cancer type. Summaries record the resolved settings, and changed settings
+invalidate incompatible filtering artifacts and checkpoints.
+
 ### Statistics-only Mixed simulation
 
 Mixed datasets can set `simu_mode: "simulation_for_stat"` to evaluate

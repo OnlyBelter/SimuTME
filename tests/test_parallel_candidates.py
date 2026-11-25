@@ -44,7 +44,8 @@ def setup_parallel(tmp_path, monkeypatch):
     def create(
             name, workers=1, seed=42, method="mgep", quantiles=(None, 1.0),
             n_subgroup=None, fraction_method="segment", dirichlet_seed=None,
-            dirichlet_alpha=None):
+            dirichlet_alpha=None, cancer_type_overrides=None,
+            max_samples_per_cancer_type=None, n_samples=12):
         output = tmp_path / name
         selected_reference = (
             subgroup_reference if n_subgroup is not None else reference
@@ -63,6 +64,7 @@ def setup_parallel(tmp_path, monkeypatch):
                 filtering_in_pca_space=(method == "median_gep"),
                 gep_filtering_quantile=quantiles,
                 n_subgroup=n_subgroup,
+                gep_filtering_by_cancer_type=cancer_type_overrides,
             ),
             output / "test", len(selected_reference), 2,
             reference_cancer_types=(
@@ -70,12 +72,13 @@ def setup_parallel(tmp_path, monkeypatch):
             ),
         )
         config = GEPGenerationConfig(
-            n_samples=12, simu_method="mul", sampling_method_prop=fraction_method,
+            n_samples=n_samples, simu_method="mul", sampling_method_prop=fraction_method,
             filtering=True, filtering_method=method, filtering_space=space,
             filtering_in_pca_space=(method == "median_gep"), norm_ord=1,
             mixed_candidate_workers=workers, mixed_candidate_seed=seed,
             n_subgroup=n_subgroup, dirichlet_sampling_seed=dirichlet_seed,
             dirichlet_alpha=dirichlet_alpha,
+            max_samples_per_cancer_type=max_samples_per_cancer_type,
         )
         return generator, config
 
@@ -363,6 +366,50 @@ def test_parallel_subgroup_resume_reuses_batch_reference(setup_parallel, monkeyp
     )
 
 
+def test_cancer_specific_overrides_support_parallel_resume_and_identity(setup_parallel, monkeypatch):
+    options = {
+        "method": "median_gep", "quantiles": (None, 1.0), "n_subgroup": 2,
+        "cancer_type_overrides": {
+            "A": {"n_subgroup": 3, "gep_pca_n_components": 0.9},
+            "B": {"gep_pca_n_components": 1},
+        },
+    }
+    baseline, baseline_config = setup_parallel("type-baseline", workers=1, **options)
+    baseline.generate_gep(baseline_config)
+    interrupted, interrupted_config = setup_parallel("type-resume", workers=2, **options)
+    save_checkpoint = interrupted._save_parallel_checkpoint
+
+    def interrupt_after_first_batch():
+        save_checkpoint()
+        if interrupted.n_round == 1:
+            raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(interrupted, "_save_parallel_checkpoint", interrupt_after_first_batch)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        interrupted.generate_gep(interrupted_config)
+    changed_options = {**options, "cancer_type_overrides": {"A": {"n_subgroup": 4}}}
+    changed, changed_config = setup_parallel("type-resume", workers=1, **changed_options)
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        changed.generate_gep(changed_config)
+    resumed, resumed_config = setup_parallel("type-resume", workers=1, **options)
+    resumed.generate_gep(resumed_config)
+    pd.testing.assert_frame_equal(
+        pd.read_csv(baseline.generated_bulk_gep_csv_fp),
+        pd.read_csv(resumed.generated_bulk_gep_csv_fp),
+    )
+    assert baseline.gep_filtering_input_n_samples_by_cancer_type == (
+        resumed.gep_filtering_input_n_samples_by_cancer_type
+    )
+    assert baseline.gep_filtering_kept_n_samples_by_cancer_type == (
+        resumed.gep_filtering_kept_n_samples_by_cancer_type
+    )
+    metadata = json.loads((resumed.filtering_space.result_dir / "filtering_metadata.json").read_text())
+    assert metadata["identity"]["gep_filtering_parameters_by_cancer_type"] == {
+        "A": {"n_subgroup": 3, "gep_pca_n_components": 0.9},
+        "B": {"n_subgroup": 2, "gep_pca_n_components": 1},
+    }
+
+
 def test_serial_subgroup_counts_kept_samples_by_reference_type(setup_parallel):
     generator, config = setup_parallel(
         "serial-subgroup-counts",
@@ -384,6 +431,143 @@ def test_serial_subgroup_counts_kept_samples_by_reference_type(setup_parallel):
         if input_by_type[cancer_type] else None
         for cancer_type in input_by_type
     }
+
+
+@pytest.mark.parametrize("workers", [0, 1, 2])
+@pytest.mark.parametrize("target", [8, 12])
+def test_capped_generation_retains_at_most_limit(setup_parallel, workers, target):
+    generator, config = setup_parallel(
+        f"cap-{workers}-{target}", workers=workers, method="median_gep",
+        quantiles=(None, 1.0), n_subgroup=2, n_samples=target,
+        max_samples_per_cancer_type=6,
+    )
+    generator.generate_gep(config)
+    counts = generator.gep_retained_n_samples_by_cancer_type
+    assert sum(counts.values()) == target
+    assert max(counts.values()) <= 6
+    if target == 12:
+        assert counts == {"A": 6, "B": 6}
+    assert (
+        generator.gep_filtering_kept_n_samples
+        == target + generator.gep_discarded_by_cancer_type_limit
+        + generator.gep_discarded_by_total_target
+    )
+    expression = pd.read_csv(generator.generated_bulk_gep_csv_fp, index_col=0)
+    fractions = pd.read_csv(generator.generated_cell_fraction_fp, index_col=0)
+    selected = pd.read_csv(generator.sampled_sc_cell_id_file_path, index_col=0)
+    assert expression.index.equals(fractions.index)
+    assert selected.index.unique().equals(fractions.index)
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "3"])
+def test_capped_generation_rejects_invalid_limit(setup_parallel, value):
+    _, config = setup_parallel("invalid-limit", workers=0, method="median_gep", n_subgroup=2)
+    with pytest.raises(ValueError, match="max_samples_per_cancer_type"):
+        replace(config, max_samples_per_cancer_type=value)
+
+
+def test_capped_generation_rejects_impossible_target_or_missing_subgroup(setup_parallel):
+    _, config = setup_parallel("capacity", workers=0, method="median_gep", n_subgroup=2)
+    with pytest.raises(ValueError, match="capacity"):
+        replace(config, max_samples_per_cancer_type=5)
+    _, no_subgroup = setup_parallel("missing-subgroup", workers=0, method="median_gep")
+    with pytest.raises(ValueError, match="requires"):
+        replace(no_subgroup, max_samples_per_cancer_type=10)
+
+
+def test_capped_retention_accounts_for_both_limits(setup_parallel):
+    generator, _ = setup_parallel("retention-accounting")
+    generator.max_samples_per_cancer_type = 6
+    generator.n_samples = 10
+    generator.generated_bulk_gep_counter = 9
+    generator.gep_retained_n_samples_by_cancer_type = {"A": 4, "B": 5}
+    accepted = pd.DataFrame({"value": range(5)})
+    retained = generator._retain_capped_batch(accepted, "A")
+    assert len(retained) == 1
+    assert generator.gep_retained_n_samples_by_cancer_type == {"A": 5, "B": 5}
+    assert generator.gep_discarded_by_cancer_type_limit == 3
+    assert generator.gep_discarded_by_total_target == 1
+
+
+def test_serial_capped_generation_skips_filled_types_and_handles_empty_batch(
+        setup_parallel, monkeypatch):
+    generator, config = setup_parallel(
+        "serial-cap-selection", workers=0, method="median_gep", n_subgroup=2,
+        max_samples_per_cancer_type=6,
+    )
+    selections = []
+
+    def filter_batch(expression, batch_id=None, cancer_type=None):
+        assert generator.gep_retained_n_samples_by_cancer_type[cancer_type] < 6
+        selections.append(cancer_type)
+        config.filtering_space.last_batch_cancer_type = cancer_type
+        return expression.iloc[0:0] if batch_id == 0 else expression
+
+    monkeypatch.setattr(config.filtering_space, "filter", filter_batch)
+    generator.generate_gep(config)
+    assert generator.gep_retained_n_samples_by_cancer_type == {"A": 6, "B": 6}
+    assert generator.gep_filtering_input_n_samples == 5 * len(selections)
+    assert generator.gep_filtering_kept_n_samples == 5 * (len(selections) - 1)
+    assert len(set(selections)) == 2
+
+
+def test_serial_capped_generation_restores_retained_counts(setup_parallel, monkeypatch):
+    options = dict(workers=0, method="median_gep", quantiles=(None, 1.0),
+                   n_subgroup=2, max_samples_per_cancer_type=6)
+    interrupted, config = setup_parallel("serial-cap-resume", **options)
+    save_metadata = interrupted._save_filtering_metadata
+
+    def interrupt():
+        save_metadata()
+        if interrupted.n_round == 1:
+            raise RuntimeError("serial interruption")
+
+    monkeypatch.setattr(interrupted, "_save_filtering_metadata", interrupt)
+    with pytest.raises(RuntimeError, match="serial interruption"):
+        interrupted.generate_gep(config)
+    resumed, resumed_config = setup_parallel("serial-cap-resume", **options)
+    resumed.generate_gep(resumed_config)
+    assert resumed.gep_retained_n_samples_by_cancer_type == {"A": 6, "B": 6}
+    assert resumed.generated_bulk_gep_counter == 12
+
+
+def test_capped_parallel_is_worker_independent_and_resumable(setup_parallel, monkeypatch):
+    options = dict(method="median_gep", quantiles=(None, 1.0), n_subgroup=2,
+                   max_samples_per_cancer_type=21, n_samples=42)
+    baseline, baseline_config = setup_parallel("cap-baseline", workers=1, **options)
+    baseline.generate_gep(baseline_config)
+    assert baseline.n_round > 8
+    interrupted, interrupted_config = setup_parallel("cap-resume", workers=2, **options)
+    original = interrupted._save_parallel_checkpoint
+
+    def interrupt():
+        original()
+        if interrupted.n_round == 9:
+            raise RuntimeError("interrupted wave")
+
+    monkeypatch.setattr(interrupted, "_save_parallel_checkpoint", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted wave"):
+        interrupted.generate_gep(interrupted_config)
+    changed, changed_config = setup_parallel(
+        "cap-resume", workers=1, **{**options, "max_samples_per_cancer_type": 22}
+    )
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        changed.generate_gep(changed_config)
+    uncapped, uncapped_config = setup_parallel(
+        "cap-resume", workers=1, **{**options, "max_samples_per_cancer_type": None}
+    )
+    with pytest.raises(ValueError, match="Incompatible filtering metadata"):
+        uncapped.generate_gep(uncapped_config)
+    resumed, resumed_config = setup_parallel("cap-resume", workers=2, **options)
+    resumed.generate_gep(resumed_config)
+    for name in ("generated_bulk_gep_csv_fp", "generated_cell_fraction_fp",
+                 "sampled_sc_cell_id_file_path"):
+        pd.testing.assert_frame_equal(
+            pd.read_csv(getattr(baseline, name)), pd.read_csv(getattr(resumed, name))
+        )
+    assert baseline.gep_retained_n_samples_by_cancer_type == resumed.gep_retained_n_samples_by_cancer_type
+    assert baseline.gep_filtering_kept_n_samples_by_cancer_type == resumed.gep_filtering_kept_n_samples_by_cancer_type
+    assert baseline.gep_discarded_by_cancer_type_limit == resumed.gep_discarded_by_cancer_type_limit
 
 
 def test_parallel_rejects_partial_output_and_changed_seed(setup_parallel):

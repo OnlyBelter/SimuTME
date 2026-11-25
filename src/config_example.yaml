@@ -171,6 +171,17 @@ datasets:
     sampling_method_prop: "segment"  # Proportion sampling: 'segment', 'seg_random', 'sparse', 'random', 'dirichlet', 'mixed'
     gep_filtering: true  # Mixed dataset switch for GEP-level filtering during bulk generation
     filtering_ref_types: null  # Optional TCGA subtype subset used during GEP-level filtering
+    # max_samples_per_cancer_type: null  # Full mode: cap retained samples per GEP reference type.
+    # Optional cancer-type overrides require PCA-space median_gep and a positive scalar n_subgroup:
+    # n_subgroup: 200
+    # gep_pca_n_components: 0.9
+    # gep_filtering_by_cancer_type:
+    #   ACC:
+    #     n_subgroup: 100
+    #     gep_pca_n_components: 0.95
+    #   LIHC:
+    #     n_subgroup: 150
+    #     gep_pca_n_components: 0.99
     gene_filtering: true  # Mixed dataset switch for post-generation gene-level filtering
     n_sample_for_pca: [10, 50, 100]  # Example: save separate PCA comparisons at each simulated sample count
     cell_prop_prior: null  # Optional mapping of cell type to [min, max], or "DeSide_predicted_TCGA_range"; overrides prediction-file caps

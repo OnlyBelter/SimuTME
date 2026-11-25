@@ -127,6 +127,8 @@ timings.
 - `gep_min_percentage_within_gene_range`
 - `gep_gene_quantile_range`
 - `gep_pca_n_components`
+- `n_subgroup`
+- `gep_filtering_by_cancer_type`
 - `gep_norm_ord`
 - `gep_n_top`
 - `gep_show_filtering_info`
@@ -556,12 +558,72 @@ datasets:
     n_subgroup: 200
 ```
 
+You can override the subgroup cap and PCA target for individual eligible
+cancer types. For example, BLCA uses the scalar defaults below, while ACC
+and LIHC use their listed overrides:
+
+```yaml
+datasets:
+  Mixed_N100K:
+    gep_filtering: true
+    gep_filtering_method: median_gep
+    gep_filtering_in_pca_space: true
+    filtering_ref_types: [ACC, BLCA, LIHC]
+    n_subgroup: 200
+    gep_pca_n_components: 0.9
+    gep_filtering_by_cancer_type:
+      ACC:
+        n_subgroup: 100
+        gep_pca_n_components: 0.95
+      LIHC:
+        n_subgroup: 150
+        gep_pca_n_components: 0.99
+```
+
+The mapping requires a positive scalar `n_subgroup` and applies in both
+`full_simulation` and `simulation_for_stat`. Omit either field within a
+type to use its scalar default. Overrides don't change the eligible types:
+`filtering_ref_types` still selects the reference cohort. Unknown or
+excluded types and PCA targets unsupported by a type's available reference
+samples or selected genes raise an error before candidate generation.
+
 In parallel mode, both the cancer-type choice and sample draw are
 deterministically derived from `mixed_candidate_seed` and the candidate batch
 ID, so worker count and resume do not change a batch's reference subgroup. In
 serial mode, selection uses the existing NumPy random stream. Nonpositive or
 noninteger values, missing cancer-type labels, or eligible types too small for
 the PCA target fail with an error.
+
+For full simulations, you can limit the number of GEP-accepted samples
+retained for each batch reference cancer type:
+
+```yaml
+datasets:
+  Mixed_Balanced:
+    n_samples: 3000
+    gep_filtering: true
+    gep_filtering_method: median_gep
+    gep_filtering_in_pca_space: true
+    filtering_ref_types: [ACC, BLCA, LIHC]
+    n_subgroup: 200
+    max_samples_per_cancer_type: 1000
+```
+
+This setting requires enabled PCA-space `median_gep` filtering. It defaults
+to `null`, preserving the existing workflow, and is ignored in
+`simulation_for_stat`. The total target must not exceed the limit times the
+number of eligible types. Equal counts are guaranteed at the GEP stage only
+when the total equals that capacity and the run completes. Later gene-level
+filtering remains unchanged and can alter the final balance.
+
+Once a type reaches its limit, subsequent scheduling waves exclude it;
+parallel batches already assigned to it may still run. Parallel scheduling
+is deterministic across worker counts and checkpoint resume. The summary
+reports `gep_retained_n_samples_by_cancer_type`,
+`gep_discarded_by_cancer_type_limit`, and `gep_discarded_by_total_target`
+separately from raw acceptance counts and rates. A type with low or zero
+acceptance can make a full simulation run for a long time or indefinitely.
+Changing the limit requires a compatible fresh output location.
 
 Full-reference distance-filtered Mixed datasets save
 `gep_filtering_distance_distribution.png` and `.svg` in their result directory.
@@ -660,6 +722,12 @@ and input candidate counts by the cancer type selected for each batch, plus
 `gep_filtering_acceptance_rate_by_cancer_type`. Each rate is kept divided by
 input candidates and ranges from 0 to 1; it is `null` when no candidates were
 assigned to that type. No per-batch PCA model artifacts are written.
+When cancer-type overrides are configured, the summary also records every
+eligible type's resolved parameters under
+`gep_filtering_parameters_by_cancer_type`. The scalar summary fields retain
+the configured defaults. Changing an effective per-type setting invalidates
+existing filtering outputs and resumable checkpoints; use a fresh dataset
+name or output location.
 
 The single loading table includes all final genes with signed `PC1_loading`
 and `PC2_loading`. It is sorted descending by `PC1_loading`, with
