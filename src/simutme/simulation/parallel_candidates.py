@@ -138,10 +138,13 @@ def _store_shared_matrix(source, directory, filename="sct-expression.npy"):
     rows, columns = source.shape
     dtype = np.result_type(*source.dtypes)
     required = rows * columns * np.dtype(dtype).itemsize
-    if shutil.disk_usage(directory).free < required + 1024 * 1024:
+    required_with_margin = required + 1024 * 1024
+    available = shutil.disk_usage(directory).free
+    if available < required_with_margin:
         raise OSError(
-            f"Temporary storage for shared matrix requires at least {required} bytes; "
-            "set TMPDIR to a location with sufficient free space."
+            f"Temporary storage in {directory} for {filename} requires at least "
+            f"{required_with_margin} bytes (including a 1 MiB safety margin); "
+            f"{available} bytes available."
         )
     matrix = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=source.shape)
     for start in range(0, rows, 256):
@@ -187,7 +190,11 @@ def run_parallel_candidates(generator, config, obs, space, statistics_only=False
         workers, worker_config["batch_size"], config.mixed_candidate_seed,
         config.sampling_method_prop, config.dirichlet_sampling_seed,
     )
-    with tempfile.TemporaryDirectory(prefix="simutme-candidates-") as directory:
+    result_dir = Path(space.result_dir)
+    result_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="simutme-candidates-", dir=result_dir,
+    ) as directory:
         started = perf_counter()
         matrix_path = _store_shared_matrix(source, directory)
         logger.info("Shared SCT matrix prepared in %.3g seconds at %s.",

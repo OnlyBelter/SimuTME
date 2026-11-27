@@ -57,10 +57,11 @@ the first complete batch that reaches either the accepted `n_samples` target
 or the configured batch limit. The final batch is counted in full. If both
 limits are reached together, the stop reason is `n_samples_reached`.
 
-The run writes only `<dataset-result-directory>/simulation_for_stat/`
-`mixed_dataset_summary.json`. It records input, kept, and acceptance-rate
-totals by the cancer type selected for each batch, plus configuration and
-stopping metadata. An unselected cancer type has a `null` acceptance rate.
+The run persistently writes only `mixed_dataset_summary.json` under
+`<dataset-result-directory>/simulation_for_stat/`. It records input, kept,
+and acceptance-rate totals by the cancer type selected for each batch, plus
+configuration and stopping metadata. An unselected cancer type has a `null`
+acceptance rate.
 The mode does not write simulated expression or fractions, PCA model files,
 plots, or checkpoints; the PCA needed by the filter is still fitted in memory.
 Use a new dataset name or output location if the summary already exists.
@@ -432,10 +433,14 @@ reuse the full-reference PCA.
 
 Start with a fresh dataset name and output location. Set
 `mixed_sct_loading_mode: "eager"` globally, or set the auto eager threshold
-high enough for the SCT reference. The temporary directory specified by
-`TMPDIR` must have space for a shared copy of the SCT expression matrix and,
-when reduced `n_subgroup` filtering is enabled, the read-only log-expression
-GEP reference matrix.
+high enough for the SCT reference. Parallel runs create a unique
+`simutme-candidates-*` temporary directory under the dataset result directory,
+or under its `simulation_for_stat` subdirectory in statistics-only mode. The
+output filesystem must have space for a shared SCT expression matrix, the
+log-expression GEP reference when subgroup filtering is active, and simulation
+outputs. The temporary directory is removed after workers finish or a handled
+error. Forced termination or filesystem errors can leave it behind; verify
+that no run is using it before removing it manually.
 For parallel Dirichlet batches, `dirichlet_sampling_seed` controls fraction
 draws when set; otherwise the fraction stream is derived from
 `mixed_candidate_seed`. The candidate seed controls SCT-profile sampling and

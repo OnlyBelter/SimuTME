@@ -171,10 +171,16 @@ An exclusive lock prevents two parallel runs from writing the same target.
 After a forced termination, verify that no run is active before removing a
 stale `.parallel.lock` file.
 
-Workers share a temporary memory-mapped copy of the eager SCT matrix. Set
-`TMPDIR` to a filesystem with enough free space for this copy, in addition to
-the RAM needed by the parent and per-worker candidate batches. PCA-space
-`median_gep` also keeps a copy of the fitted PCA state in each worker.
+Workers share a temporary memory-mapped copy of the eager SCT matrix in a
+unique `simutme-candidates-*` directory under the dataset result directory.
+Statistics-only runs use its `simulation_for_stat` subdirectory. Subgroup
+filtering also stores a shared log-expression GEP reference there. The output
+filesystem must have enough free space for these matrices and the simulation
+outputs, in addition to the RAM needed by the parent and per-worker batches.
+PCA-space `median_gep` also keeps a copy of the fitted PCA state in each worker.
+The temporary directory is removed after workers finish or a handled error.
+Forced termination or filesystem errors can leave it behind; verify that no
+run is using it before removing it manually.
 
 ### Mixed filtering parameters
 

@@ -133,6 +133,56 @@ def test_parallel_statistics_are_worker_count_independent(stat_case):
     assert len([p for p in Path(config.simu_bulk_dir).rglob("*") if p.is_file()]) == 2
 
 
+def test_parallel_statistics_shared_matrices_are_local_and_removed(stat_case, monkeypatch):
+    config, params = stat_case
+    params.update(mixed_candidate_workers=1, mixed_candidate_seed=42)
+    stored = []
+    original = parallel._store_shared_matrix
+
+    def record_matrix(*args, **kwargs):
+        path = original(*args, **kwargs)
+        assert path.exists()
+        stored.append(path)
+        return path
+
+    monkeypatch.setattr(parallel, "_store_shared_matrix", record_matrix)
+    summary = Path(workflow.run_bulk_simulation("local-stat", params, config))
+
+    assert [path.name for path in stored] == [
+        "sct-expression.npy", "gep-reference-log.npy",
+    ]
+    assert all(path.parent.parent == summary.parent for path in stored)
+    assert len({path.parent for path in stored}) == 1
+    assert stored[0].parent.name.startswith("simutme-candidates-")
+    assert not stored[0].parent.exists()
+    assert [path for path in Path(config.simu_bulk_dir).rglob("*") if path.is_file()] == [
+        summary,
+    ]
+
+
+def test_parallel_statistics_cleans_up_after_matrix_error(stat_case, monkeypatch):
+    config, params = stat_case
+    params.update(mixed_candidate_workers=1, mixed_candidate_seed=42)
+    stored = []
+    original = parallel._store_shared_matrix
+
+    def fail_after_reference(*args, **kwargs):
+        path = original(*args, **kwargs)
+        stored.append(path)
+        if path.name == "gep-reference-log.npy":
+            raise OSError("simulated reference write error")
+        return path
+
+    monkeypatch.setattr(parallel, "_store_shared_matrix", fail_after_reference)
+    with pytest.raises(OSError, match="simulated reference write error"):
+        workflow.run_bulk_simulation("failed-stat", params, config)
+
+    assert len(stored) == 2
+    assert stored[0].parent.parent.name == "simulation_for_stat"
+    assert not stored[0].parent.exists()
+    assert not [path for path in Path(config.simu_bulk_dir).rglob("*") if path.is_file()]
+
+
 @pytest.mark.parametrize("max_batches", [0, -1, True, 1.5, "1"])
 def test_statistics_rejects_invalid_batch_limit(stat_case, max_batches):
     config, params = stat_case

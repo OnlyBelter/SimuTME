@@ -85,6 +85,79 @@ def setup_parallel(tmp_path, monkeypatch):
     return create
 
 
+@pytest.mark.parametrize("n_subgroup", [None, 2])
+def test_parallel_shared_matrices_use_dataset_directory(setup_parallel, monkeypatch, n_subgroup):
+    generator, config = setup_parallel(
+        "local-matrices", method="median_gep", n_subgroup=n_subgroup,
+    )
+    stored = []
+    original = parallel._store_shared_matrix
+
+    def record_matrix(*args, **kwargs):
+        path = original(*args, **kwargs)
+        assert path.exists()
+        stored.append(path)
+        return path
+
+    monkeypatch.setattr(parallel, "_store_shared_matrix", record_matrix)
+    generator.generate_gep(config)
+
+    assert [path.name for path in stored] == (
+        ["sct-expression.npy", "gep-reference-log.npy"]
+        if n_subgroup else ["sct-expression.npy"]
+    )
+    assert all(path.parent.parent == config.filtering_space.result_dir for path in stored)
+    assert len({path.parent for path in stored}) == 1
+    assert stored[0].parent.name.startswith("simutme-candidates-")
+    assert not stored[0].parent.exists()
+
+
+@pytest.mark.parametrize("failed_matrix", ["sct-expression.npy", "gep-reference-log.npy"])
+def test_parallel_insufficient_space_reports_location_and_cleans_up(
+        setup_parallel, monkeypatch, failed_matrix):
+    generator, config = setup_parallel(
+        "low-space", method="median_gep", n_subgroup=2,
+    )
+    original = parallel._store_shared_matrix
+    checked = []
+    required_bytes = []
+
+    def limited_storage(source, directory, filename="sct-expression.npy"):
+        checked.append(Path(directory))
+        if filename == failed_matrix:
+            dtype = np.result_type(*source.dtypes)
+            required_bytes.append(source.shape[0] * source.shape[1] * dtype.itemsize + 1024 * 1024)
+            monkeypatch.setattr(
+                parallel.shutil, "disk_usage",
+                lambda path: SimpleNamespace(free=123),
+            )
+        return original(source, directory, filename)
+
+    monkeypatch.setattr(parallel, "_store_shared_matrix", limited_storage)
+    with pytest.raises(OSError) as error:
+        generator.generate_gep(config)
+
+    assert str(checked[-1]) in str(error.value)
+    assert failed_matrix in str(error.value)
+    assert "bytes available" in str(error.value)
+    assert "123 bytes available" in str(error.value)
+    assert f"requires at least {required_bytes[0]} bytes" in str(error.value)
+    assert not checked[-1].exists()
+
+
+def test_parallel_leaves_old_temporary_directories_untouched(setup_parallel):
+    generator, config = setup_parallel("old-matrices")
+    leftover = config.filtering_space.result_dir / "simutme-candidates-old"
+    leftover.mkdir(parents=True)
+    old_matrix = leftover / "sct-expression.npy"
+    old_matrix.write_text("leave untouched")
+
+    generator.generate_gep(config)
+
+    assert old_matrix.read_text() == "leave untouched"
+    assert list(config.filtering_space.result_dir.glob("simutme-candidates-*")) == [leftover]
+
+
 @pytest.mark.parametrize(
     "method,quantiles", [("mgep", (None, 1.0)), ("median_gep", (0.05, 0.95))],
 )
@@ -619,6 +692,7 @@ def test_parallel_worker_failure_preserves_checkpoint(setup_parallel):
                              / "parallel_candidate_checkpoint.json").read_text())
     assert checkpoint["next_batch"] == checkpoint["accepted"] == 0
     assert all(size is None for size in checkpoint["output_sizes"].values())
+    assert not list(generator.filtering_space.result_dir.glob("simutme-candidates-*"))
 
 
 def test_parallel_refuses_existing_run_lock(setup_parallel):

@@ -1012,7 +1012,13 @@ Generate simulated bulk gene expression profiles (GEPs) by aggregating single-ce
             self.generated_cell_fraction_fp, self.sampled_sc_cell_id_file_path,
             self.ref_neighbor_counter_fp, *space.additional_artifacts,
         ]
-        result_artifacts = list(space.result_dir.iterdir()) if space.result_dir.exists() else []
+        result_artifacts = (
+            [
+                path for path in space.result_dir.iterdir()
+                if not (path.is_dir() and path.name.startswith("simutme-candidates-"))
+            ]
+            if space.result_dir.exists() else []
+        )
         if any(path.exists() for path in artifacts) or result_artifacts:
             metadata = validate_metadata(self.filtering_metadata_path, space.identity)
             space.restore_stats(metadata.get("stats", {}))
